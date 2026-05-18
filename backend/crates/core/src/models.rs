@@ -350,6 +350,22 @@ pub struct InAppNotification {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct NotificationOutboxItem {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub event_id: Uuid,
+    pub status: String,
+    pub attempt_count: i32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub locked_by: Option<String>,
+    pub last_error: Option<String>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct InAppNotificationQuery {
     pub unread_only: Option<bool>,
@@ -411,9 +427,9 @@ pub struct AddressEventDraft {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateBalanceSnapshotRequest, EventStatus, NotificationStatus, NotifyEventTask,
-        ProviderChainStatus, ProviderStatus, ProviderStatusItem, QueueStatus, ScanAddressTask,
-        ScanCursor, ScanStatus, SystemStatus,
+        CreateBalanceSnapshotRequest, EventStatus, NotificationOutboxItem, NotificationStatus,
+        NotifyEventTask, ProviderChainStatus, ProviderStatus, ProviderStatusItem, QueueStatus,
+        ScanAddressTask, ScanCursor, ScanStatus, SystemStatus,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
@@ -497,6 +513,36 @@ mod tests {
         assert_eq!(decoded.notify_queue_depth, None);
         assert_eq!(decoded.queue_errors, vec!["redis unavailable"]);
         assert!(payload.contains("\"scan_queue_depth\":null"));
+    }
+
+    #[test]
+    fn notification_outbox_item_round_trips_as_json() {
+        let item = NotificationOutboxItem {
+            id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            event_id: Uuid::from_u128(3),
+            status: "processing".to_string(),
+            attempt_count: 2,
+            next_attempt_at: Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap(),
+            locked_at: Some(Utc.with_ymd_and_hms(2026, 5, 18, 12, 1, 0).unwrap()),
+            locked_by: Some("notifier-test".to_string()),
+            last_error: Some("temporary failure".to_string()),
+            delivered_at: None,
+            created_at: Utc.with_ymd_and_hms(2026, 5, 18, 11, 59, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 5, 18, 12, 1, 0).unwrap(),
+        };
+
+        let payload = serde_json::to_string(&item).expect("serialize notification outbox item");
+        let decoded: NotificationOutboxItem =
+            serde_json::from_str(&payload).expect("deserialize notification outbox item");
+
+        assert_eq!(decoded.id, item.id);
+        assert_eq!(decoded.tenant_id, item.tenant_id);
+        assert_eq!(decoded.event_id, item.event_id);
+        assert_eq!(decoded.status, "processing");
+        assert_eq!(decoded.attempt_count, 2);
+        assert_eq!(decoded.locked_by.as_deref(), Some("notifier-test"));
+        assert!(payload.contains("\"last_error\":\"temporary failure\""));
     }
 
     #[test]
