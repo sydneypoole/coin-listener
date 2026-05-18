@@ -10,6 +10,8 @@ pub enum AppError {
     Database(String),
     #[error("redis error: {0}")]
     Redis(String),
+    #[error("external notification error: {0}")]
+    ExternalNotification(String),
     #[error("not found: {0}")]
     NotFound(String),
     #[error("validation error: {0}")]

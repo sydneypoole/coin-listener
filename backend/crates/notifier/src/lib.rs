@@ -1,3 +1,5 @@
+pub mod external;
+
 use std::{
     cmp::Ordering,
     collections::HashMap,

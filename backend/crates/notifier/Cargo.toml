@@ -9,7 +9,12 @@ anyhow.workspace = true
 chrono.workspace = true
 coin-listener-core = { path = "../core" }
 coin-listener-storage = { path = "../storage" }
+hmac = "0.12"
 redis.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
