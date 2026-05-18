@@ -322,9 +322,10 @@ impl IntoResponse for ApiError {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
-            AppError::Config(_) | AppError::Database(_) | AppError::Redis(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            AppError::Config(_)
+            | AppError::Database(_)
+            | AppError::ExternalNotification(_)
+            | AppError::Redis(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         let body = Json(ErrorResponse {
