@@ -1,0 +1,14 @@
+/target
+/backend/target
+/frontend/node_modules
+/frontend/dist
+.env
+.env.local
+*.log
+.DS_Store
+.idea
+.vscode
+.cargo-home/
+.npm-cache/
+.claude/
+.cursor/

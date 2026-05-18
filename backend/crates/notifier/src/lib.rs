@@ -1,0 +1,638 @@
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        Arc,
+    },
+};
+
+use chrono::{DateTime, Utc};
+use coin_listener_core::{
+    models::{AddressEvent, NotificationChannel, NotificationRule, NotifyEventTask},
+    AppResult,
+};
+use coin_listener_storage::{notifications, notify_queue::NotifyQueue};
+use redis::aio::MultiplexedConnection;
+use sqlx::PgPool;
+use tracing::{info, warn};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyChannelDecision {
+    InApp,
+    Skipped { last_error: &'static str },
+}
+
+#[derive(Debug, Clone)]
+pub enum ResolvedNotifyChannel {
+    Active(NotificationChannel),
+    Inactive(uuid::Uuid),
+    Missing(uuid::Uuid),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyDeliveryPlan {
+    pub channel_id: uuid::Uuid,
+    pub channel_type: Option<String>,
+    pub status: &'static str,
+    pub last_error: Option<&'static str>,
+    pub create_in_app: bool,
+}
+
+pub const DELIVERY_STATUS_SENT: &str = "sent";
+pub const DELIVERY_STATUS_SKIPPED: &str = "skipped";
+pub const DELIVERY_STATUS_FAILED: &str = "failed";
+pub const NOT_IMPLEMENTED_CHANNEL_ERROR: &str = "channel type not implemented";
+pub const UNAVAILABLE_CHANNEL_ERROR: &str = "channel unavailable";
+pub const MISSING_CHANNEL_ERROR_PREFIX: &str = "channel missing";
+
+pub fn notifier_shutdown_requested(shutdown: &AtomicBool) -> bool {
+    shutdown.load(AtomicOrdering::Relaxed)
+}
+
+pub fn notification_rule_matches_event(rule: &NotificationRule, event: &AddressEvent) -> bool {
+    if rule.tenant_id != event.tenant_id || !rule.enabled {
+        return false;
+    }
+    if rule
+        .chain_id
+        .is_some_and(|chain_id| chain_id != event.chain_id)
+    {
+        return false;
+    }
+    if rule
+        .address_id
+        .is_some_and(|address_id| address_id != event.address_id)
+    {
+        return false;
+    }
+    if rule
+        .asset_id
+        .is_some_and(|asset_id| asset_id != event.asset_id)
+    {
+        return false;
+    }
+    if rule
+        .event_type
+        .as_ref()
+        .is_some_and(|event_type| event_type != &event.event_type)
+    {
+        return false;
+    }
+    if rule
+        .is_transfer
+        .is_some_and(|is_transfer| is_transfer != event.is_transfer)
+    {
+        return false;
+    }
+    if rule
+        .direction
+        .as_ref()
+        .is_some_and(|direction| direction != &event.direction)
+    {
+        return false;
+    }
+
+    amount_raw_meets_minimum(event.amount_raw.as_deref(), rule.min_amount_raw.as_deref())
+}
+
+pub fn amount_raw_meets_minimum(amount_raw: Option<&str>, min_amount_raw: Option<&str>) -> bool {
+    let Some(min_amount_raw) = min_amount_raw else {
+        return true;
+    };
+    let Some(amount_raw) = amount_raw else {
+        return false;
+    };
+    let Some(amount) = normalize_non_negative_integer(amount_raw) else {
+        return false;
+    };
+    let Some(minimum) = normalize_non_negative_integer(min_amount_raw) else {
+        return false;
+    };
+
+    match amount.len().cmp(&minimum.len()) {
+        Ordering::Greater => true,
+        Ordering::Less => false,
+        Ordering::Equal => amount >= minimum,
+    }
+}
+
+pub fn build_in_app_notification_content(event: &AddressEvent) -> (String, String) {
+    let title = format!("{} {}", event.event_type, event.direction);
+    let amount = event
+        .amount_decimal
+        .as_deref()
+        .or(event.amount_raw.as_deref())
+        .unwrap_or("-");
+    let tx_hash = event.tx_hash.as_deref().unwrap_or("-");
+    let body = format!(
+        "address: {}; asset: {}; amount: {}; tx: {}",
+        event.address_id, event.asset_id, amount, tx_hash
+    );
+
+    (title, body)
+}
+
+pub fn notify_channel_decision(channel_type: &str) -> NotifyChannelDecision {
+    match channel_type {
+        "in_app" => NotifyChannelDecision::InApp,
+        _ => NotifyChannelDecision::Skipped {
+            last_error: NOT_IMPLEMENTED_CHANNEL_ERROR,
+        },
+    }
+}
+
+pub fn build_delivery_plan(channel: &NotificationChannel) -> NotifyDeliveryPlan {
+    match notify_channel_decision(&channel.channel_type) {
+        NotifyChannelDecision::InApp => NotifyDeliveryPlan {
+            channel_id: channel.id,
+            channel_type: Some(channel.channel_type.clone()),
+            status: DELIVERY_STATUS_SENT,
+            last_error: None,
+            create_in_app: true,
+        },
+        NotifyChannelDecision::Skipped { last_error } => NotifyDeliveryPlan {
+            channel_id: channel.id,
+            channel_type: Some(channel.channel_type.clone()),
+            status: DELIVERY_STATUS_SKIPPED,
+            last_error: Some(last_error),
+            create_in_app: false,
+        },
+    }
+}
+
+pub fn build_unavailable_channel_delivery_plan(channel_id: uuid::Uuid) -> NotifyDeliveryPlan {
+    NotifyDeliveryPlan {
+        channel_id,
+        channel_type: None,
+        status: DELIVERY_STATUS_SKIPPED,
+        last_error: Some(UNAVAILABLE_CHANNEL_ERROR),
+        create_in_app: false,
+    }
+}
+
+pub fn missing_channel_error(channel_id: uuid::Uuid) -> String {
+    format!("{MISSING_CHANNEL_ERROR_PREFIX}: {channel_id}")
+}
+
+pub fn delivery_sent_at(status: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    (status == DELIVERY_STATUS_SENT).then_some(now)
+}
+
+pub async fn process_notify_task(
+    pool: &PgPool,
+    task: NotifyEventTask,
+    now: DateTime<Utc>,
+) -> AppResult<usize> {
+    let event = notifications::get_address_event(pool, task.event_id, task.tenant_id).await?;
+    let rules = notifications::list_enabled_notification_rules(pool, task.tenant_id).await?;
+    let mut deliveries = 0usize;
+
+    for rule in rules
+        .iter()
+        .filter(|rule| notification_rule_matches_event(rule, &event))
+    {
+        let channels = match resolve_rule_channels(pool, task.tenant_id, rule).await {
+            Ok(channels) => channels,
+            Err(error) => {
+                warn!(
+                    rule_id = %rule.id,
+                    event_id = %task.event_id,
+                    error = %error,
+                    "failed to resolve notification rule channels"
+                );
+                continue;
+            }
+        };
+
+        for channel in channels {
+            if let Err(error) =
+                process_resolved_channel(pool, &task, &event, rule, channel, now).await
+            {
+                warn!(
+                    rule_id = %rule.id,
+                    event_id = %task.event_id,
+                    error = %error,
+                    "failed to process notification channel"
+                );
+            }
+            deliveries += 1;
+        }
+    }
+
+    Ok(deliveries)
+}
+
+async fn resolve_rule_channels(
+    pool: &PgPool,
+    tenant_id: uuid::Uuid,
+    rule: &NotificationRule,
+) -> AppResult<Vec<ResolvedNotifyChannel>> {
+    if rule.channel_ids.is_empty() {
+        return Ok(vec![ResolvedNotifyChannel::Active(
+            notifications::get_or_create_default_in_app_channel(pool, tenant_id).await?,
+        )]);
+    }
+
+    let existing_channels =
+        notifications::list_channels_by_ids(pool, tenant_id, &rule.channel_ids).await?;
+    let active_channels =
+        notifications::list_active_channels_by_ids(pool, tenant_id, &rule.channel_ids).await?;
+
+    Ok(resolve_explicit_rule_channels(
+        rule.channel_ids.clone(),
+        existing_channels,
+        active_channels,
+    ))
+}
+
+pub fn resolve_explicit_rule_channels(
+    channel_ids: Vec<uuid::Uuid>,
+    existing_channels: Vec<NotificationChannel>,
+    active_channels: Vec<NotificationChannel>,
+) -> Vec<ResolvedNotifyChannel> {
+    let existing_ids = existing_channels
+        .into_iter()
+        .map(|channel| channel.id)
+        .collect::<std::collections::HashSet<_>>();
+    let active_by_id: HashMap<uuid::Uuid, NotificationChannel> = active_channels
+        .into_iter()
+        .map(|channel| (channel.id, channel))
+        .collect();
+
+    channel_ids
+        .into_iter()
+        .map(|channel_id| {
+            if let Some(channel) = active_by_id.get(&channel_id) {
+                return ResolvedNotifyChannel::Active(channel.clone());
+            }
+            if existing_ids.contains(&channel_id) {
+                ResolvedNotifyChannel::Inactive(channel_id)
+            } else {
+                ResolvedNotifyChannel::Missing(channel_id)
+            }
+        })
+        .collect()
+}
+
+async fn process_resolved_channel(
+    pool: &PgPool,
+    task: &NotifyEventTask,
+    event: &AddressEvent,
+    rule: &NotificationRule,
+    channel: ResolvedNotifyChannel,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    match channel {
+        ResolvedNotifyChannel::Active(channel) => {
+            process_channel_delivery(pool, task, event, rule, build_delivery_plan(&channel), now)
+                .await
+        }
+        ResolvedNotifyChannel::Inactive(channel_id) => {
+            process_channel_delivery(
+                pool,
+                task,
+                event,
+                rule,
+                build_unavailable_channel_delivery_plan(channel_id),
+                now,
+            )
+            .await
+        }
+        ResolvedNotifyChannel::Missing(channel_id) => {
+            create_skipped_missing_channel_delivery(pool, task, rule, channel_id).await
+        }
+    }
+}
+
+async fn create_skipped_missing_channel_delivery(
+    pool: &PgPool,
+    task: &NotifyEventTask,
+    rule: &NotificationRule,
+    channel_id: uuid::Uuid,
+) -> AppResult<()> {
+    notifications::create_notification_delivery(
+        pool,
+        task.tenant_id,
+        task.event_id,
+        Some(rule.id),
+        None,
+        DELIVERY_STATUS_SKIPPED,
+        task.attempt as i32,
+        Some(missing_channel_error(channel_id)),
+        None,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn process_channel_delivery(
+    pool: &PgPool,
+    task: &NotifyEventTask,
+    event: &AddressEvent,
+    rule: &NotificationRule,
+    plan: NotifyDeliveryPlan,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    if plan.create_in_app {
+        let (title, body) = build_in_app_notification_content(event);
+        if let Err(error) = notifications::create_sent_in_app_delivery(
+            pool,
+            task.tenant_id,
+            task.event_id,
+            Some(rule.id),
+            Some(plan.channel_id),
+            task.attempt as i32,
+            now,
+            title,
+            body,
+        )
+        .await
+        {
+            warn!(
+                channel_id = %plan.channel_id,
+                error = %error,
+                "failed to create sent in-app delivery atomically"
+            );
+            notifications::create_notification_delivery(
+                pool,
+                task.tenant_id,
+                task.event_id,
+                Some(rule.id),
+                Some(plan.channel_id),
+                DELIVERY_STATUS_FAILED,
+                task.attempt as i32,
+                Some(error.to_string()),
+                None,
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
+    notifications::create_notification_delivery(
+        pool,
+        task.tenant_id,
+        task.event_id,
+        Some(rule.id),
+        Some(plan.channel_id),
+        plan.status,
+        task.attempt as i32,
+        plan.last_error.map(str::to_string),
+        delivery_sent_at(plan.status, now),
+    )
+    .await?;
+
+    Ok(())
+}
+
+pub async fn run_notifier(
+    pool: PgPool,
+    mut redis: MultiplexedConnection,
+    notify_queue: NotifyQueue,
+    shutdown: Arc<AtomicBool>,
+) -> AppResult<()> {
+    while !notifier_shutdown_requested(&shutdown) {
+        match notify_queue.dequeue(&mut redis, 5).await {
+            Ok(Some(task)) => {
+                let task_id = task.task_id;
+                let event_id = task.event_id;
+                let tenant_id = task.tenant_id;
+                match process_notify_task(&pool, task, Utc::now()).await {
+                    Ok(deliveries) => info!(
+                        task_id = %task_id,
+                        event_id = %event_id,
+                        tenant_id = %tenant_id,
+                        deliveries,
+                        "notify task processed"
+                    ),
+                    Err(error) => warn!(
+                        task_id = %task_id,
+                        event_id = %event_id,
+                        tenant_id = %tenant_id,
+                        error = %error,
+                        "notify task failed"
+                    ),
+                }
+            }
+            Ok(None) => {}
+            Err(error) => warn!(error = %error, "discarded invalid or failed notify queue message"),
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_non_negative_integer(value: &str) -> Option<&str> {
+    if value.is_empty() || !value.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let normalized = value.trim_start_matches('0');
+    if normalized.is_empty() {
+        Some("0")
+    } else {
+        Some(normalized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use chrono::{TimeZone, Utc};
+    use coin_listener_core::models::{AddressEvent, NotificationChannel, NotificationRule};
+
+    use crate::{
+        amount_raw_meets_minimum, build_delivery_plan, build_in_app_notification_content,
+        build_unavailable_channel_delivery_plan, delivery_sent_at, missing_channel_error,
+        notification_rule_matches_event, notifier_shutdown_requested, notify_channel_decision,
+        resolve_explicit_rule_channels, NotifyChannelDecision, ResolvedNotifyChannel,
+        DELIVERY_STATUS_SENT, DELIVERY_STATUS_SKIPPED, MISSING_CHANNEL_ERROR_PREFIX,
+        UNAVAILABLE_CHANNEL_ERROR,
+    };
+
+    fn uuid(value: u128) -> sqlx::types::Uuid {
+        sqlx::types::Uuid::from_u128(value)
+    }
+
+    fn event() -> AddressEvent {
+        AddressEvent {
+            id: uuid(1),
+            tenant_id: uuid(2),
+            chain_id: uuid(3),
+            address_id: uuid(4),
+            asset_id: uuid(5),
+            event_type: "transfer".to_string(),
+            direction: "in".to_string(),
+            is_transfer: true,
+            tx_hash: Some("0xabc".to_string()),
+            log_index: Some(0),
+            block_number: Some(100),
+            block_hash: None,
+            confirmations: 12,
+            from_address: Some("0xfrom".to_string()),
+            to_address: Some("0xto".to_string()),
+            amount_raw: Some("1000".to_string()),
+            amount_decimal: Some("0.000000000000001".to_string()),
+            balance_before_raw: None,
+            balance_after_raw: None,
+            balance_delta_raw: None,
+            metadata: Default::default(),
+            detected_at: Utc.with_ymd_and_hms(2026, 5, 17, 17, 0, 0).unwrap(),
+            created_at: Utc.with_ymd_and_hms(2026, 5, 17, 17, 0, 1).unwrap(),
+        }
+    }
+
+    fn channel(channel_type: &str) -> NotificationChannel {
+        channel_with_id(uuid(20), channel_type)
+    }
+
+    fn channel_with_id(id: sqlx::types::Uuid, channel_type: &str) -> NotificationChannel {
+        NotificationChannel {
+            id,
+            tenant_id: uuid(2),
+            channel_type: channel_type.to_string(),
+            name: format!("{channel_type} channel"),
+            config: Default::default(),
+            status: "active".to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 5, 17, 16, 30, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 5, 17, 16, 30, 0).unwrap(),
+        }
+    }
+
+    fn rule() -> NotificationRule {
+        NotificationRule {
+            id: uuid(10),
+            tenant_id: uuid(2),
+            name: "Inbound transfers".to_string(),
+            chain_id: Some(uuid(3)),
+            address_id: Some(uuid(4)),
+            asset_id: Some(uuid(5)),
+            event_type: Some("transfer".to_string()),
+            is_transfer: Some(true),
+            min_amount_raw: Some("1000".to_string()),
+            direction: Some("in".to_string()),
+            channel_ids: vec![],
+            enabled: true,
+            created_at: Utc.with_ymd_and_hms(2026, 5, 17, 16, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 5, 17, 16, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn rule_matches_when_all_filters_match() {
+        assert!(notification_rule_matches_event(&rule(), &event()));
+    }
+
+    #[test]
+    fn rule_does_not_match_when_amount_is_below_minimum() {
+        let mut event = event();
+        event.amount_raw = Some("999".to_string());
+
+        assert!(!notification_rule_matches_event(&rule(), &event));
+    }
+
+    #[test]
+    fn amount_comparison_handles_large_integer_strings() {
+        assert!(amount_raw_meets_minimum(
+            Some("100000000000000000000"),
+            Some("99999999999999999999")
+        ));
+        assert!(amount_raw_meets_minimum(Some("00100"), Some("100")));
+        assert!(!amount_raw_meets_minimum(Some("99"), Some("100")));
+        assert!(!amount_raw_meets_minimum(None, Some("1")));
+        assert!(!amount_raw_meets_minimum(Some("abc"), Some("1")));
+    }
+
+    #[test]
+    fn in_app_content_uses_stable_event_fields() {
+        let (title, body) = build_in_app_notification_content(&event());
+
+        assert_eq!(title, "transfer in");
+        assert!(body.contains("address: 00000000-0000-0000-0000-000000000004"));
+        assert!(body.contains("asset: 00000000-0000-0000-0000-000000000005"));
+        assert!(body.contains("amount: 0.000000000000001"));
+        assert!(body.contains("tx: 0xabc"));
+    }
+
+    #[test]
+    fn unsupported_channel_is_skipped() {
+        assert_eq!(
+            notify_channel_decision("telegram"),
+            NotifyChannelDecision::Skipped {
+                last_error: "channel type not implemented"
+            }
+        );
+    }
+
+    #[test]
+    fn in_app_channel_delivery_plan_creates_sent_notification() {
+        let plan = build_delivery_plan(&channel("in_app"));
+
+        assert_eq!(plan.status, DELIVERY_STATUS_SENT);
+        assert_eq!(plan.last_error, None);
+        assert!(plan.create_in_app);
+    }
+
+    #[test]
+    fn unsupported_channel_delivery_plan_is_skipped_without_in_app() {
+        let plan = build_delivery_plan(&channel("telegram"));
+
+        assert_eq!(plan.status, DELIVERY_STATUS_SKIPPED);
+        assert_eq!(plan.last_error, Some("channel type not implemented"));
+        assert!(!plan.create_in_app);
+    }
+
+    #[test]
+    fn sent_at_is_only_set_for_sent_delivery() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 17, 18, 30, 0).unwrap();
+
+        assert_eq!(delivery_sent_at(DELIVERY_STATUS_SENT, now), Some(now));
+        assert_eq!(delivery_sent_at(DELIVERY_STATUS_SKIPPED, now), None);
+    }
+
+    #[test]
+    fn explicit_channel_resolution_preserves_inactive_and_missing_audit_entries() {
+        let inactive = channel_with_id(uuid(20), "in_app");
+        let active = channel_with_id(uuid(21), "in_app");
+        let resolved = resolve_explicit_rule_channels(
+            vec![uuid(20), uuid(21), uuid(22)],
+            vec![inactive.clone(), active.clone()],
+            vec![active.clone()],
+        );
+
+        assert_eq!(resolved.len(), 3);
+        assert!(matches!(resolved[0], ResolvedNotifyChannel::Inactive(id) if id == uuid(20)));
+        match &resolved[1] {
+            ResolvedNotifyChannel::Active(channel) => assert_eq!(channel.id, active.id),
+            other => panic!("expected active channel, got {other:?}"),
+        }
+        assert!(matches!(resolved[2], ResolvedNotifyChannel::Missing(id) if id == uuid(22)));
+    }
+
+    #[test]
+    fn missing_channel_error_includes_channel_id_for_audit() {
+        let error = missing_channel_error(uuid(23));
+
+        assert!(error.starts_with(MISSING_CHANNEL_ERROR_PREFIX));
+        assert!(error.contains("00000000-0000-0000-0000-000000000017"));
+    }
+
+    #[test]
+    fn unavailable_channel_delivery_plan_is_skipped_with_audit_error() {
+        let plan = build_unavailable_channel_delivery_plan(uuid(22));
+
+        assert_eq!(plan.channel_id, uuid(22));
+        assert_eq!(plan.status, DELIVERY_STATUS_SKIPPED);
+        assert_eq!(plan.last_error, Some(UNAVAILABLE_CHANNEL_ERROR));
+        assert!(!plan.create_in_app);
+    }
+
+    #[test]
+    fn set_shutdown_flag_stops_notifier_before_next_dequeue() {
+        let shutdown = AtomicBool::new(true);
+
+        assert!(notifier_shutdown_requested(&shutdown));
+    }
+}

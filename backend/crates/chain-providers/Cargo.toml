@@ -1,0 +1,14 @@
+[package]
+name = "coin-listener-chain-providers"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+coin-listener-core = { path = "../core" }
+num-bigint.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+sha2 = "0.10"

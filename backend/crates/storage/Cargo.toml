@@ -1,0 +1,15 @@
+[package]
+name = "coin-listener-storage"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+coin-listener-chain-providers = { path = "../chain-providers" }
+coin-listener-core = { path = "../core" }
+redis.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tracing.workspace = true
+uuid.workspace = true

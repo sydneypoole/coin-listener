@@ -1,0 +1,185 @@
+import { useMemo, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Banner, Button, Card, Form, Select, Space, Table, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { listAssets, listChains, listEvents, listWatchedAddresses, scanAddress } from '../api/client';
+import type { AddressEvent, EventQuery } from '../api/types';
+
+const { Text } = Typography;
+
+type FilterForm = {
+  chain_id?: string;
+  address_id?: string;
+  asset_id?: string;
+  event_type?: string;
+  direction?: string;
+  is_transfer?: string;
+};
+
+const eventTypeOptions = [
+  { label: 'transfer', value: 'transfer' },
+  { label: 'balance_change', value: 'balance_change' },
+  { label: 'fee_only_change', value: 'fee_only_change' },
+  { label: 'contract_interaction', value: 'contract_interaction' },
+  { label: 'unknown', value: 'unknown' },
+];
+
+const directionOptions = [
+  { label: 'in', value: 'in' },
+  { label: 'out', value: 'out' },
+  { label: 'self', value: 'self' },
+  { label: 'unknown', value: 'unknown' },
+];
+
+export function EventsPage() {
+  const [filters, setFilters] = useState<EventQuery>({});
+  const [scanAddressId, setScanAddressId] = useState<string>();
+  const queryClient = useQueryClient();
+
+  const eventsQuery = useQuery({
+    queryKey: ['events', filters],
+    queryFn: () => listEvents(filters),
+  });
+  const chainsQuery = useQuery({ queryKey: ['chains'], queryFn: listChains });
+  const assetsQuery = useQuery({ queryKey: ['assets'], queryFn: listAssets });
+  const addressesQuery = useQuery({ queryKey: ['addresses'], queryFn: listWatchedAddresses });
+
+  const chainMap = useMemo(() => new Map((chainsQuery.data ?? []).map(chain => [chain.id, chain.name])), [chainsQuery.data]);
+  const evmChainIds = useMemo(
+    () => new Set((chainsQuery.data ?? []).filter(chain => chain.chain_type === 'evm').map(chain => chain.id)),
+    [chainsQuery.data],
+  );
+  const evmAddresses = useMemo(
+    () => (addressesQuery.data ?? []).filter(address => evmChainIds.has(address.chain_id)),
+    [addressesQuery.data, evmChainIds],
+  );
+  const assetMap = useMemo(() => new Map((assetsQuery.data ?? []).map(asset => [asset.id, asset.symbol])), [assetsQuery.data]);
+  const addressMap = useMemo(() => new Map((addressesQuery.data ?? []).map(address => [address.id, address])), [addressesQuery.data]);
+
+  const scanMutation = useMutation({
+    mutationFn: scanAddress,
+    onSuccess: () => {
+      Toast.success('已生成模拟事件');
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    },
+    onError: error => Toast.error(error instanceof Error ? error.message : '模拟扫描失败'),
+  });
+
+  function handleFilterSubmit(values: Record<string, unknown>) {
+    const form = values as FilterForm;
+    setFilters({
+      chain_id: form.chain_id,
+      address_id: form.address_id,
+      asset_id: form.asset_id,
+      event_type: form.event_type,
+      direction: form.direction,
+      is_transfer: form.is_transfer === undefined ? undefined : form.is_transfer === 'true',
+    });
+  }
+
+  function resetFilters(formApi: { reset: () => void }) {
+    formApi.reset();
+    setFilters({});
+  }
+
+  function renderAddress(addressId: string) {
+    const address = addressMap.get(addressId);
+    if (!address) return addressId;
+    return address.label ? `${address.label} / ${address.address}` : address.address;
+  }
+
+  return (
+    <Space vertical align="start" spacing={16} className="content-stack">
+      {eventsQuery.isError ? (
+        <Banner
+          type="danger"
+          title="事件列表加载失败"
+          description={eventsQuery.error instanceof Error ? eventsQuery.error.message : '请求失败'}
+        />
+      ) : null}
+
+      <Card title="事件筛选" className="filter-card">
+        <Form<FilterForm> layout="horizontal" onSubmit={handleFilterSubmit} labelPosition="left">
+          {({ formApi }) => (
+            <>
+          <Form.Select field="chain_id" label="链" showClear placeholder="全部链" filter>
+            {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}
+          </Form.Select>
+          <Form.Select field="address_id" label="地址" showClear placeholder="全部地址" filter>
+            {(addressesQuery.data ?? []).map(address => (
+              <Form.Select.Option key={address.id} value={address.id}>
+                {address.label ? `${address.label} / ${address.address}` : address.address}
+              </Form.Select.Option>
+            ))}
+          </Form.Select>
+          <Form.Select field="asset_id" label="资产" showClear placeholder="全部资产" filter>
+            {(assetsQuery.data ?? []).map(asset => <Form.Select.Option key={asset.id} value={asset.id}>{asset.symbol}</Form.Select.Option>)}
+          </Form.Select>
+          <Form.Select field="event_type" label="事件类型" showClear placeholder="全部类型" optionList={eventTypeOptions} />
+          <Form.Select field="direction" label="方向" showClear placeholder="全部方向" optionList={directionOptions} />
+          <Form.Select field="is_transfer" label="是否转账" showClear placeholder="全部">
+            <Form.Select.Option value="true">是</Form.Select.Option>
+            <Form.Select.Option value="false">否</Form.Select.Option>
+          </Form.Select>
+          <Space>
+            <Button htmlType="submit" type="primary">查询</Button>
+            <Button onClick={() => resetFilters(formApi)}>重置</Button>
+          </Space>
+            </>
+          )}
+        </Form>
+      </Card>
+
+      <Card title="开发模拟扫描" className="filter-card">
+        <Space>
+          <Select
+            value={scanAddressId}
+            onChange={value => setScanAddressId(value as string)}
+            showClear
+            filter
+            placeholder="选择监听地址"
+            style={{ width: 360 }}
+          >
+            {evmAddresses.map(address => (
+              <Select.Option key={address.id} value={address.id}>
+                {address.label ? `${address.label} / ${address.address}` : address.address}
+              </Select.Option>
+            ))}
+          </Select>
+          <Button
+            type="primary"
+            loading={scanMutation.isPending}
+            disabled={!scanAddressId}
+            onClick={() => scanAddressId && scanMutation.mutate(scanAddressId)}
+          >
+            生成模拟事件
+          </Button>
+          <Text type="tertiary">仅支持 EVM / Base 地址，用于无 RPC 凭据时打通事件链路。</Text>
+        </Space>
+      </Card>
+
+      <Card title="事件中心">
+        <Table<AddressEvent>
+          loading={eventsQuery.isLoading}
+          dataSource={eventsQuery.data ?? []}
+          rowKey="id"
+          pagination={{ pageSize: 10 }}
+          scroll={{ x: 1400 }}
+          columns={[
+            { title: '时间', dataIndex: 'created_at', width: 180, render: value => new Date(String(value)).toLocaleString() },
+            { title: '链', dataIndex: 'chain_id', width: 120, render: value => chainMap.get(String(value)) ?? String(value) },
+            { title: '地址', dataIndex: 'address_id', width: 280, render: value => renderAddress(String(value)) },
+            { title: '资产', dataIndex: 'asset_id', width: 100, render: value => assetMap.get(String(value)) ?? String(value) },
+            { title: '类型', dataIndex: 'event_type', width: 150, render: value => <Tag>{String(value)}</Tag> },
+            { title: '转账', dataIndex: 'is_transfer', width: 90, render: value => <Tag color={value ? 'green' : 'grey'}>{value ? '是' : '否'}</Tag> },
+            { title: '方向', dataIndex: 'direction', width: 90 },
+            { title: '金额', dataIndex: 'amount_decimal', width: 120, render: value => value ? String(value) : '-' },
+            { title: '余额变化', dataIndex: 'balance_delta_raw', width: 140, render: value => value ? String(value) : '-' },
+            { title: '确认数', dataIndex: 'confirmations', width: 90 },
+            { title: '通知状态', width: 100, render: () => <Tag color="grey">待接入</Tag> },
+            { title: '交易哈希', dataIndex: 'tx_hash', width: 260, ellipsis: { showTitle: true }, render: value => value ? String(value) : '-' },
+          ]}
+        />
+      </Card>
+    </Space>
+  );
+}
