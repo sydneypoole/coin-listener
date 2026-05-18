@@ -336,6 +336,11 @@ pub struct NotificationDelivery {
     pub last_error: Option<String>,
     pub sent_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub channel_type: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub provider_message_id: Option<String>,
+    pub provider_status_code: Option<i32>,
+    pub provider_response: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -427,9 +432,9 @@ pub struct AddressEventDraft {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateBalanceSnapshotRequest, EventStatus, NotificationOutboxItem, NotificationStatus,
-        NotifyEventTask, ProviderChainStatus, ProviderStatus, ProviderStatusItem, QueueStatus,
-        ScanAddressTask, ScanCursor, ScanStatus, SystemStatus,
+        CreateBalanceSnapshotRequest, EventStatus, NotificationDelivery, NotificationOutboxItem,
+        NotificationStatus, NotifyEventTask, ProviderChainStatus, ProviderStatus,
+        ProviderStatusItem, QueueStatus, ScanAddressTask, ScanCursor, ScanStatus, SystemStatus,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
@@ -513,6 +518,40 @@ mod tests {
         assert_eq!(decoded.notify_queue_depth, None);
         assert_eq!(decoded.queue_errors, vec!["redis unavailable"]);
         assert!(payload.contains("\"scan_queue_depth\":null"));
+    }
+
+    #[test]
+    fn notification_delivery_round_trips_external_metadata() {
+        let delivery = NotificationDelivery {
+            id: Uuid::from_u128(11),
+            tenant_id: Uuid::from_u128(12),
+            event_id: Uuid::from_u128(13),
+            rule_id: Some(Uuid::from_u128(14)),
+            channel_id: Some(Uuid::from_u128(15)),
+            status: "sent".to_string(),
+            attempt_count: 1,
+            last_error: None,
+            sent_at: Some(Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap()),
+            created_at: Utc.with_ymd_and_hms(2026, 5, 18, 11, 59, 0).unwrap(),
+            channel_type: Some("telegram".to_string()),
+            idempotency_key: Some("event-rule-channel".to_string()),
+            provider_message_id: Some("message-123".to_string()),
+            provider_status_code: Some(200),
+            provider_response: Some("{\"ok\":true}".to_string()),
+        };
+
+        let payload = serde_json::to_string(&delivery).expect("serialize notification delivery");
+        let decoded: NotificationDelivery =
+            serde_json::from_str(&payload).expect("deserialize notification delivery");
+
+        assert_eq!(decoded.channel_type.as_deref(), Some("telegram"));
+        assert_eq!(
+            decoded.idempotency_key.as_deref(),
+            Some("event-rule-channel")
+        );
+        assert_eq!(decoded.provider_message_id.as_deref(), Some("message-123"));
+        assert_eq!(decoded.provider_status_code, Some(200));
+        assert_eq!(decoded.provider_response.as_deref(), Some("{\"ok\":true}"));
     }
 
     #[test]

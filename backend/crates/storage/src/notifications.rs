@@ -520,7 +520,8 @@ pub async fn create_notification_delivery(
                 AND tenant_id = $1
           ))
         RETURNING id, tenant_id, event_id, rule_id, channel_id, status, attempt_count,
-                  last_error, sent_at, created_at
+                  last_error, sent_at, created_at, channel_type, idempotency_key,
+                  provider_message_id, provider_status_code, provider_response
         "#,
     )
     .bind(tenant_id)
@@ -572,7 +573,8 @@ async fn create_notification_delivery_with_executor(
                 AND tenant_id = $1
           ))
         RETURNING id, tenant_id, event_id, rule_id, channel_id, status, attempt_count,
-                  last_error, sent_at, created_at
+                  last_error, sent_at, created_at, channel_type, idempotency_key,
+                  provider_message_id, provider_status_code, provider_response
         "#,
     )
     .bind(tenant_id)
@@ -608,7 +610,8 @@ pub async fn update_notification_delivery_status(
         WHERE id = $1
           AND tenant_id = $2
         RETURNING id, tenant_id, event_id, rule_id, channel_id, status, attempt_count,
-                  last_error, sent_at, created_at
+                  last_error, sent_at, created_at, channel_type, idempotency_key,
+                  provider_message_id, provider_status_code, provider_response
         "#,
     )
     .bind(id)
@@ -910,5 +913,22 @@ mod tests {
         assert!(CREATE_IN_APP_NOTIFICATION_QUERY.contains("WHERE id = $3"));
         assert!(CREATE_IN_APP_NOTIFICATION_QUERY.contains("AND tenant_id = $1"));
         assert!(CREATE_IN_APP_NOTIFICATION_QUERY.contains("AND event_id = $2"));
+    }
+
+    #[test]
+    fn external_delivery_migration_adds_metadata_and_idempotency_index() {
+        let migration = include_str!("../migrations/0008_external_notification_deliveries.sql");
+
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS channel_type TEXT"));
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS idempotency_key TEXT"));
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS provider_message_id TEXT"));
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS provider_status_code INTEGER"));
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS provider_response TEXT"));
+        assert!(migration
+            .contains("CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_deliveries_idempotency"));
+        assert!(migration.contains(
+            "ON notification_deliveries(event_id, rule_id, channel_id, idempotency_key)"
+        ));
+        assert!(migration.contains("WHERE idempotency_key IS NOT NULL"));
     }
 }
