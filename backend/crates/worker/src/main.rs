@@ -5,9 +5,7 @@ use std::sync::{
 
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
-    connect_postgres, connect_redis,
-    notify_queue::NotifyQueue,
-    run_migrations,
+    connect_postgres, connect_redis, run_migrations,
     scan_queue::{connect_scan_queue, ScanQueue},
 };
 use tokio::signal;
@@ -28,12 +26,10 @@ async fn main() -> anyhow::Result<()> {
     let redis_client = connect_redis(&config.redis)?;
     let redis = connect_scan_queue(&redis_client).await?;
     let scan_queue = ScanQueue::new(config.scan.queue_key.clone(), config.scan.lock_ttl_seconds);
-    let notify_queue = NotifyQueue::new(config.notify.queue_key.clone());
 
     info!(
         service = "worker",
         scan_queue_key = scan_queue.queue_key(),
-        notify_queue_key = notify_queue.queue_key(),
         lock_ttl_seconds = config.scan.lock_ttl_seconds,
         "service started"
     );
@@ -46,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    run_worker(postgres, redis, scan_queue, notify_queue, shutdown).await?;
+    run_worker(postgres, redis, scan_queue, shutdown).await?;
 
     info!(service = "worker", "service stopped");
     Ok(())

@@ -17,16 +17,15 @@ use coin_listener_chain_providers::{
 };
 use coin_listener_core::{
     models::{
-        AddressEvent, Asset, BalanceSnapshot, CreateBalanceSnapshotRequest, NotifyEventTask,
-        Provider, ScanAddressContext, ScanAddressTask, ScanCursor,
+        AddressEvent, Asset, BalanceSnapshot, CreateBalanceSnapshotRequest, Provider,
+        ScanAddressContext, ScanAddressTask, ScanCursor,
     },
     AppError, AppResult,
 };
-use coin_listener_storage::{notify_queue::NotifyQueue, repositories, scan_queue::ScanQueue};
+use coin_listener_storage::{repositories, scan_queue::ScanQueue};
 use redis::aio::MultiplexedConnection;
 use sqlx::PgPool;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 pub const EVM_ERC20_TRANSFER_CURSOR: &str = "evm_erc20_transfer";
 pub const EVM_TRANSFER_INITIAL_WINDOW_BLOCKS: i64 = 1_000;
@@ -65,23 +64,6 @@ pub fn scan_plan_for_chain(chain_type: &str) -> ScanPlan {
 
 pub fn worker_shutdown_requested(shutdown: &AtomicBool) -> bool {
     shutdown.load(Ordering::Relaxed)
-}
-
-pub fn build_notify_event_task(event: &AddressEvent, now: DateTime<Utc>) -> NotifyEventTask {
-    NotifyEventTask {
-        task_id: Uuid::new_v4(),
-        event_id: event.id,
-        tenant_id: event.tenant_id,
-        attempt: 1,
-        enqueued_at: now,
-    }
-}
-
-pub fn notify_task_for_scan_event(
-    event: Option<&AddressEvent>,
-    now: DateTime<Utc>,
-) -> Option<NotifyEventTask> {
-    event.map(|event| build_notify_event_task(event, now))
 }
 
 pub fn should_emit_balance_change(
@@ -284,7 +266,7 @@ async fn scan_evm_native_balance_with_context(
 
     let previous = previous.expect("previous snapshot checked before event creation");
     let draft = evm_balance_change_event(context, asset, &previous, &current, provider)?;
-    repositories::insert_event(pool, draft).await.map(Some)
+    repositories::insert_event_and_outbox_if_not_exists(pool, draft).await
 }
 
 pub async fn scan_evm_erc20_transfers(
@@ -339,7 +321,9 @@ pub async fn scan_evm_erc20_transfers(
             for log in logs {
                 let transfer = evm::decode_erc20_transfer_log(&log, asset.decimals)?;
                 let draft = transfer_event_draft(context, &asset, transfer);
-                if let Some(event) = repositories::insert_event_if_not_exists(pool, draft).await? {
+                if let Some(event) =
+                    repositories::insert_event_and_outbox_if_not_exists(pool, draft).await?
+                {
                     events.push(event);
                 }
             }
@@ -534,13 +518,17 @@ pub async fn scan_tron_address(
             continue;
         }
         let draft = tron::tron_transfer_event_draft(&context, &native_asset, transfer);
-        if let Some(event) = repositories::insert_event_if_not_exists(pool, draft).await? {
+        if let Some(event) =
+            repositories::insert_event_and_outbox_if_not_exists(pool, draft).await?
+        {
             events.push(event);
         }
     }
     for (asset, transfer) in trc20_transfers {
         let draft = tron::tron_transfer_event_draft(&context, &asset, transfer);
-        if let Some(event) = repositories::insert_event_if_not_exists(pool, draft).await? {
+        if let Some(event) =
+            repositories::insert_event_and_outbox_if_not_exists(pool, draft).await?
+        {
             events.push(event);
         }
     }
@@ -640,7 +628,9 @@ pub async fn scan_btc_address(
     let cursor_value = btc_cursor_value(&transfers);
     for transfer in transfers {
         let draft = btc::btc_transfer_event_draft(&context, &native_asset, transfer);
-        if let Some(event) = repositories::insert_event_if_not_exists(pool, draft).await? {
+        if let Some(event) =
+            repositories::insert_event_and_outbox_if_not_exists(pool, draft).await?
+        {
             events.push(event);
         }
     }
@@ -664,7 +654,6 @@ pub async fn process_scan_task(
     pool: &PgPool,
     redis: &mut MultiplexedConnection,
     scan_queue: &ScanQueue,
-    notify_queue: &NotifyQueue,
     task: ScanAddressTask,
     now: DateTime<Utc>,
 ) -> AppResult<ScanTaskOutcome> {
@@ -675,7 +664,7 @@ pub async fn process_scan_task(
         return Ok(ScanTaskOutcome::Locked);
     }
 
-    let outcome = process_locked_scan_task(pool, redis, notify_queue, &task, now).await;
+    let outcome = process_locked_scan_task(pool, &task, now).await;
     if let Err(error) = scan_queue
         .release_lock(redis, task.address_id, task.task_id)
         .await
@@ -693,8 +682,6 @@ pub async fn process_scan_task(
 
 async fn process_locked_scan_task(
     pool: &PgPool,
-    redis: &mut MultiplexedConnection,
-    notify_queue: &NotifyQueue,
     task: &ScanAddressTask,
     now: DateTime<Utc>,
 ) -> AppResult<ScanTaskOutcome> {
@@ -703,29 +690,17 @@ async fn process_locked_scan_task(
 
     match scan_plan_for_chain(&context.chain_type) {
         ScanPlan::EvmNativeBalance => {
-            let events = scan_evm_address(pool, task, now).await?;
-            for event in &events {
-                let notify_task = build_notify_event_task(event, now);
-                notify_queue.enqueue(redis, &notify_task).await?;
-            }
+            let _events = scan_evm_address(pool, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned)
         }
         ScanPlan::Tron => {
-            let events = scan_tron_address(pool, task, now).await?;
-            for event in &events {
-                let notify_task = build_notify_event_task(event, now);
-                notify_queue.enqueue(redis, &notify_task).await?;
-            }
+            let _events = scan_tron_address(pool, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned)
         }
         ScanPlan::Btc => {
-            let events = scan_btc_address(pool, task, now).await?;
-            for event in &events {
-                let notify_task = build_notify_event_task(event, now);
-                notify_queue.enqueue(redis, &notify_task).await?;
-            }
+            let _events = scan_btc_address(pool, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned)
         }
@@ -746,7 +721,6 @@ pub async fn run_worker(
     pool: PgPool,
     mut redis: MultiplexedConnection,
     scan_queue: ScanQueue,
-    notify_queue: NotifyQueue,
     shutdown: Arc<AtomicBool>,
 ) -> AppResult<()> {
     while !worker_shutdown_requested(&shutdown) {
@@ -754,16 +728,7 @@ pub async fn run_worker(
             Ok(Some(task)) => {
                 let task_id = task.task_id;
                 let address_id = task.address_id;
-                match process_scan_task(
-                    &pool,
-                    &mut redis,
-                    &scan_queue,
-                    &notify_queue,
-                    task,
-                    Utc::now(),
-                )
-                .await
-                {
+                match process_scan_task(&pool, &mut redis, &scan_queue, task, Utc::now()).await {
                     Ok(outcome) => info!(
                         task_id = %task_id,
                         address_id = %address_id,
@@ -1292,72 +1257,23 @@ mod tests {
         }
     }
 
-    mod build_notify_event_task {
-        use chrono::{TimeZone, Utc};
-        use coin_listener_core::models::AddressEvent;
-        use uuid::Uuid;
+    #[test]
+    fn worker_no_longer_enqueues_notify_tasks_after_scan() {
+        let source = include_str!("lib.rs");
+        let enqueue_call = ["notify_queue", "enqueue"].join(".");
+        let notify_builder_call = format!("{}(event, now)", "build_notify_event_task");
 
-        use crate::{build_notify_event_task, notify_task_for_scan_event};
+        assert!(!source.contains(&enqueue_call));
+        assert!(!source.contains(&notify_builder_call));
+    }
 
-        fn event() -> AddressEvent {
-            AddressEvent {
-                id: Uuid::from_u128(31),
-                tenant_id: Uuid::from_u128(32),
-                chain_id: Uuid::from_u128(33),
-                address_id: Uuid::from_u128(34),
-                asset_id: Uuid::from_u128(35),
-                event_type: "transfer".to_string(),
-                direction: "out".to_string(),
-                is_transfer: true,
-                tx_hash: Some("0xworker".to_string()),
-                log_index: Some(1),
-                block_number: Some(200),
-                block_hash: None,
-                confirmations: 12,
-                from_address: None,
-                to_address: None,
-                amount_raw: Some("500".to_string()),
-                amount_decimal: Some("0.0000000000000005".to_string()),
-                balance_before_raw: None,
-                balance_after_raw: None,
-                balance_delta_raw: None,
-                metadata: Default::default(),
-                detected_at: Utc.with_ymd_and_hms(2026, 5, 17, 18, 0, 0).unwrap(),
-                created_at: Utc.with_ymd_and_hms(2026, 5, 17, 18, 0, 1).unwrap(),
-            }
-        }
+    #[test]
+    fn worker_event_insert_paths_use_outbox_helper() {
+        let source = include_str!("lib.rs");
+        let legacy_insert = format!("{}(pool, draft)", "insert_event_if_not_exists");
+        let outbox_insert = format!("{}(pool, draft)", "insert_event_and_outbox_if_not_exists");
 
-        #[test]
-        fn uses_event_id_tenant_and_first_attempt() {
-            let now = Utc.with_ymd_and_hms(2026, 5, 17, 18, 1, 0).unwrap();
-            let event = event();
-
-            let task = build_notify_event_task(&event, now);
-
-            assert_eq!(task.event_id, event.id);
-            assert_eq!(task.tenant_id, event.tenant_id);
-            assert_eq!(task.attempt, 1);
-            assert_eq!(task.enqueued_at, now);
-        }
-
-        #[test]
-        fn scan_event_without_event_does_not_create_notify_task() {
-            let now = Utc.with_ymd_and_hms(2026, 5, 17, 18, 1, 0).unwrap();
-
-            assert!(notify_task_for_scan_event(None, now).is_none());
-        }
-
-        #[test]
-        fn scan_event_with_event_creates_first_attempt_notify_task() {
-            let now = Utc.with_ymd_and_hms(2026, 5, 17, 18, 1, 0).unwrap();
-            let event = event();
-
-            let task = notify_task_for_scan_event(Some(&event), now).unwrap();
-
-            assert_eq!(task.event_id, event.id);
-            assert_eq!(task.tenant_id, event.tenant_id);
-            assert_eq!(task.attempt, 1);
-            assert_eq!(task.enqueued_at, now);
-        }
+        assert!(!source.contains(&legacy_insert));
+        assert!(source.matches(&outbox_insert).count() >= 4);
     }
 }
