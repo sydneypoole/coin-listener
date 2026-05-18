@@ -108,6 +108,81 @@ RETURNING id, tenant_id, chain_id, address_id, asset_id, event_type, direction, 
           metadata, detected_at, created_at
 "#;
 
+pub const INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY: &str = r#"
+INSERT INTO notification_outbox (tenant_id, event_id, status)
+VALUES ($1, $2, 'pending')
+ON CONFLICT (event_id) DO NOTHING
+"#;
+
+pub const CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY: &str = r#"
+WITH due AS (
+    SELECT id
+    FROM notification_outbox
+    WHERE status IN ('pending', 'retryable')
+      AND next_attempt_at <= $1
+    ORDER BY next_attempt_at ASC, created_at ASC
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE notification_outbox o
+SET status = 'processing',
+    locked_at = $1,
+    locked_by = $3,
+    attempt_count = attempt_count + 1,
+    updated_at = NOW()
+FROM due
+WHERE o.id = due.id
+RETURNING o.id, o.tenant_id, o.event_id, o.status, o.attempt_count,
+          o.next_attempt_at, o.locked_at, o.locked_by, o.last_error,
+          o.delivered_at, o.created_at, o.updated_at
+"#;
+
+pub const MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY: &str = r#"
+UPDATE notification_outbox
+SET status = 'delivered',
+    delivered_at = $2,
+    locked_at = NULL,
+    locked_by = NULL,
+    last_error = NULL,
+    updated_at = NOW()
+WHERE id = $1
+  AND status = 'processing'
+"#;
+
+pub const MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY: &str = r#"
+UPDATE notification_outbox
+SET status = 'retryable',
+    next_attempt_at = $2,
+    locked_at = NULL,
+    locked_by = NULL,
+    last_error = $3,
+    updated_at = NOW()
+WHERE id = $1
+  AND status = 'processing'
+"#;
+
+pub const MARK_NOTIFICATION_OUTBOX_FAILED_QUERY: &str = r#"
+UPDATE notification_outbox
+SET status = 'failed',
+    locked_at = NULL,
+    locked_by = NULL,
+    last_error = $2,
+    updated_at = NOW()
+WHERE id = $1
+  AND status = 'processing'
+"#;
+
+pub const RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY: &str = r#"
+UPDATE notification_outbox
+SET status = 'retryable',
+    next_attempt_at = $2,
+    locked_at = NULL,
+    locked_by = NULL,
+    updated_at = NOW()
+WHERE status = 'processing'
+  AND locked_at < $1
+"#;
+
 pub async fn find_user_by_email(pool: &PgPool, email: &str) -> AppResult<User> {
     sqlx::query_as::<_, User>(
         "SELECT id, email, password_hash, display_name, status FROM users WHERE email = $1",
@@ -761,9 +836,13 @@ fn validate_address_for_chain(chain: &Chain, address: &str) -> AppResult<()> {
 mod tests {
     use super::{
         next_scan_at_from, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
-        ACTIVE_RPC_PROVIDER_QUERY, CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY,
-        INSERT_EVENT_IF_NOT_EXISTS_QUERY, LATEST_BALANCE_SNAPSHOT_QUERY,
-        MARK_CLAIMED_SCAN_ENQUEUED_QUERY, SCAN_CURSOR_QUERY, UPSERT_SCAN_CURSOR_QUERY,
+        ACTIVE_RPC_PROVIDER_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
+        CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY,
+        INSERT_EVENT_IF_NOT_EXISTS_QUERY, INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY,
+        LATEST_BALANCE_SNAPSHOT_QUERY, MARK_CLAIMED_SCAN_ENQUEUED_QUERY,
+        MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY, MARK_NOTIFICATION_OUTBOX_FAILED_QUERY,
+        MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY, RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY,
+        SCAN_CURSOR_QUERY, UPSERT_SCAN_CURSOR_QUERY,
     };
     use chrono::{TimeZone, Utc};
 
@@ -839,6 +918,62 @@ mod tests {
         ] {
             assert!(INSERT_EVENT_IF_NOT_EXISTS_QUERY.contains(field));
         }
+    }
+
+    #[test]
+    fn notification_outbox_migration_defines_reliable_task_table() {
+        let migration = include_str!("../migrations/0007_notification_outbox.sql");
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS notification_outbox"));
+        assert!(
+            migration.contains("tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE")
+        );
+        assert!(migration
+            .contains("event_id UUID NOT NULL REFERENCES address_events(id) ON DELETE CASCADE"));
+        assert!(migration.contains("UNIQUE(event_id)"));
+        assert!(migration.contains("idx_notification_outbox_claim"));
+        assert!(migration.contains("WHERE status IN ('pending', 'retryable')"));
+        assert!(migration.contains("idx_notification_outbox_processing_stale"));
+        assert!(migration.contains("WHERE status = 'processing'"));
+    }
+
+    #[test]
+    fn notification_outbox_insert_query_links_new_event() {
+        assert!(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY.contains("notification_outbox"));
+        assert!(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY.contains("tenant_id"));
+        assert!(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY.contains("event_id"));
+        assert!(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY.contains("'pending'"));
+        assert!(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY
+            .contains("ON CONFLICT (event_id) DO NOTHING"));
+    }
+
+    #[test]
+    fn notification_outbox_claim_query_uses_skip_locked_and_increments_attempt() {
+        assert!(CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY.contains("status IN ('pending', 'retryable')"));
+        assert!(CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY.contains("next_attempt_at <= $1"));
+        assert!(CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY.contains("attempt_count = attempt_count + 1"));
+        assert!(CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY.contains("locked_by = $3"));
+    }
+
+    #[test]
+    fn notification_outbox_mark_queries_require_processing_status() {
+        for query in [
+            MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY,
+            MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY,
+            MARK_NOTIFICATION_OUTBOX_FAILED_QUERY,
+        ] {
+            assert!(query.contains("WHERE id = $1"));
+            assert!(query.contains("status = 'processing'"));
+        }
+    }
+
+    #[test]
+    fn notification_outbox_stale_release_only_matches_stale_processing_rows() {
+        assert!(RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY.contains("status = 'processing'"));
+        assert!(RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY.contains("locked_at < $1"));
+        assert!(RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY.contains("status = 'retryable'"));
+        assert!(RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY.contains("locked_by = NULL"));
     }
 
     #[test]
