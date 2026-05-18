@@ -9,7 +9,10 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use coin_listener_core::{
-    models::{AddressEvent, NotificationChannel, NotificationRule, NotifyEventTask},
+    models::{
+        AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule,
+        NotifyEventTask,
+    },
     AppResult,
 };
 use coin_listener_storage::{notifications, notify_queue::NotifyQueue};
@@ -179,6 +182,41 @@ pub fn delivery_sent_at(status: &str, now: DateTime<Utc>) -> Option<DateTime<Utc
     (status == DELIVERY_STATUS_SENT).then_some(now)
 }
 
+pub fn notification_outbox_next_attempt_at(
+    now: DateTime<Utc>,
+    attempt_count: i32,
+) -> DateTime<Utc> {
+    let delay_seconds = match attempt_count {
+        0 | 1 => 30,
+        2 => 60,
+        3 => 300,
+        4 => 900,
+        _ => 3600,
+    };
+    now + chrono::Duration::seconds(delay_seconds)
+}
+
+pub fn notification_outbox_should_fail(attempt_count: i32, max_attempts: i32) -> bool {
+    attempt_count >= max_attempts
+}
+
+pub fn notification_outbox_task_attempt(attempt_count: i32) -> u16 {
+    if attempt_count <= 0 {
+        return 0;
+    }
+    u16::try_from(attempt_count).unwrap_or(u16::MAX)
+}
+
+pub fn notify_task_from_outbox_item(item: &NotificationOutboxItem) -> NotifyEventTask {
+    NotifyEventTask {
+        task_id: item.id,
+        event_id: item.event_id,
+        tenant_id: item.tenant_id,
+        attempt: notification_outbox_task_attempt(item.attempt_count),
+        enqueued_at: item.created_at,
+    }
+}
+
 pub async fn process_notify_task(
     pool: &PgPool,
     task: NotifyEventTask,
@@ -221,6 +259,14 @@ pub async fn process_notify_task(
     }
 
     Ok(deliveries)
+}
+
+pub async fn process_notification_outbox_item(
+    pool: &PgPool,
+    item: NotificationOutboxItem,
+    now: DateTime<Utc>,
+) -> AppResult<usize> {
+    process_notify_task(pool, notify_task_from_outbox_item(&item), now).await
 }
 
 async fn resolve_rule_channels(
@@ -441,12 +487,16 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use chrono::{TimeZone, Utc};
-    use coin_listener_core::models::{AddressEvent, NotificationChannel, NotificationRule};
+    use coin_listener_core::models::{
+        AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule,
+    };
 
     use crate::{
         amount_raw_meets_minimum, build_delivery_plan, build_in_app_notification_content,
         build_unavailable_channel_delivery_plan, delivery_sent_at, missing_channel_error,
-        notification_rule_matches_event, notifier_shutdown_requested, notify_channel_decision,
+        notification_outbox_next_attempt_at, notification_outbox_should_fail,
+        notification_outbox_task_attempt, notification_rule_matches_event,
+        notifier_shutdown_requested, notify_channel_decision, notify_task_from_outbox_item,
         resolve_explicit_rule_channels, NotifyChannelDecision, ResolvedNotifyChannel,
         DELIVERY_STATUS_SENT, DELIVERY_STATUS_SKIPPED, MISSING_CHANNEL_ERROR_PREFIX,
         UNAVAILABLE_CHANNEL_ERROR,
@@ -481,6 +531,23 @@ mod tests {
             metadata: Default::default(),
             detected_at: Utc.with_ymd_and_hms(2026, 5, 17, 17, 0, 0).unwrap(),
             created_at: Utc.with_ymd_and_hms(2026, 5, 17, 17, 0, 1).unwrap(),
+        }
+    }
+
+    fn outbox_item(attempt_count: i32) -> NotificationOutboxItem {
+        NotificationOutboxItem {
+            id: uuid(90),
+            tenant_id: uuid(2),
+            event_id: uuid(1),
+            status: "processing".to_string(),
+            attempt_count,
+            next_attempt_at: Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap(),
+            locked_at: Some(Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 1).unwrap()),
+            locked_by: Some("notifier-test".to_string()),
+            last_error: None,
+            delivered_at: None,
+            created_at: Utc.with_ymd_and_hms(2026, 5, 18, 11, 59, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 1).unwrap(),
         }
     }
 
@@ -523,6 +590,58 @@ mod tests {
     #[test]
     fn rule_matches_when_all_filters_match() {
         assert!(notification_rule_matches_event(&rule(), &event()));
+    }
+
+    #[test]
+    fn notification_outbox_backoff_is_deterministic() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap();
+
+        assert_eq!(
+            notification_outbox_next_attempt_at(now, 1),
+            now + chrono::Duration::seconds(30)
+        );
+        assert_eq!(
+            notification_outbox_next_attempt_at(now, 2),
+            now + chrono::Duration::seconds(60)
+        );
+        assert_eq!(
+            notification_outbox_next_attempt_at(now, 3),
+            now + chrono::Duration::seconds(300)
+        );
+        assert_eq!(
+            notification_outbox_next_attempt_at(now, 4),
+            now + chrono::Duration::seconds(900)
+        );
+        assert_eq!(
+            notification_outbox_next_attempt_at(now, 5),
+            now + chrono::Duration::seconds(3600)
+        );
+    }
+
+    #[test]
+    fn notification_outbox_retry_policy_fails_at_max_attempts() {
+        assert!(!notification_outbox_should_fail(9, 10));
+        assert!(notification_outbox_should_fail(10, 10));
+        assert!(notification_outbox_should_fail(11, 10));
+    }
+
+    #[test]
+    fn notification_outbox_task_attempt_clamps_to_notify_task_type() {
+        assert_eq!(notification_outbox_task_attempt(1), 1);
+        assert_eq!(notification_outbox_task_attempt(i32::MAX), u16::MAX);
+        assert_eq!(notification_outbox_task_attempt(-1), 0);
+    }
+
+    #[test]
+    fn outbox_item_converts_to_legacy_notify_task_for_processing() {
+        let item = outbox_item(3);
+        let task = notify_task_from_outbox_item(&item);
+
+        assert_eq!(task.task_id, item.id);
+        assert_eq!(task.event_id, item.event_id);
+        assert_eq!(task.tenant_id, item.tenant_id);
+        assert_eq!(task.attempt, 3);
+        assert_eq!(task.enqueued_at, item.created_at);
     }
 
     #[test]
