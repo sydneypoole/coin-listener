@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering as AtomicOrdering},
         Arc,
     },
+    time::Duration,
 };
 
 use chrono::{DateTime, Utc};
@@ -13,10 +14,9 @@ use coin_listener_core::{
         AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule,
         NotifyEventTask,
     },
-    AppResult,
+    AppResult, NotifyConfig,
 };
-use coin_listener_storage::{notifications, notify_queue::NotifyQueue};
-use redis::aio::MultiplexedConnection;
+use coin_listener_storage::{notifications, repositories};
 use sqlx::PgPool;
 use tracing::{info, warn};
 
@@ -40,6 +40,25 @@ pub struct NotifyDeliveryPlan {
     pub status: &'static str,
     pub last_error: Option<&'static str>,
     pub create_in_app: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationOutboxDispatcherConfig {
+    pub batch_size: i64,
+    pub max_attempts: i32,
+    pub stale_lock_seconds: i64,
+    pub idle_sleep: Duration,
+}
+
+impl NotificationOutboxDispatcherConfig {
+    pub fn from_notify_config(config: &NotifyConfig) -> Self {
+        Self {
+            batch_size: config.outbox_batch_size,
+            max_attempts: config.outbox_max_attempts,
+            stale_lock_seconds: config.outbox_stale_lock_seconds,
+            idle_sleep: Duration::from_millis(config.outbox_idle_sleep_ms),
+        }
+    }
 }
 
 pub const DELIVERY_STATUS_SENT: &str = "sent";
@@ -269,6 +288,79 @@ pub async fn process_notification_outbox_item(
     process_notify_task(pool, notify_task_from_outbox_item(&item), now).await
 }
 
+pub async fn process_notification_outbox_batch(
+    pool: &PgPool,
+    worker_id: &str,
+    config: &NotificationOutboxDispatcherConfig,
+    now: DateTime<Utc>,
+) -> AppResult<usize> {
+    let stale_before = now - chrono::Duration::seconds(config.stale_lock_seconds);
+    let released = repositories::release_stale_notification_outbox(pool, stale_before, now).await?;
+    if released > 0 {
+        info!(released, "released stale notification outbox rows");
+    }
+
+    let items =
+        repositories::claim_due_notification_outbox(pool, now, worker_id, config.batch_size)
+            .await?;
+    let claimed = items.len();
+
+    for item in items {
+        let outbox_id = item.id;
+        let event_id = item.event_id;
+        let tenant_id = item.tenant_id;
+        let attempt_count = item.attempt_count;
+
+        match process_notification_outbox_item(pool, item, now).await {
+            Ok(deliveries) => {
+                repositories::mark_notification_outbox_delivered(pool, outbox_id, now).await?;
+                info!(
+                    outbox_id = %outbox_id,
+                    event_id = %event_id,
+                    tenant_id = %tenant_id,
+                    deliveries,
+                    "notification outbox item delivered"
+                );
+            }
+            Err(error) => {
+                let last_error = error.to_string();
+                if notification_outbox_should_fail(attempt_count, config.max_attempts) {
+                    repositories::mark_notification_outbox_failed(pool, outbox_id, &last_error)
+                        .await?;
+                    warn!(
+                        outbox_id = %outbox_id,
+                        event_id = %event_id,
+                        tenant_id = %tenant_id,
+                        attempt_count,
+                        error = %last_error,
+                        "notification outbox item failed permanently"
+                    );
+                } else {
+                    let next_attempt_at = notification_outbox_next_attempt_at(now, attempt_count);
+                    repositories::mark_notification_outbox_retryable(
+                        pool,
+                        outbox_id,
+                        next_attempt_at,
+                        &last_error,
+                    )
+                    .await?;
+                    warn!(
+                        outbox_id = %outbox_id,
+                        event_id = %event_id,
+                        tenant_id = %tenant_id,
+                        attempt_count,
+                        next_attempt_at = %next_attempt_at,
+                        error = %last_error,
+                        "notification outbox item scheduled for retry"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(claimed)
+}
+
 async fn resolve_rule_channels(
     pool: &PgPool,
     tenant_id: uuid::Uuid,
@@ -435,35 +527,16 @@ async fn process_channel_delivery(
 
 pub async fn run_notifier(
     pool: PgPool,
-    mut redis: MultiplexedConnection,
-    notify_queue: NotifyQueue,
+    config: NotificationOutboxDispatcherConfig,
     shutdown: Arc<AtomicBool>,
 ) -> AppResult<()> {
+    let worker_id = format!("notifier-{}", uuid::Uuid::new_v4());
+
     while !notifier_shutdown_requested(&shutdown) {
-        match notify_queue.dequeue(&mut redis, 5).await {
-            Ok(Some(task)) => {
-                let task_id = task.task_id;
-                let event_id = task.event_id;
-                let tenant_id = task.tenant_id;
-                match process_notify_task(&pool, task, Utc::now()).await {
-                    Ok(deliveries) => info!(
-                        task_id = %task_id,
-                        event_id = %event_id,
-                        tenant_id = %tenant_id,
-                        deliveries,
-                        "notify task processed"
-                    ),
-                    Err(error) => warn!(
-                        task_id = %task_id,
-                        event_id = %event_id,
-                        tenant_id = %tenant_id,
-                        error = %error,
-                        "notify task failed"
-                    ),
-                }
-            }
-            Ok(None) => {}
-            Err(error) => warn!(error = %error, "discarded invalid or failed notify queue message"),
+        let claimed =
+            process_notification_outbox_batch(&pool, &worker_id, &config, Utc::now()).await?;
+        if claimed == 0 {
+            tokio::time::sleep(config.idle_sleep).await;
         }
     }
 
@@ -487,8 +560,9 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use chrono::{TimeZone, Utc};
-    use coin_listener_core::models::{
-        AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule,
+    use coin_listener_core::{
+        models::{AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule},
+        NotifyConfig,
     };
 
     use crate::{
@@ -497,9 +571,9 @@ mod tests {
         notification_outbox_next_attempt_at, notification_outbox_should_fail,
         notification_outbox_task_attempt, notification_rule_matches_event,
         notifier_shutdown_requested, notify_channel_decision, notify_task_from_outbox_item,
-        resolve_explicit_rule_channels, NotifyChannelDecision, ResolvedNotifyChannel,
-        DELIVERY_STATUS_SENT, DELIVERY_STATUS_SKIPPED, MISSING_CHANNEL_ERROR_PREFIX,
-        UNAVAILABLE_CHANNEL_ERROR,
+        resolve_explicit_rule_channels, NotificationOutboxDispatcherConfig, NotifyChannelDecision,
+        ResolvedNotifyChannel, DELIVERY_STATUS_SENT, DELIVERY_STATUS_SKIPPED,
+        MISSING_CHANNEL_ERROR_PREFIX, UNAVAILABLE_CHANNEL_ERROR,
     };
 
     fn uuid(value: u128) -> sqlx::types::Uuid {
@@ -623,6 +697,37 @@ mod tests {
         assert!(!notification_outbox_should_fail(9, 10));
         assert!(notification_outbox_should_fail(10, 10));
         assert!(notification_outbox_should_fail(11, 10));
+    }
+
+    #[test]
+    fn dispatcher_config_is_loaded_from_notify_config() {
+        let notify = NotifyConfig {
+            queue_key: "notify:event:queue".to_string(),
+            outbox_batch_size: 25,
+            outbox_max_attempts: 7,
+            outbox_stale_lock_seconds: 120,
+            outbox_idle_sleep_ms: 250,
+        };
+
+        let config = NotificationOutboxDispatcherConfig::from_notify_config(&notify);
+
+        assert_eq!(config.batch_size, 25);
+        assert_eq!(config.max_attempts, 7);
+        assert_eq!(config.stale_lock_seconds, 120);
+        assert_eq!(config.idle_sleep, std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn notifier_loop_uses_outbox_repository_instead_of_redis_dequeue() {
+        let source = include_str!("lib.rs");
+        let forbidden = ["notify_queue", ".dequeue"].join("");
+
+        assert!(source.contains("claim_due_notification_outbox"));
+        assert!(source.contains("release_stale_notification_outbox"));
+        assert!(source.contains("mark_notification_outbox_delivered"));
+        assert!(source.contains("mark_notification_outbox_retryable"));
+        assert!(source.contains("mark_notification_outbox_failed"));
+        assert!(!source.contains(&forbidden));
     }
 
     #[test]

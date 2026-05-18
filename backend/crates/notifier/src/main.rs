@@ -4,12 +4,8 @@ use std::sync::{
 };
 
 use coin_listener_core::AppConfig;
-use coin_listener_storage::{
-    connect_postgres, connect_redis,
-    notify_queue::{connect_notify_queue, NotifyQueue},
-    run_migrations,
-};
-use notifier::run_notifier;
+use coin_listener_storage::{connect_postgres, run_migrations};
+use notifier::{run_notifier, NotificationOutboxDispatcherConfig};
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -24,13 +20,13 @@ async fn main() -> anyhow::Result<()> {
     let config = AppConfig::from_env()?;
     let postgres = connect_postgres(&config.postgres).await?;
     run_migrations(&postgres).await?;
-    let redis_client = connect_redis(&config.redis)?;
-    let redis = connect_notify_queue(&redis_client).await?;
-    let notify_queue = NotifyQueue::new(config.notify.queue_key.clone());
 
     info!(
         service = "notifier",
-        notify_queue_key = notify_queue.queue_key(),
+        outbox_batch_size = config.notify.outbox_batch_size,
+        outbox_max_attempts = config.notify.outbox_max_attempts,
+        outbox_stale_lock_seconds = config.notify.outbox_stale_lock_seconds,
+        outbox_idle_sleep_ms = config.notify.outbox_idle_sleep_ms,
         "service started"
     );
 
@@ -42,7 +38,8 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    run_notifier(postgres, redis, notify_queue, shutdown).await?;
+    let dispatcher_config = NotificationOutboxDispatcherConfig::from_notify_config(&config.notify);
+    run_notifier(postgres, dispatcher_config, shutdown).await?;
 
     info!(service = "notifier", "service stopped");
     Ok(())
