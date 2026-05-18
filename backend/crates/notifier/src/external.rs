@@ -1,4 +1,9 @@
+use coin_listener_core::models::AddressEvent;
+use hmac::{Hmac, Mac};
+use serde::Serialize;
 use serde_json::Value;
+use sha2::Sha256;
+use std::{collections::BTreeMap, time::Duration};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +97,170 @@ pub fn notification_idempotency_key(
     format!("notification:v1:{tenant_id}:{event_id}:{rule_id}:{channel_id}")
 }
 
+type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalSendMetadata {
+    pub last_error: Option<String>,
+    pub provider_message_id: Option<String>,
+    pub provider_status_code: Option<i32>,
+    pub provider_response: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalSendOutcome {
+    Sent(ExternalSendMetadata),
+    PermanentFailure(ExternalSendMetadata),
+    TransientFailure(ExternalSendMetadata),
+}
+
+impl ExternalSendOutcome {
+    pub fn is_sent(&self) -> bool {
+        matches!(self, Self::Sent(_))
+    }
+
+    pub fn is_permanent_failure(&self) -> bool {
+        matches!(self, Self::PermanentFailure(_))
+    }
+
+    pub fn is_transient_failure(&self) -> bool {
+        matches!(self, Self::TransientFailure(_))
+    }
+
+    pub fn metadata(&self) -> &ExternalSendMetadata {
+        match self {
+            Self::Sent(metadata)
+            | Self::PermanentFailure(metadata)
+            | Self::TransientFailure(metadata) => metadata,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookRequestParts {
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: String,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebhookPayload {
+    pub idempotency_key: String,
+    pub event_id: Uuid,
+    pub tenant_id: Uuid,
+    pub chain_id: Uuid,
+    pub address_id: Uuid,
+    pub asset_id: Uuid,
+    pub event_type: String,
+    pub direction: String,
+    pub is_transfer: bool,
+    pub tx_hash: Option<String>,
+    pub block_number: Option<i64>,
+    pub from_address: Option<String>,
+    pub to_address: Option<String>,
+    pub amount_raw: Option<String>,
+    pub amount_decimal: Option<String>,
+    pub detected_at: String,
+}
+
+pub fn build_webhook_payload(event: &AddressEvent, idempotency_key: &str) -> WebhookPayload {
+    WebhookPayload {
+        idempotency_key: idempotency_key.to_string(),
+        event_id: event.id,
+        tenant_id: event.tenant_id,
+        chain_id: event.chain_id,
+        address_id: event.address_id,
+        asset_id: event.asset_id,
+        event_type: event.event_type.clone(),
+        direction: event.direction.clone(),
+        is_transfer: event.is_transfer,
+        tx_hash: event.tx_hash.clone(),
+        block_number: event.block_number,
+        from_address: event.from_address.clone(),
+        to_address: event.to_address.clone(),
+        amount_raw: event.amount_raw.clone(),
+        amount_decimal: event.amount_decimal.clone(),
+        detected_at: event.detected_at.to_rfc3339(),
+    }
+}
+
+pub fn build_webhook_request_parts(
+    config: &WebhookChannelConfig,
+    event: &AddressEvent,
+    idempotency_key: &str,
+    secret: Option<&str>,
+) -> Result<WebhookRequestParts, ExternalConfigError> {
+    let payload = build_webhook_payload(event, idempotency_key);
+    let body = serde_json::to_string(&payload).map_err(|error| {
+        ExternalConfigError::new(format!("webhook payload serialization failed: {error}"))
+    })?;
+    let mut headers = BTreeMap::new();
+    headers.insert("Content-Type".to_string(), "application/json".to_string());
+    headers.insert("X-Coin-Listener-Event-Id".to_string(), event.id.to_string());
+    headers.insert(
+        "X-Coin-Listener-Idempotency-Key".to_string(),
+        idempotency_key.to_string(),
+    );
+    if let Some(secret) = secret {
+        headers.insert(
+            "X-Coin-Listener-Signature".to_string(),
+            webhook_signature(secret, body.as_bytes()),
+        );
+    }
+    Ok(WebhookRequestParts {
+        url: config.url.clone(),
+        headers,
+        body,
+        timeout: Duration::from_millis(config.timeout_ms),
+    })
+}
+
+pub fn webhook_signature(secret: &str, body: &[u8]) -> String {
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any size");
+    mac.update(body);
+    bytes_to_lower_hex(&mac.finalize().into_bytes())
+}
+
+pub fn bytes_to_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+pub fn classify_webhook_response(status_code: u16, body: &str) -> ExternalSendOutcome {
+    let metadata = ExternalSendMetadata {
+        last_error: None,
+        provider_message_id: None,
+        provider_status_code: Some(status_code as i32),
+        provider_response: Some(truncate_provider_response(body)),
+    };
+    match status_code {
+        200..=299 => ExternalSendOutcome::Sent(metadata),
+        408 | 429 | 500..=599 => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+            last_error: Some(format!("webhook returned retryable status {status_code}")),
+            ..metadata
+        }),
+        _ => ExternalSendOutcome::PermanentFailure(ExternalSendMetadata {
+            last_error: Some(format!("webhook returned permanent status {status_code}")),
+            ..metadata
+        }),
+    }
+}
+
+pub fn webhook_network_error_message(url: &str, error: &str) -> String {
+    format!("webhook {} failed: {error}", redact_webhook_url(url))
+}
+
+pub fn truncate_provider_response(body: &str) -> String {
+    body.chars().take(2048).collect()
+}
+
 pub fn redact_telegram_url(url: &str) -> String {
     let Some(bot_index) = url.find("/bot") else {
         return url.to_string();
@@ -133,16 +302,47 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
+    use coin_listener_core::models::AddressEvent;
     use serde_json::json;
     use uuid::Uuid;
 
     use crate::external::{
-        notification_idempotency_key, redact_telegram_url, redact_webhook_url,
+        build_webhook_request_parts, classify_webhook_response, notification_idempotency_key,
+        redact_telegram_url, redact_webhook_url, webhook_network_error_message,
         TelegramChannelConfig, WebhookChannelConfig,
     };
 
     fn uuid(value: u128) -> Uuid {
         Uuid::from_u128(value)
+    }
+
+    fn event() -> AddressEvent {
+        AddressEvent {
+            id: uuid(11),
+            tenant_id: uuid(12),
+            chain_id: uuid(13),
+            address_id: uuid(14),
+            asset_id: uuid(15),
+            event_type: "transfer".to_string(),
+            direction: "in".to_string(),
+            is_transfer: true,
+            tx_hash: Some("0xabc".to_string()),
+            log_index: Some(0),
+            block_number: Some(123),
+            block_hash: None,
+            confirmations: 12,
+            from_address: Some("0xfrom".to_string()),
+            to_address: Some("0xto".to_string()),
+            amount_raw: Some("1000".to_string()),
+            amount_decimal: Some("0.000000000000001".to_string()),
+            balance_before_raw: None,
+            balance_after_raw: None,
+            balance_delta_raw: None,
+            metadata: serde_json::json!({}),
+            detected_at: Utc.with_ymd_and_hms(2026, 5, 18, 15, 0, 0).unwrap(),
+            created_at: Utc.with_ymd_and_hms(2026, 5, 18, 15, 0, 1).unwrap(),
+        }
     }
 
     #[test]
@@ -242,5 +442,82 @@ mod tests {
             redact_webhook_url("https://example.com/hook?token=secret"),
             "https://example.com/hook"
         );
+    }
+
+    #[test]
+    fn webhook_sender_includes_idempotency_headers() {
+        let request = build_webhook_request_parts(
+            &WebhookChannelConfig {
+                url: "https://example.com/hook".to_string(),
+                secret_env: None,
+                timeout_ms: 5000,
+            },
+            &event(),
+            "notification:key",
+            None,
+        )
+        .expect("build webhook request");
+
+        assert_eq!(request.url, "https://example.com/hook");
+        assert_eq!(
+            request
+                .headers
+                .get("X-Coin-Listener-Event-Id")
+                .map(String::as_str),
+            Some("00000000-0000-0000-0000-00000000000b")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("X-Coin-Listener-Idempotency-Key")
+                .map(String::as_str),
+            Some("notification:key")
+        );
+        assert!(request
+            .body
+            .contains("\"idempotency_key\":\"notification:key\""));
+    }
+
+    #[test]
+    fn webhook_sender_signs_payload_when_secret_env_is_set() {
+        let request = build_webhook_request_parts(
+            &WebhookChannelConfig {
+                url: "https://example.com/hook".to_string(),
+                secret_env: Some("WEBHOOK_SECRET".to_string()),
+                timeout_ms: 5000,
+            },
+            &event(),
+            "notification:key",
+            Some("secret-value"),
+        )
+        .expect("build signed webhook request");
+
+        let signature = request
+            .headers
+            .get("X-Coin-Listener-Signature")
+            .expect("signature header");
+        assert_eq!(signature.len(), 64);
+        assert!(signature
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn webhook_status_classification_distinguishes_retryable_and_permanent_failures() {
+        assert!(classify_webhook_response(202, "accepted").is_sent());
+        assert!(classify_webhook_response(429, "rate limited").is_transient_failure());
+        assert!(classify_webhook_response(500, "server error").is_transient_failure());
+        assert!(classify_webhook_response(401, "unauthorized").is_permanent_failure());
+    }
+
+    #[test]
+    fn webhook_sender_redacts_query_string_from_errors() {
+        let message = webhook_network_error_message(
+            "https://example.com/hook?token=secret",
+            "connection reset",
+        );
+
+        assert!(message.contains("https://example.com/hook"));
+        assert!(!message.contains("token=secret"));
     }
 }
