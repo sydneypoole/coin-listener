@@ -4,8 +4,8 @@ use coin_listener_core::{
     models::{
         AddressEvent, AddressEventDraft, Asset, BalanceSnapshot, Chain,
         CreateBalanceSnapshotRequest, CreateProviderRequest, CreateWatchedAddressRequest,
-        EventQuery, Provider, ScanAddressCandidate, ScanAddressContext, ScanCursor, Tenant, User,
-        WatchedAddress,
+        EventQuery, NotificationOutboxItem, Provider, ScanAddressCandidate, ScanAddressContext,
+        ScanCursor, Tenant, User, WatchedAddress,
     },
     AppError, AppResult,
 };
@@ -628,6 +628,83 @@ pub async fn insert_event_and_outbox_if_not_exists(
     Ok(None)
 }
 
+pub async fn claim_due_notification_outbox(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+    worker_id: &str,
+    limit: i64,
+) -> AppResult<Vec<NotificationOutboxItem>> {
+    sqlx::query_as::<_, NotificationOutboxItem>(CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY)
+        .bind(now)
+        .bind(limit)
+        .bind(worker_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn mark_notification_outbox_delivered(
+    pool: &PgPool,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    let result = sqlx::query(MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY)
+        .bind(id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    ensure_updated(result.rows_affected())
+}
+
+pub async fn mark_notification_outbox_retryable(
+    pool: &PgPool,
+    id: Uuid,
+    next_attempt_at: DateTime<Utc>,
+    last_error: &str,
+) -> AppResult<()> {
+    let result = sqlx::query(MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY)
+        .bind(id)
+        .bind(next_attempt_at)
+        .bind(last_error)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    ensure_updated(result.rows_affected())
+}
+
+pub async fn mark_notification_outbox_failed(
+    pool: &PgPool,
+    id: Uuid,
+    last_error: &str,
+) -> AppResult<()> {
+    let result = sqlx::query(MARK_NOTIFICATION_OUTBOX_FAILED_QUERY)
+        .bind(id)
+        .bind(last_error)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    ensure_updated(result.rows_affected())
+}
+
+pub async fn release_stale_notification_outbox(
+    pool: &PgPool,
+    stale_before: DateTime<Utc>,
+    next_attempt_at: DateTime<Utc>,
+) -> AppResult<u64> {
+    let result = sqlx::query(RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY)
+        .bind(stale_before)
+        .bind(next_attempt_at)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(result.rows_affected())
+}
+
 pub async fn create_mock_evm_event(pool: &PgPool, address_id: Uuid) -> AppResult<AddressEvent> {
     let address = get_watched_address(pool, address_id).await?;
     let chain = get_chain(pool, address.chain_id).await?;
@@ -902,7 +979,7 @@ mod tests {
     };
     use chrono::{TimeZone, Utc};
     use coin_listener_core::{
-        models::{AddressEvent, AddressEventDraft},
+        models::{AddressEvent, AddressEventDraft, NotificationOutboxItem},
         AppResult,
     };
     use sqlx::PgPool;
@@ -1019,6 +1096,62 @@ mod tests {
     #[test]
     fn insert_event_and_outbox_helper_signature_is_stable() {
         let _ = assert_event_outbox_helper_signature;
+    }
+
+    #[allow(dead_code)]
+    async fn assert_claim_outbox_signature(
+        pool: &PgPool,
+        now: chrono::DateTime<Utc>,
+        worker_id: &str,
+        limit: i64,
+    ) -> AppResult<Vec<NotificationOutboxItem>> {
+        super::claim_due_notification_outbox(pool, now, worker_id, limit).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_mark_outbox_delivered_signature(
+        pool: &PgPool,
+        id: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> AppResult<()> {
+        super::mark_notification_outbox_delivered(pool, id, now).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_mark_outbox_failed_signature(
+        pool: &PgPool,
+        id: uuid::Uuid,
+        last_error: &str,
+    ) -> AppResult<()> {
+        super::mark_notification_outbox_failed(pool, id, last_error).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_mark_outbox_retryable_signature(
+        pool: &PgPool,
+        id: uuid::Uuid,
+        next_attempt_at: chrono::DateTime<Utc>,
+        last_error: &str,
+    ) -> AppResult<()> {
+        super::mark_notification_outbox_retryable(pool, id, next_attempt_at, last_error).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_release_stale_outbox_signature(
+        pool: &PgPool,
+        stale_before: chrono::DateTime<Utc>,
+        next_attempt_at: chrono::DateTime<Utc>,
+    ) -> AppResult<u64> {
+        super::release_stale_notification_outbox(pool, stale_before, next_attempt_at).await
+    }
+
+    #[test]
+    fn notification_outbox_repository_helper_signatures_are_stable() {
+        let _ = assert_claim_outbox_signature;
+        let _ = assert_mark_outbox_delivered_signature;
+        let _ = assert_mark_outbox_retryable_signature;
+        let _ = assert_mark_outbox_failed_signature;
+        let _ = assert_release_stale_outbox_signature;
     }
 
     #[test]
