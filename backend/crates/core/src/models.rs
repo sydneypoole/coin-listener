@@ -221,6 +221,17 @@ pub struct NotificationStatus {
     pub last_24h_skipped: i64,
     pub last_24h_failed: i64,
     pub unread_in_app: i64,
+    pub outbox: OutboxStatusCounts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OutboxStatusCounts {
+    pub pending: i64,
+    pub retryable: i64,
+    pub processing: i64,
+    pub failed: i64,
+    pub stale_processing: i64,
+    pub next_due_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +366,43 @@ pub struct InAppNotification {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationDeliveryQuery {
+    pub event_id: Option<Uuid>,
+    pub status: Option<String>,
+    pub channel_type: Option<String>,
+    pub rule_id: Option<Uuid>,
+    pub channel_id: Option<Uuid>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct NotificationDeliveryListItem {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub event_id: Uuid,
+    pub rule_id: Option<Uuid>,
+    pub channel_id: Option<Uuid>,
+    pub channel_type: Option<String>,
+    pub status: String,
+    pub attempt_count: i32,
+    pub last_error: Option<String>,
+    pub sent_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub idempotency_key: Option<String>,
+    pub provider_message_id: Option<String>,
+    pub provider_status_code: Option<i32>,
+    pub provider_response: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationDeliveryListResponse {
+    pub items: Vec<NotificationDeliveryListItem>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct NotificationOutboxItem {
     pub id: Uuid,
@@ -369,6 +417,57 @@ pub struct NotificationOutboxItem {
     pub delivered_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationOutboxQuery {
+    pub status: Option<String>,
+    pub event_id: Option<Uuid>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct NotificationOutboxListItem {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub event_id: Uuid,
+    pub status: String,
+    pub attempt_count: i32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub locked_by: Option<String>,
+    pub last_error: Option<String>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub event_type: Option<String>,
+    pub direction: Option<String>,
+    pub tx_hash: Option<String>,
+    pub delivery_total: i64,
+    pub delivery_sent: i64,
+    pub delivery_failed: i64,
+    pub delivery_skipped: i64,
+    pub is_stale_processing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationOutboxListResponse {
+    pub items: Vec<NotificationOutboxListItem>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationOutboxDetail {
+    pub outbox: NotificationOutboxListItem,
+    pub event: AddressEvent,
+    pub deliveries: Vec<NotificationDeliveryListItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryNotificationOutboxResponse {
+    pub outbox: NotificationOutboxItem,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -432,9 +531,13 @@ pub struct AddressEventDraft {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateBalanceSnapshotRequest, EventStatus, NotificationDelivery, NotificationOutboxItem,
-        NotificationStatus, NotifyEventTask, ProviderChainStatus, ProviderStatus,
-        ProviderStatusItem, QueueStatus, ScanAddressTask, ScanCursor, ScanStatus, SystemStatus,
+        AddressEvent, CreateBalanceSnapshotRequest, EventStatus, NotificationDelivery,
+        NotificationDeliveryListItem, NotificationDeliveryListResponse, NotificationDeliveryQuery,
+        NotificationOutboxDetail, NotificationOutboxItem, NotificationOutboxListItem,
+        NotificationOutboxListResponse, NotificationOutboxQuery, NotificationStatus,
+        NotifyEventTask, OutboxStatusCounts, ProviderChainStatus, ProviderStatus,
+        ProviderStatusItem, QueueStatus, RetryNotificationOutboxResponse, ScanAddressTask,
+        ScanCursor, ScanStatus, SystemStatus,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
@@ -466,6 +569,14 @@ mod tests {
                 last_24h_skipped: 2,
                 last_24h_failed: 1,
                 unread_in_app: 4,
+                outbox: OutboxStatusCounts {
+                    pending: 0,
+                    retryable: 0,
+                    processing: 0,
+                    failed: 0,
+                    stale_processing: 0,
+                    next_due_at: None,
+                },
             },
             providers: ProviderStatus {
                 active: 4,
@@ -582,6 +693,161 @@ mod tests {
         assert_eq!(decoded.attempt_count, 2);
         assert_eq!(decoded.locked_by.as_deref(), Some("notifier-test"));
         assert!(payload.contains("\"last_error\":\"temporary failure\""));
+    }
+
+    #[test]
+    fn notification_status_round_trips_outbox_counts() {
+        let status = NotificationStatus {
+            last_24h_sent: 20,
+            last_24h_skipped: 2,
+            last_24h_failed: 1,
+            unread_in_app: 4,
+            outbox: OutboxStatusCounts {
+                pending: 3,
+                retryable: 2,
+                processing: 1,
+                failed: 5,
+                stale_processing: 1,
+                next_due_at: Some(Utc.with_ymd_and_hms(2026, 5, 19, 10, 0, 0).unwrap()),
+            },
+        };
+
+        let payload = serde_json::to_string(&status).expect("serialize notification status");
+        let decoded: NotificationStatus =
+            serde_json::from_str(&payload).expect("deserialize notification status");
+
+        assert_eq!(decoded, status);
+        assert!(payload.contains("\"pending\":3"));
+        assert!(payload.contains("\"stale_processing\":1"));
+    }
+
+    #[test]
+    fn notification_operations_queries_deserialize_filters() {
+        let outbox_query: NotificationOutboxQuery = serde_json::from_str(
+            r#"{"status":"failed","event_id":"00000000-0000-0000-0000-000000000001","limit":50,"offset":10}"#,
+        )
+        .expect("deserialize outbox query");
+        assert_eq!(outbox_query.status.as_deref(), Some("failed"));
+        assert_eq!(outbox_query.limit, Some(50));
+        assert_eq!(outbox_query.offset, Some(10));
+
+        let delivery_query: NotificationDeliveryQuery = serde_json::from_str(
+            r#"{"status":"failed","channel_type":"webhook","rule_id":"00000000-0000-0000-0000-000000000002","channel_id":"00000000-0000-0000-0000-000000000003","limit":25,"offset":5}"#,
+        )
+        .expect("deserialize delivery query");
+        assert_eq!(delivery_query.status.as_deref(), Some("failed"));
+        assert_eq!(delivery_query.channel_type.as_deref(), Some("webhook"));
+        assert_eq!(delivery_query.limit, Some(25));
+        assert_eq!(delivery_query.offset, Some(5));
+    }
+
+    #[test]
+    fn notification_operations_responses_round_trip_provider_metadata() {
+        let created_at = Utc.with_ymd_and_hms(2026, 5, 19, 9, 0, 0).unwrap();
+        let event_id = Uuid::from_u128(13);
+        let outbox = NotificationOutboxListItem {
+            id: Uuid::from_u128(11),
+            tenant_id: Uuid::from_u128(12),
+            event_id,
+            status: "failed".to_string(),
+            attempt_count: 5,
+            next_attempt_at: Utc.with_ymd_and_hms(2026, 5, 19, 10, 0, 0).unwrap(),
+            locked_at: None,
+            locked_by: None,
+            last_error: Some("webhook returned retryable status 500".to_string()),
+            delivered_at: None,
+            created_at,
+            updated_at: created_at,
+            event_type: Some("transfer".to_string()),
+            direction: Some("in".to_string()),
+            tx_hash: Some("0xabc".to_string()),
+            delivery_total: 2,
+            delivery_sent: 1,
+            delivery_failed: 1,
+            delivery_skipped: 0,
+            is_stale_processing: false,
+        };
+        let delivery = NotificationDeliveryListItem {
+            id: Uuid::from_u128(21),
+            tenant_id: Uuid::from_u128(12),
+            event_id,
+            rule_id: Some(Uuid::from_u128(22)),
+            channel_id: Some(Uuid::from_u128(23)),
+            channel_type: Some("webhook".to_string()),
+            status: "failed".to_string(),
+            attempt_count: 3,
+            last_error: Some("webhook returned retryable status 500".to_string()),
+            sent_at: None,
+            created_at,
+            idempotency_key: Some("notification:v1:tenant:event:rule:channel".to_string()),
+            provider_message_id: None,
+            provider_status_code: Some(500),
+            provider_response: Some("server error".to_string()),
+        };
+        let event = AddressEvent {
+            id: event_id,
+            tenant_id: Uuid::from_u128(12),
+            chain_id: Uuid::from_u128(31),
+            address_id: Uuid::from_u128(32),
+            asset_id: Uuid::from_u128(33),
+            event_type: "transfer".to_string(),
+            direction: "in".to_string(),
+            is_transfer: true,
+            tx_hash: Some("0xabc".to_string()),
+            log_index: Some(1),
+            block_number: Some(100),
+            block_hash: Some("0xblock".to_string()),
+            confirmations: 12,
+            from_address: Some("0xfrom".to_string()),
+            to_address: Some("0xto".to_string()),
+            amount_raw: Some("1000".to_string()),
+            amount_decimal: Some("0.001".to_string()),
+            balance_before_raw: None,
+            balance_after_raw: None,
+            balance_delta_raw: None,
+            metadata: serde_json::json!({"source":"test"}),
+            detected_at: created_at,
+            created_at,
+        };
+        let detail = NotificationOutboxDetail {
+            outbox: outbox.clone(),
+            event,
+            deliveries: vec![delivery.clone()],
+        };
+
+        let outbox_list = NotificationOutboxListResponse {
+            items: vec![outbox.clone()],
+            limit: 50,
+            offset: 0,
+        };
+        let delivery_list = NotificationDeliveryListResponse {
+            items: vec![delivery],
+            limit: 50,
+            offset: 0,
+        };
+        let retry = RetryNotificationOutboxResponse {
+            outbox: NotificationOutboxItem {
+                id: outbox.id,
+                tenant_id: outbox.tenant_id,
+                event_id: outbox.event_id,
+                status: "retryable".to_string(),
+                attempt_count: outbox.attempt_count,
+                next_attempt_at: outbox.next_attempt_at,
+                locked_at: None,
+                locked_by: None,
+                last_error: None,
+                delivered_at: None,
+                created_at: outbox.created_at,
+                updated_at: outbox.updated_at,
+            },
+        };
+
+        let payload = serde_json::to_string(&(outbox_list, detail, delivery_list, retry))
+            .expect("serialize operations responses");
+
+        assert!(payload.contains("\"delivery_failed\":1"));
+        assert!(payload.contains("\"provider_status_code\":500"));
+        assert!(payload.contains("\"outbox\""));
     }
 
     #[test]
