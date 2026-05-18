@@ -1,5 +1,6 @@
 use coin_listener_core::models::AddressEvent;
 use hmac::{Hmac, Mac};
+use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::Sha256;
@@ -98,6 +99,93 @@ pub fn notification_idempotency_key(
 }
 
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, Clone)]
+pub struct ExternalNotificationSender {
+    client: Client,
+    telegram_api_base_url: String,
+}
+
+impl ExternalNotificationSender {
+    pub fn new(client: Client) -> Self {
+        Self {
+            client,
+            telegram_api_base_url: "https://api.telegram.org".to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_telegram_api_base_url(client: Client, telegram_api_base_url: String) -> Self {
+        Self {
+            client,
+            telegram_api_base_url,
+        }
+    }
+
+    pub async fn send_telegram(
+        &self,
+        config: &TelegramChannelConfig,
+        bot_token: &str,
+        text: &str,
+    ) -> ExternalSendOutcome {
+        let url = format!(
+            "{}/bot{}/sendMessage",
+            self.telegram_api_base_url.trim_end_matches('/'),
+            bot_token
+        );
+        let response = self
+            .client
+            .post(&url)
+            .timeout(Duration::from_millis(5000))
+            .json(&serde_json::json!({
+                "chat_id": config.chat_id,
+                "text": text,
+            }))
+            .send()
+            .await;
+
+        match response {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let body = response.text().await.unwrap_or_default();
+                classify_telegram_response(status, &body)
+            }
+            Err(error) => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+                last_error: Some(telegram_network_error_message(&url, &error.to_string())),
+                provider_message_id: None,
+                provider_status_code: None,
+                provider_response: None,
+            }),
+        }
+    }
+
+    pub async fn send_webhook(&self, parts: WebhookRequestParts) -> ExternalSendOutcome {
+        let mut request = self
+            .client
+            .post(&parts.url)
+            .timeout(parts.timeout)
+            .body(parts.body);
+        for (name, value) in parts.headers {
+            request = request.header(name, value);
+        }
+        match request.send().await {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let body = response.text().await.unwrap_or_default();
+                classify_webhook_response(status, &body)
+            }
+            Err(error) => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+                last_error: Some(webhook_network_error_message(
+                    &parts.url,
+                    &error.to_string(),
+                )),
+                provider_message_id: None,
+                provider_status_code: None,
+                provider_response: None,
+            }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalSendMetadata {
@@ -253,6 +341,53 @@ pub fn classify_webhook_response(status_code: u16, body: &str) -> ExternalSendOu
     }
 }
 
+pub fn classify_telegram_response(status_code: u16, body: &str) -> ExternalSendOutcome {
+    let provider_message_id = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| value.get("result").cloned())
+        .and_then(|result| result.get("message_id").cloned())
+        .and_then(|message_id| message_id.as_i64().map(|value| value.to_string()));
+
+    let metadata = ExternalSendMetadata {
+        last_error: None,
+        provider_message_id,
+        provider_status_code: Some(status_code as i32),
+        provider_response: Some(truncate_provider_response(body)),
+    };
+    match status_code {
+        200..=299 => ExternalSendOutcome::Sent(metadata),
+        408 | 429 | 500..=599 => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+            last_error: Some(format!("telegram returned retryable status {status_code}")),
+            ..metadata
+        }),
+        _ => ExternalSendOutcome::PermanentFailure(ExternalSendMetadata {
+            last_error: Some(format!("telegram returned permanent status {status_code}")),
+            ..metadata
+        }),
+    }
+}
+
+pub fn telegram_network_error_message(url: &str, error: &str) -> String {
+    format!(
+        "telegram {} failed: {}",
+        redact_telegram_url(url),
+        redact_telegram_urls_in_text(error)
+    )
+}
+
+pub fn render_external_notification_text(event: &AddressEvent) -> String {
+    let amount = event
+        .amount_decimal
+        .as_deref()
+        .or(event.amount_raw.as_deref())
+        .unwrap_or("-");
+    let tx_hash = event.tx_hash.as_deref().unwrap_or("-");
+    format!(
+        "{} {}\naddress: {}\nasset: {}\namount: {}\ntx: {}",
+        event.event_type, event.direction, event.address_id, event.asset_id, amount, tx_hash
+    )
+}
+
 pub fn webhook_network_error_message(url: &str, error: &str) -> String {
     format!(
         "webhook {} failed: {}",
@@ -262,24 +397,33 @@ pub fn webhook_network_error_message(url: &str, error: &str) -> String {
 }
 
 pub fn redact_webhook_urls_in_text(text: &str) -> String {
+    redact_urls_in_text(text, redact_webhook_url)
+}
+
+pub fn redact_telegram_urls_in_text(text: &str) -> String {
+    redact_urls_in_text(text, redact_telegram_url)
+}
+
+fn redact_urls_in_text(text: &str, redact_url: fn(&str) -> String) -> String {
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(url_start) = find_webhook_url_start(rest) {
+    while let Some(url_start) = find_url_start(rest) {
         output.push_str(&rest[..url_start]);
         let after_prefix = &rest[url_start..];
         let url_end = after_prefix
             .find(char::is_whitespace)
             .unwrap_or(after_prefix.len());
         let (url, tail) = after_prefix.split_at(url_end);
-        output.push_str(&redact_webhook_url(url));
+        output.push_str(&redact_url(url));
         rest = tail;
     }
     output.push_str(rest);
     output
 }
 
-fn find_webhook_url_start(text: &str) -> Option<usize> {
-    match (text.find("http://"), text.find("https://")) {
+fn find_url_start(text: &str) -> Option<usize> {
+    let lower_text = text.to_ascii_lowercase();
+    match (lower_text.find("http://"), lower_text.find("https://")) {
         (Some(http), Some(https)) => Some(http.min(https)),
         (Some(http), None) => Some(http),
         (None, Some(https)) => Some(https),
@@ -346,10 +490,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::external::{
-        build_webhook_request_parts, classify_webhook_response, notification_idempotency_key,
-        redact_telegram_url, redact_webhook_url, truncate_provider_response,
-        webhook_network_error_message, webhook_signature, TelegramChannelConfig,
-        WebhookChannelConfig,
+        build_webhook_request_parts, classify_telegram_response, classify_webhook_response,
+        notification_idempotency_key, redact_telegram_url, redact_webhook_url,
+        telegram_network_error_message, truncate_provider_response, webhook_network_error_message,
+        webhook_signature, TelegramChannelConfig, WebhookChannelConfig,
     };
 
     fn uuid(value: u128) -> Uuid {
@@ -617,5 +761,56 @@ mod tests {
 
         assert!(truncated.len() <= 2048);
         assert!(truncated.is_char_boundary(truncated.len()));
+    }
+
+    #[test]
+    fn telegram_sender_classifies_success_as_sent() {
+        let outcome = classify_telegram_response(200, r#"{"ok":true,"result":{"message_id":123}}"#);
+
+        assert!(outcome.is_sent());
+        assert_eq!(
+            outcome.metadata().provider_message_id.as_deref(),
+            Some("123")
+        );
+        assert_eq!(outcome.metadata().provider_status_code, Some(200));
+    }
+
+    #[test]
+    fn telegram_sender_classifies_rate_limit_as_retryable() {
+        let outcome =
+            classify_telegram_response(429, r#"{"ok":false,"description":"Too Many Requests"}"#);
+
+        assert!(outcome.is_transient_failure());
+        assert!(outcome
+            .metadata()
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("retryable status 429"));
+    }
+
+    #[test]
+    fn telegram_sender_classifies_auth_error_as_permanent() {
+        let outcome =
+            classify_telegram_response(401, r#"{"ok":false,"description":"Unauthorized"}"#);
+
+        assert!(outcome.is_permanent_failure());
+        assert!(outcome
+            .metadata()
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("permanent status 401"));
+    }
+
+    #[test]
+    fn telegram_request_url_redacts_token_from_error_message() {
+        let error = telegram_network_error_message(
+            "https://api.telegram.org/bot123:secret/sendMessage",
+            "timeout",
+        );
+
+        assert!(error.contains("bot<redacted>"));
+        assert!(!error.contains("123:secret"));
     }
 }
