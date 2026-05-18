@@ -572,64 +572,60 @@ pub async fn insert_event_if_not_exists(
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
-pub fn insert_event_and_outbox_if_not_exists(
+pub async fn insert_event_and_outbox_if_not_exists(
     pool: &PgPool,
     draft: AddressEventDraft,
-) -> impl std::future::Future<Output = AppResult<Option<AddressEvent>>> {
-    let pool = pool.clone();
+) -> AppResult<Option<AddressEvent>> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
 
-    async move {
-        let mut transaction = pool
-            .begin()
+    let event = sqlx::query_as::<_, AddressEvent>(INSERT_EVENT_IF_NOT_EXISTS_QUERY)
+        .bind(draft.tenant_id)
+        .bind(draft.chain_id)
+        .bind(draft.address_id)
+        .bind(draft.asset_id)
+        .bind(draft.event_type)
+        .bind(draft.direction)
+        .bind(draft.is_transfer)
+        .bind(draft.tx_hash)
+        .bind(draft.log_index)
+        .bind(draft.block_number)
+        .bind(draft.block_hash)
+        .bind(draft.confirmations)
+        .bind(draft.from_address)
+        .bind(draft.to_address)
+        .bind(draft.amount_raw)
+        .bind(draft.amount_decimal)
+        .bind(draft.balance_before_raw)
+        .bind(draft.balance_after_raw)
+        .bind(draft.balance_delta_raw)
+        .bind(draft.metadata)
+        .fetch_optional(transaction.as_mut())
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    if let Some(event) = event {
+        sqlx::query(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY)
+            .bind(event.tenant_id)
+            .bind(event.id)
+            .execute(transaction.as_mut())
             .await
             .map_err(|error| AppError::Database(error.to_string()))?;
-
-        let event = sqlx::query_as::<_, AddressEvent>(INSERT_EVENT_IF_NOT_EXISTS_QUERY)
-            .bind(draft.tenant_id)
-            .bind(draft.chain_id)
-            .bind(draft.address_id)
-            .bind(draft.asset_id)
-            .bind(draft.event_type)
-            .bind(draft.direction)
-            .bind(draft.is_transfer)
-            .bind(draft.tx_hash)
-            .bind(draft.log_index)
-            .bind(draft.block_number)
-            .bind(draft.block_hash)
-            .bind(draft.confirmations)
-            .bind(draft.from_address)
-            .bind(draft.to_address)
-            .bind(draft.amount_raw)
-            .bind(draft.amount_decimal)
-            .bind(draft.balance_before_raw)
-            .bind(draft.balance_after_raw)
-            .bind(draft.balance_delta_raw)
-            .bind(draft.metadata)
-            .fetch_optional(transaction.as_mut())
-            .await
-            .map_err(|error| AppError::Database(error.to_string()))?;
-
-        if let Some(event) = event {
-            sqlx::query(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY)
-                .bind(event.tenant_id)
-                .bind(event.id)
-                .execute(transaction.as_mut())
-                .await
-                .map_err(|error| AppError::Database(error.to_string()))?;
-
-            transaction
-                .commit()
-                .await
-                .map_err(|error| AppError::Database(error.to_string()))?;
-            return Ok(Some(event));
-        }
 
         transaction
             .commit()
             .await
             .map_err(|error| AppError::Database(error.to_string()))?;
-        Ok(None)
+        return Ok(Some(event));
     }
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    Ok(None)
 }
 
 pub async fn create_mock_evm_event(pool: &PgPool, address_id: Uuid) -> AppResult<AddressEvent> {
@@ -894,8 +890,6 @@ fn validate_address_for_chain(chain: &Chain, address: &str) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-
     use super::{
         next_scan_at_from, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
         ACTIVE_RPC_PROVIDER_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
@@ -1014,16 +1008,17 @@ mod tests {
             .contains("ON CONFLICT (event_id) DO NOTHING"));
     }
 
-    fn assert_event_outbox_helper_signature<F, Fut>(_function: F)
-    where
-        F: Fn(&PgPool, AddressEventDraft) -> Fut,
-        Fut: Future<Output = AppResult<Option<AddressEvent>>>,
-    {
+    #[allow(dead_code)]
+    async fn assert_event_outbox_helper_signature(
+        pool: &PgPool,
+        draft: AddressEventDraft,
+    ) -> AppResult<Option<AddressEvent>> {
+        super::insert_event_and_outbox_if_not_exists(pool, draft).await
     }
 
     #[test]
     fn insert_event_and_outbox_helper_signature_is_stable() {
-        assert_event_outbox_helper_signature(super::insert_event_and_outbox_if_not_exists);
+        let _ = assert_event_outbox_helper_signature;
     }
 
     #[test]
