@@ -62,7 +62,11 @@ export function SystemStatusPage() {
             <Metric title="24h 事件" value={status?.events.last_24h_total ?? 0} hint={`transfer ${status?.events.last_24h_transfers ?? 0}`} />
           </Col>
           <Col span={8}>
-            <Metric title="24h 通知失败" value={status?.notifications.last_24h_failed ?? 0} hint={`unread ${status?.notifications.unread_in_app ?? 0}`} />
+            <Metric
+              title="Outbox Failed"
+              value={status?.notifications.outbox.failed ?? 0}
+              hint={`24h delivery failed ${status?.notifications.last_24h_failed ?? 0}`}
+            />
           </Col>
         </Row>
       </Card>
@@ -77,6 +81,11 @@ export function SystemStatusPage() {
           <Text>
             24h 通知：sent {status?.notifications.last_24h_sent ?? 0} / skipped {status?.notifications.last_24h_skipped ?? 0} / failed{' '}
             {status?.notifications.last_24h_failed ?? 0} / unread {status?.notifications.unread_in_app ?? 0}
+          </Text>
+          <Text>
+            Outbox：pending {status?.notifications.outbox.pending ?? 0} / retryable {status?.notifications.outbox.retryable ?? 0} / processing{' '}
+            {status?.notifications.outbox.processing ?? 0} / failed {status?.notifications.outbox.failed ?? 0} / stale{' '}
+            {status?.notifications.outbox.stale_processing ?? 0} / next due {formatTime(status?.notifications.outbox.next_due_at)}
           </Text>
           <Text>Provider：active {status?.providers.active ?? 0} / inactive {status?.providers.inactive ?? 0}</Text>
         </Space>

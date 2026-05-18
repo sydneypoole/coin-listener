@@ -10,6 +10,7 @@ import { ChainsPage } from './pages/ChainsPage';
 import { EventsPage } from './pages/EventsPage';
 import { InAppNotificationsPage } from './pages/InAppNotificationsPage';
 import { LoginPage } from './pages/LoginPage';
+import { NotificationOperationsPage } from './pages/NotificationOperationsPage';
 import { NotificationRulesPage } from './pages/NotificationRulesPage';
 import { ProvidersPage } from './pages/ProvidersPage';
 import { SystemStatusPage } from './pages/SystemStatusPage';
@@ -26,6 +27,7 @@ type PageKey =
   | 'addresses'
   | 'events'
   | 'notification-rules'
+  | 'notification-operations'
   | 'in-app-notifications';
 
 export function App() {
@@ -57,6 +59,7 @@ export function App() {
             { itemKey: 'addresses', text: '监听地址', icon: <IconUser /> },
             { itemKey: 'events', text: '事件中心', icon: <IconBell /> },
             { itemKey: 'notification-rules', text: '通知规则', icon: <IconBell /> },
+            { itemKey: 'notification-operations', text: '通知运维', icon: <IconBell /> },
             { itemKey: 'in-app-notifications', text: '站内通知', icon: <IconBell /> },
           ]}
         />
@@ -80,6 +83,7 @@ function renderPage(page: PageKey, healthQuery: ReturnType<typeof useQuery<Healt
   if (page === 'addresses') return <AddressesPage />;
   if (page === 'events') return <EventsPage />;
   if (page === 'notification-rules') return <NotificationRulesPage />;
+  if (page === 'notification-operations') return <NotificationOperationsPage />;
   if (page === 'in-app-notifications') return <InAppNotificationsPage />;
 
   return (
@@ -87,7 +91,7 @@ function renderPage(page: PageKey, healthQuery: ReturnType<typeof useQuery<Healt
       <Banner
         type="info"
         title="Milestone 3"
-        description="当前版本提供登录、链配置、资产配置、Provider 配置、监听地址管理、事件中心、通知规则、站内通知和系统状态。"
+        description="当前版本提供登录、链配置、资产配置、Provider 配置、监听地址管理、事件中心、通知规则、通知运维、站内通知和系统状态。"
       />
       <Card title="API 健康状态" className="status-card">
         {healthQuery.isLoading ? <Text>正在检查 API...</Text> : null}
