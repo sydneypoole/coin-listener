@@ -13,3 +13,4 @@
 .claude/
 .cursor/
 /package-lock.json
+.worktrees/
