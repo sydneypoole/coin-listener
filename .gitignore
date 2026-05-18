@@ -12,3 +12,4 @@
 .npm-cache/
 .claude/
 .cursor/
+/package-lock.json
