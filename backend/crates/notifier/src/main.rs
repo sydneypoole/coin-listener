@@ -5,7 +5,9 @@ use std::sync::{
 
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{connect_postgres, run_migrations};
-use notifier::{run_notifier, NotificationOutboxDispatcherConfig};
+use notifier::{
+    external::ExternalNotificationSender, run_notifier, NotificationOutboxDispatcherConfig,
+};
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -39,7 +41,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let dispatcher_config = NotificationOutboxDispatcherConfig::from_notify_config(&config.notify);
-    run_notifier(postgres, dispatcher_config, shutdown).await?;
+    let external_sender = ExternalNotificationSender::new(reqwest::Client::new());
+    run_notifier(postgres, dispatcher_config, external_sender, shutdown).await?;
 
     info!(service = "notifier", "service stopped");
     Ok(())

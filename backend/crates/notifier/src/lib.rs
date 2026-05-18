@@ -10,21 +10,27 @@ use std::{
     time::Duration,
 };
 
+use crate::external::{
+    build_webhook_request_parts, notification_idempotency_key, render_external_notification_text,
+    ExternalChannelType, ExternalNotificationSender, ExternalSendOutcome, TelegramChannelConfig,
+    WebhookChannelConfig,
+};
 use chrono::{DateTime, Utc};
 use coin_listener_core::{
     models::{
         AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule,
         NotifyEventTask,
     },
-    AppResult, NotifyConfig,
+    AppError, AppResult, NotifyConfig,
 };
-use coin_listener_storage::{notifications, repositories};
+use coin_listener_storage::{notifications, notifications::ExternalDeliveryStart, repositories};
 use sqlx::PgPool;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotifyChannelDecision {
     InApp,
+    External { channel_type: ExternalChannelType },
     Skipped { last_error: &'static str },
 }
 
@@ -42,6 +48,7 @@ pub struct NotifyDeliveryPlan {
     pub status: &'static str,
     pub last_error: Option<&'static str>,
     pub create_in_app: bool,
+    pub external_channel_type: Option<ExternalChannelType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +73,7 @@ impl NotificationOutboxDispatcherConfig {
 pub const DELIVERY_STATUS_SENT: &str = "sent";
 pub const DELIVERY_STATUS_SKIPPED: &str = "skipped";
 pub const DELIVERY_STATUS_FAILED: &str = "failed";
+pub const DELIVERY_STATUS_PROCESSING: &str = "processing";
 pub const NOT_IMPLEMENTED_CHANNEL_ERROR: &str = "channel type not implemented";
 pub const UNAVAILABLE_CHANNEL_ERROR: &str = "channel unavailable";
 pub const MISSING_CHANNEL_ERROR_PREFIX: &str = "channel missing";
@@ -160,6 +168,12 @@ pub fn build_in_app_notification_content(event: &AddressEvent) -> (String, Strin
 pub fn notify_channel_decision(channel_type: &str) -> NotifyChannelDecision {
     match channel_type {
         "in_app" => NotifyChannelDecision::InApp,
+        "telegram" => NotifyChannelDecision::External {
+            channel_type: ExternalChannelType::Telegram,
+        },
+        "webhook" => NotifyChannelDecision::External {
+            channel_type: ExternalChannelType::Webhook,
+        },
         _ => NotifyChannelDecision::Skipped {
             last_error: NOT_IMPLEMENTED_CHANNEL_ERROR,
         },
@@ -174,6 +188,15 @@ pub fn build_delivery_plan(channel: &NotificationChannel) -> NotifyDeliveryPlan 
             status: DELIVERY_STATUS_SENT,
             last_error: None,
             create_in_app: true,
+            external_channel_type: None,
+        },
+        NotifyChannelDecision::External { channel_type } => NotifyDeliveryPlan {
+            channel_id: channel.id,
+            channel_type: Some(channel.channel_type.clone()),
+            status: DELIVERY_STATUS_PROCESSING,
+            last_error: None,
+            create_in_app: false,
+            external_channel_type: Some(channel_type),
         },
         NotifyChannelDecision::Skipped { last_error } => NotifyDeliveryPlan {
             channel_id: channel.id,
@@ -181,6 +204,7 @@ pub fn build_delivery_plan(channel: &NotificationChannel) -> NotifyDeliveryPlan 
             status: DELIVERY_STATUS_SKIPPED,
             last_error: Some(last_error),
             create_in_app: false,
+            external_channel_type: None,
         },
     }
 }
@@ -192,6 +216,7 @@ pub fn build_unavailable_channel_delivery_plan(channel_id: uuid::Uuid) -> Notify
         status: DELIVERY_STATUS_SKIPPED,
         last_error: Some(UNAVAILABLE_CHANNEL_ERROR),
         create_in_app: false,
+        external_channel_type: None,
     }
 }
 
@@ -242,6 +267,7 @@ pub async fn process_notify_task(
     pool: &PgPool,
     task: NotifyEventTask,
     now: DateTime<Utc>,
+    sender: &ExternalNotificationSender,
 ) -> AppResult<usize> {
     let event = notifications::get_address_event(pool, task.event_id, task.tenant_id).await?;
     let rules = notifications::list_enabled_notification_rules(pool, task.tenant_id).await?;
@@ -254,7 +280,7 @@ pub async fn process_notify_task(
         let channels = resolve_rule_channels(pool, task.tenant_id, rule).await?;
         for channel in channels {
             deliveries += delivery_result_count([process_resolved_channel(
-                pool, &task, &event, rule, channel, now,
+                pool, &task, &event, rule, channel, now, sender,
             )
             .await])?;
         }
@@ -279,14 +305,16 @@ pub async fn process_notification_outbox_item(
     pool: &PgPool,
     item: NotificationOutboxItem,
     now: DateTime<Utc>,
+    sender: &ExternalNotificationSender,
 ) -> AppResult<usize> {
-    process_notify_task(pool, notify_task_from_outbox_item(&item), now).await
+    process_notify_task(pool, notify_task_from_outbox_item(&item), now, sender).await
 }
 
 pub async fn process_notification_outbox_batch(
     pool: &PgPool,
     worker_id: &str,
     config: &NotificationOutboxDispatcherConfig,
+    sender: &ExternalNotificationSender,
     now: DateTime<Utc>,
 ) -> AppResult<usize> {
     let stale_before = now - chrono::Duration::seconds(config.stale_lock_seconds);
@@ -306,7 +334,7 @@ pub async fn process_notification_outbox_batch(
         let tenant_id = item.tenant_id;
         let attempt_count = item.attempt_count;
 
-        match process_notification_outbox_item(pool, item, now).await {
+        match process_notification_outbox_item(pool, item, now, sender).await {
             Ok(deliveries) => {
                 repositories::mark_notification_outbox_delivered(pool, outbox_id, now).await?;
                 info!(
@@ -415,15 +443,25 @@ async fn process_resolved_channel(
     rule: &NotificationRule,
     channel: ResolvedNotifyChannel,
     now: DateTime<Utc>,
+    sender: &ExternalNotificationSender,
 ) -> AppResult<()> {
     match channel {
         ResolvedNotifyChannel::Active(channel) => {
-            process_channel_delivery(pool, task, event, rule, build_delivery_plan(&channel), now)
-                .await
+            process_channel_delivery(
+                pool,
+                sender,
+                task,
+                event,
+                rule,
+                build_delivery_plan(&channel),
+                now,
+            )
+            .await
         }
         ResolvedNotifyChannel::Inactive(channel_id) => {
             process_channel_delivery(
                 pool,
+                sender,
                 task,
                 event,
                 rule,
@@ -460,8 +498,189 @@ async fn create_skipped_missing_channel_delivery(
     Ok(())
 }
 
+async fn process_external_channel_delivery(
+    pool: &PgPool,
+    sender: &ExternalNotificationSender,
+    task: &NotifyEventTask,
+    event: &AddressEvent,
+    rule: &NotificationRule,
+    channel_id: uuid::Uuid,
+    channel_type: ExternalChannelType,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    let idempotency_key =
+        notification_idempotency_key(task.tenant_id, task.event_id, rule.id, channel_id);
+    let attempt_count = task.attempt as i32;
+    let start = notifications::begin_external_notification_delivery(
+        pool,
+        task.tenant_id,
+        task.event_id,
+        rule.id,
+        channel_id,
+        channel_type.as_str(),
+        &idempotency_key,
+        attempt_count,
+    )
+    .await?;
+
+    let ExternalDeliveryStart::ReadyToSend { delivery_id } = start else {
+        return Ok(());
+    };
+
+    let channel = notifications::list_channels_by_ids(pool, task.tenant_id, &[channel_id])
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::NotFound("external notification channel".to_string()))?;
+
+    let outcome = match channel_type {
+        ExternalChannelType::Telegram => {
+            let config = match TelegramChannelConfig::parse(&channel.config) {
+                Ok(config) => config,
+                Err(error) => {
+                    notifications::mark_external_notification_delivery_failed(
+                        pool,
+                        task.tenant_id,
+                        delivery_id,
+                        attempt_count,
+                        &error.message,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            let bot_token = match std::env::var(&config.bot_token_env) {
+                Ok(token) => token,
+                Err(_) => {
+                    let message = format!("telegram token env {} is not set", config.bot_token_env);
+                    notifications::mark_external_notification_delivery_failed(
+                        pool,
+                        task.tenant_id,
+                        delivery_id,
+                        attempt_count,
+                        &message,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            sender
+                .send_telegram(
+                    &config,
+                    &bot_token,
+                    &render_external_notification_text(event),
+                )
+                .await
+        }
+        ExternalChannelType::Webhook => {
+            let config = match WebhookChannelConfig::parse(&channel.config) {
+                Ok(config) => config,
+                Err(error) => {
+                    notifications::mark_external_notification_delivery_failed(
+                        pool,
+                        task.tenant_id,
+                        delivery_id,
+                        attempt_count,
+                        &error.message,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            let secret = match load_optional_env_secret(config.secret_env.as_deref()) {
+                Ok(secret) => secret,
+                Err(message) => {
+                    notifications::mark_external_notification_delivery_failed(
+                        pool,
+                        task.tenant_id,
+                        delivery_id,
+                        attempt_count,
+                        &message,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            let parts = match build_webhook_request_parts(
+                &config,
+                event,
+                &idempotency_key,
+                secret.as_deref(),
+            ) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    notifications::mark_external_notification_delivery_failed(
+                        pool,
+                        task.tenant_id,
+                        delivery_id,
+                        attempt_count,
+                        &error.message,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            sender.send_webhook(parts).await
+        }
+    };
+
+    let metadata = outcome.metadata();
+    match &outcome {
+        ExternalSendOutcome::Sent(_) => {
+            notifications::mark_external_notification_delivery_sent(
+                pool,
+                task.tenant_id,
+                delivery_id,
+                attempt_count,
+                now,
+                metadata.provider_message_id.as_deref(),
+                metadata.provider_status_code,
+                metadata.provider_response.as_deref(),
+            )
+            .await?;
+        }
+        ExternalSendOutcome::PermanentFailure(_) | ExternalSendOutcome::TransientFailure(_) => {
+            notifications::mark_external_notification_delivery_failed(
+                pool,
+                task.tenant_id,
+                delivery_id,
+                attempt_count,
+                metadata
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("external notification failed"),
+                metadata.provider_status_code,
+                metadata.provider_response.as_deref(),
+            )
+            .await?;
+        }
+    }
+
+    external_send_outcome_result(&outcome)
+}
+
+fn load_optional_env_secret(secret_env: Option<&str>) -> Result<Option<String>, String> {
+    match secret_env {
+        Some(secret_env) => std::env::var(secret_env)
+            .map(Some)
+            .map_err(|_| format!("webhook secret env {secret_env} is not set")),
+        None => Ok(None),
+    }
+}
+
 async fn process_channel_delivery(
     pool: &PgPool,
+    sender: &ExternalNotificationSender,
     task: &NotifyEventTask,
     event: &AddressEvent,
     rule: &NotificationRule,
@@ -487,6 +706,20 @@ async fn process_channel_delivery(
         return Ok(());
     }
 
+    if let Some(external_channel_type) = plan.external_channel_type {
+        return process_external_channel_delivery(
+            pool,
+            sender,
+            task,
+            event,
+            rule,
+            plan.channel_id,
+            external_channel_type,
+            now,
+        )
+        .await;
+    }
+
     notifications::create_notification_delivery(
         pool,
         task.tenant_id,
@@ -501,6 +734,18 @@ async fn process_channel_delivery(
     .await?;
 
     Ok(())
+}
+
+pub fn external_send_outcome_result(outcome: &ExternalSendOutcome) -> AppResult<()> {
+    match outcome {
+        ExternalSendOutcome::Sent(_) | ExternalSendOutcome::PermanentFailure(_) => Ok(()),
+        ExternalSendOutcome::TransientFailure(metadata) => Err(AppError::ExternalNotification(
+            metadata
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "external notification transient failure".to_string()),
+        )),
+    }
 }
 
 pub fn sent_in_app_delivery_result<T>(result: AppResult<T>) -> AppResult<()> {
@@ -520,13 +765,15 @@ pub fn notifier_batch_claimed_count(result: AppResult<usize>) -> usize {
 pub async fn run_notifier(
     pool: PgPool,
     config: NotificationOutboxDispatcherConfig,
+    sender: ExternalNotificationSender,
     shutdown: Arc<AtomicBool>,
 ) -> AppResult<()> {
     let worker_id = format!("notifier-{}", uuid::Uuid::new_v4());
 
     while !notifier_shutdown_requested(&shutdown) {
         let claimed = notifier_batch_claimed_count(
-            process_notification_outbox_batch(&pool, &worker_id, &config, Utc::now()).await,
+            process_notification_outbox_batch(&pool, &worker_id, &config, &sender, Utc::now())
+                .await,
         );
         if claimed == 0 {
             tokio::time::sleep(config.idle_sleep).await;
@@ -558,16 +805,17 @@ mod tests {
         AppError, NotifyConfig,
     };
 
+    use crate::external::{ExternalChannelType, ExternalSendMetadata, ExternalSendOutcome};
     use crate::{
         amount_raw_meets_minimum, build_delivery_plan, build_in_app_notification_content,
         build_unavailable_channel_delivery_plan, delivery_result_count, delivery_sent_at,
-        missing_channel_error, notification_outbox_next_attempt_at,
+        external_send_outcome_result, missing_channel_error, notification_outbox_next_attempt_at,
         notification_outbox_should_fail, notification_outbox_task_attempt,
         notification_rule_matches_event, notifier_batch_claimed_count, notifier_shutdown_requested,
         notify_channel_decision, notify_task_from_outbox_item, resolve_explicit_rule_channels,
         sent_in_app_delivery_result, NotificationOutboxDispatcherConfig, NotifyChannelDecision,
-        ResolvedNotifyChannel, DELIVERY_STATUS_SENT, DELIVERY_STATUS_SKIPPED,
-        MISSING_CHANNEL_ERROR_PREFIX, UNAVAILABLE_CHANNEL_ERROR,
+        ResolvedNotifyChannel, DELIVERY_STATUS_PROCESSING, DELIVERY_STATUS_SENT,
+        DELIVERY_STATUS_SKIPPED, MISSING_CHANNEL_ERROR_PREFIX, UNAVAILABLE_CHANNEL_ERROR,
     };
 
     fn uuid(value: u128) -> sqlx::types::Uuid {
@@ -806,9 +1054,25 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_channel_is_skipped() {
+    fn notifier_treats_telegram_and_webhook_as_sendable_channels() {
         assert_eq!(
             notify_channel_decision("telegram"),
+            NotifyChannelDecision::External {
+                channel_type: ExternalChannelType::Telegram
+            }
+        );
+        assert_eq!(
+            notify_channel_decision("webhook"),
+            NotifyChannelDecision::External {
+                channel_type: ExternalChannelType::Webhook
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_channel_is_skipped() {
+        assert_eq!(
+            notify_channel_decision("email"),
             NotifyChannelDecision::Skipped {
                 last_error: "channel type not implemented"
             }
@@ -825,12 +1089,61 @@ mod tests {
     }
 
     #[test]
+    fn external_channel_delivery_plan_records_sendable_channel_type() {
+        let telegram = build_delivery_plan(&channel("telegram"));
+        let webhook = build_delivery_plan(&channel("webhook"));
+
+        assert_eq!(telegram.status, DELIVERY_STATUS_PROCESSING);
+        assert_eq!(
+            telegram.external_channel_type,
+            Some(ExternalChannelType::Telegram)
+        );
+        assert!(!telegram.create_in_app);
+        assert_eq!(webhook.status, DELIVERY_STATUS_PROCESSING);
+        assert_eq!(
+            webhook.external_channel_type,
+            Some(ExternalChannelType::Webhook)
+        );
+        assert!(!webhook.create_in_app);
+    }
+
+    #[test]
     fn unsupported_channel_delivery_plan_is_skipped_without_in_app() {
-        let plan = build_delivery_plan(&channel("telegram"));
+        let plan = build_delivery_plan(&channel("email"));
 
         assert_eq!(plan.status, DELIVERY_STATUS_SKIPPED);
         assert_eq!(plan.last_error, Some("channel type not implemented"));
         assert!(!plan.create_in_app);
+        assert_eq!(plan.external_channel_type, None);
+    }
+
+    #[test]
+    fn transient_external_send_error_keeps_outbox_retryable() {
+        let outcome = ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+            last_error: Some("webhook returned retryable status 429".to_string()),
+            provider_message_id: None,
+            provider_status_code: Some(429),
+            provider_response: Some("rate limited".to_string()),
+        });
+
+        let result = external_send_outcome_result(&outcome);
+
+        assert!(matches!(
+            result,
+            Err(AppError::ExternalNotification(message)) if message.contains("retryable status 429")
+        ));
+    }
+
+    #[test]
+    fn permanent_external_send_error_does_not_trigger_outbox_retry() {
+        let outcome = ExternalSendOutcome::PermanentFailure(ExternalSendMetadata {
+            last_error: Some("webhook returned permanent status 401".to_string()),
+            provider_message_id: None,
+            provider_status_code: Some(401),
+            provider_response: Some("unauthorized".to_string()),
+        });
+
+        assert!(external_send_outcome_result(&outcome).is_ok());
     }
 
     #[test]
