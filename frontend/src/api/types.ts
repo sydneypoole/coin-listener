@@ -183,7 +183,7 @@ export type NotificationOutboxQuery = {
   offset?: number;
 };
 
-export type NotificationOutboxListItem = {
+export type NotificationOutboxItem = {
   id: string;
   tenant_id: string;
   event_id: string;
@@ -196,6 +196,9 @@ export type NotificationOutboxListItem = {
   delivered_at?: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type NotificationOutboxListItem = NotificationOutboxItem & {
   event_type?: string | null;
   direction?: string | null;
   tx_hash?: string | null;
@@ -253,7 +256,7 @@ export type NotificationDeliveryListResponse = {
 };
 
 export type RetryNotificationOutboxResponse = {
-  outbox: NotificationOutboxListItem;
+  outbox: NotificationOutboxItem;
 };
 
 export type QueueStatus = {

@@ -5,12 +5,14 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use coin_listener_core::{
     models::{
         CreateNotificationChannelRequest, CreateNotificationRuleRequest, CreateProviderRequest,
         CreateWatchedAddressRequest, EventQuery, InAppNotificationQuery, LoginRequest,
-        LoginResponse, QueueStatus, SystemStatus, UserSummary,
+        LoginResponse, NotificationDeliveryListResponse, NotificationDeliveryQuery,
+        NotificationOutboxListResponse, NotificationOutboxQuery, QueueStatus,
+        RetryNotificationOutboxResponse, SystemStatus, UserSummary,
     },
     AppError,
 };
@@ -76,6 +78,16 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route(
             "/api/in-app-notifications/:id/read",
             post(mark_in_app_notification_read),
+        )
+        .route("/api/notification-outbox", get(list_notification_outbox))
+        .route("/api/notification-outbox/:id", get(get_notification_outbox))
+        .route(
+            "/api/notification-outbox/:id/retry",
+            post(retry_notification_outbox),
+        )
+        .route(
+            "/api/notification-deliveries",
+            get(list_notification_deliveries),
         );
 
     if state.enable_dev_routes {
@@ -308,6 +320,68 @@ async fn mark_in_app_notification_read(
     Ok(Json(notification).into_response())
 }
 
+fn notification_ops_stale_before() -> chrono::DateTime<Utc> {
+    Utc::now() - Duration::minutes(15)
+}
+
+async fn list_notification_outbox(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<NotificationOutboxQuery>,
+) -> Result<Response, ApiError> {
+    let limit = repositories::notification_ops_limit(query.limit);
+    let offset = repositories::notification_ops_offset(query.offset);
+    let items = repositories::list_notification_outbox(
+        &state.postgres,
+        query,
+        notification_ops_stale_before(),
+    )
+    .await?;
+
+    Ok(Json(NotificationOutboxListResponse {
+        items,
+        limit,
+        offset,
+    })
+    .into_response())
+}
+
+async fn get_notification_outbox(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let detail = repositories::get_notification_outbox_detail(
+        &state.postgres,
+        id,
+        notification_ops_stale_before(),
+    )
+    .await?;
+    Ok(Json(detail).into_response())
+}
+
+async fn retry_notification_outbox(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let outbox = repositories::retry_notification_outbox(&state.postgres, id, Utc::now()).await?;
+    Ok(Json(RetryNotificationOutboxResponse { outbox }).into_response())
+}
+
+async fn list_notification_deliveries(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<NotificationDeliveryQuery>,
+) -> Result<Response, ApiError> {
+    let limit = notifications::notification_delivery_ops_limit(query.limit);
+    let offset = notifications::notification_delivery_ops_offset(query.offset);
+    let items = notifications::list_notification_deliveries(&state.postgres, query).await?;
+
+    Ok(Json(NotificationDeliveryListResponse {
+        items,
+        limit,
+        offset,
+    })
+    .into_response())
+}
+
 pub struct ApiError(AppError);
 
 impl From<AppError> for ApiError {
@@ -454,6 +528,67 @@ mod tests {
                 Method::POST,
                 "/api/in-app-notifications/not-a-uuid/read",
                 StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("valid request"),
+                )
+                .await
+                .expect("router response");
+
+            assert_eq!(response.status(), status, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn router_exposes_notification_operations_routes() {
+        let app = build_router(Arc::new(ApiState {
+            postgres: PgPool::connect_lazy(
+                "postgres://postgres:postgres@localhost/coin_listener_test",
+            )
+            .expect("valid postgres url"),
+            redis: None,
+            scan_queue_key: "scan:address:queue".to_string(),
+            notify_queue_key: "notify:event:queue".to_string(),
+            enable_dev_routes: true,
+        }));
+
+        for (method, uri, status) in [
+            (
+                Method::GET,
+                "/api/notification-outbox?status=unknown",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::GET,
+                "/api/notification-deliveries?status=unknown",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::GET,
+                "/api/notification-deliveries?channel_type=email",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::GET,
+                "/api/notification-outbox/not-a-uuid",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::POST,
+                "/api/notification-outbox/not-a-uuid/retry",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::POST,
+                "/api/notification-deliveries",
+                StatusCode::METHOD_NOT_ALLOWED,
             ),
         ] {
             let response = app

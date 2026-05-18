@@ -40,6 +40,33 @@ const CREATE_IN_APP_NOTIFICATION_QUERY: &str = r#"
         RETURNING id, tenant_id, event_id, delivery_id, title, body, read_at, created_at
         "#;
 
+pub const CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY: &str = r#"
+        INSERT INTO notification_deliveries (
+            tenant_id, event_id, rule_id, channel_id, channel_type, status, attempt_count,
+            last_error, sent_at
+        )
+        SELECT $1, $2, $3, $4, 'in_app', $5, $6, $7, $8
+        WHERE EXISTS (
+            SELECT 1 FROM address_events
+            WHERE id = $2
+              AND tenant_id = $1
+        )
+          AND ($3::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM notification_rules
+              WHERE id = $3
+                AND tenant_id = $1
+          ))
+          AND ($4::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM notification_channels
+              WHERE id = $4
+                AND tenant_id = $1
+                AND channel_type = 'in_app'
+          ))
+        RETURNING id, tenant_id, event_id, rule_id, channel_id, status, attempt_count,
+                  last_error, sent_at, created_at, channel_type, idempotency_key,
+                  provider_message_id, provider_status_code, provider_response
+        "#;
+
 pub const SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY: &str = r#"
         SELECT id, status, attempt_count
         FROM notification_deliveries
@@ -899,7 +926,7 @@ pub async fn list_notification_deliveries_for_event(
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
-async fn create_notification_delivery_with_executor(
+async fn create_in_app_notification_delivery_with_executor(
     executor: &mut sqlx::PgConnection,
     tenant_id: Uuid,
     event_id: Uuid,
@@ -912,44 +939,19 @@ async fn create_notification_delivery_with_executor(
 ) -> AppResult<NotificationDelivery> {
     validate_notification_delivery_status(status)?;
 
-    sqlx::query_as::<_, NotificationDelivery>(
-        r#"
-        INSERT INTO notification_deliveries (
-            tenant_id, event_id, rule_id, channel_id, status, attempt_count, last_error, sent_at
-        )
-        SELECT $1, $2, $3, $4, $5, $6, $7, $8
-        WHERE EXISTS (
-            SELECT 1 FROM address_events
-            WHERE id = $2
-              AND tenant_id = $1
-        )
-          AND ($3::uuid IS NULL OR EXISTS (
-              SELECT 1 FROM notification_rules
-              WHERE id = $3
-                AND tenant_id = $1
-          ))
-          AND ($4::uuid IS NULL OR EXISTS (
-              SELECT 1 FROM notification_channels
-              WHERE id = $4
-                AND tenant_id = $1
-          ))
-        RETURNING id, tenant_id, event_id, rule_id, channel_id, status, attempt_count,
-                  last_error, sent_at, created_at, channel_type, idempotency_key,
-                  provider_message_id, provider_status_code, provider_response
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(event_id)
-    .bind(rule_id)
-    .bind(channel_id)
-    .bind(status)
-    .bind(attempt_count)
-    .bind(last_error)
-    .bind(sent_at)
-    .fetch_optional(executor)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))?
-    .ok_or_else(|| AppError::NotFound("notification delivery target".to_string()))
+    sqlx::query_as::<_, NotificationDelivery>(CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY)
+        .bind(tenant_id)
+        .bind(event_id)
+        .bind(rule_id)
+        .bind(channel_id)
+        .bind(status)
+        .bind(attempt_count)
+        .bind(last_error)
+        .bind(sent_at)
+        .fetch_optional(executor)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("notification delivery target".to_string()))
 }
 
 pub async fn update_notification_delivery_status(
@@ -1022,7 +1024,7 @@ pub async fn create_sent_in_app_delivery(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    let delivery = create_notification_delivery_with_executor(
+    let delivery = create_in_app_notification_delivery_with_executor(
         transaction.as_mut(),
         tenant_id,
         event_id,
@@ -1166,7 +1168,8 @@ mod tests {
         external_delivery_start_from_status, external_delivery_start_from_status_and_attempt,
         validate_notification_channel_request, validate_notification_delivery_status,
         validate_notification_rule_reference_consistency, validate_notification_rule_request,
-        ExternalDeliveryStart, CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
+        ExternalDeliveryStart, CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY,
+        CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
         INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY, LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY,
         LIST_NOTIFICATION_DELIVERIES_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
         MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY,
@@ -1451,6 +1454,12 @@ mod tests {
             result,
             Err(AppError::Validation(message)) if message == "address_id must belong to chain_id"
         ));
+    }
+
+    #[test]
+    fn in_app_delivery_rows_set_channel_type_for_ops_filtering() {
+        assert!(CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY.contains("channel_type"));
+        assert!(CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY.contains("'in_app'"));
     }
 
     #[test]

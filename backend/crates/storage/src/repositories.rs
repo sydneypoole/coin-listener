@@ -282,6 +282,7 @@ SET status = 'retryable',
     updated_at = NOW()
 WHERE id = $1
   AND tenant_id = $3
+  AND status IN ('failed', 'retryable')
 RETURNING id, tenant_id, event_id, status, attempt_count,
           next_attempt_at, locked_at, locked_by, last_error,
           delivered_at, created_at, updated_at
@@ -320,6 +321,19 @@ pub fn validate_notification_outbox_status(status: &str) -> AppResult<()> {
 
 pub fn notification_outbox_status_allows_manual_retry(status: &str) -> bool {
     matches!(status, "failed" | "retryable")
+}
+
+fn manual_retry_validation_error() -> AppError {
+    AppError::Validation(
+        "only failed or retryable notification outbox rows can be retried".to_string(),
+    )
+}
+
+fn retry_notification_outbox_update_miss_error(status: Option<String>) -> AppError {
+    match status {
+        Some(_) => manual_retry_validation_error(),
+        None => AppError::NotFound("notification outbox".to_string()),
+    }
 }
 
 pub fn notification_ops_limit(limit: Option<i64>) -> i64 {
@@ -914,19 +928,29 @@ pub async fn retry_notification_outbox(
         .ok_or_else(|| AppError::NotFound("notification outbox".to_string()))?;
 
     if !notification_outbox_status_allows_manual_retry(&status) {
-        return Err(AppError::Validation(
-            "only failed or retryable notification outbox rows can be retried".to_string(),
-        ));
+        return Err(manual_retry_validation_error());
     }
 
-    sqlx::query_as::<_, NotificationOutboxItem>(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY)
+    if let Some(outbox) =
+        sqlx::query_as::<_, NotificationOutboxItem>(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY)
+            .bind(id)
+            .bind(now)
+            .bind(DEFAULT_TENANT_ID)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| AppError::Database(error.to_string()))?
+    {
+        return Ok(outbox);
+    }
+
+    let current_status = sqlx::query_scalar::<_, String>(SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY)
         .bind(id)
-        .bind(now)
         .bind(DEFAULT_TENANT_ID)
         .fetch_optional(pool)
         .await
-        .map_err(|error| AppError::Database(error.to_string()))?
-        .ok_or_else(|| AppError::NotFound("notification outbox".to_string()))
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Err(retry_notification_outbox_update_miss_error(current_status))
 }
 
 pub async fn notification_outbox_status_counts(
@@ -1233,7 +1257,7 @@ mod tests {
             AddressEvent, AddressEventDraft, NotificationOutboxDetail, NotificationOutboxItem,
             NotificationOutboxListItem, NotificationOutboxQuery, OutboxStatusCounts,
         },
-        AppResult,
+        AppError, AppResult,
     };
     use sqlx::PgPool;
 
@@ -1473,6 +1497,29 @@ mod tests {
     }
 
     #[test]
+    fn retry_outbox_update_miss_maps_current_row_to_validation() {
+        let current_status = Some("processing".to_string());
+
+        let result = super::retry_notification_outbox_update_miss_error(current_status);
+
+        assert!(matches!(
+            result,
+            AppError::Validation(message)
+                if message == "only failed or retryable notification outbox rows can be retried"
+        ));
+    }
+
+    #[test]
+    fn retry_outbox_update_miss_maps_missing_row_to_not_found() {
+        let result = super::retry_notification_outbox_update_miss_error(None);
+
+        assert!(matches!(
+            result,
+            AppError::NotFound(resource) if resource == "notification outbox"
+        ));
+    }
+
+    #[test]
     fn notification_outbox_ops_validates_status_and_retryability() {
         for status in ["pending", "processing", "retryable", "delivered", "failed"] {
             assert!(
@@ -1540,6 +1587,8 @@ mod tests {
         assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("locked_at = NULL"));
         assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("locked_by = NULL"));
         assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("last_error = NULL"));
+        assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY
+            .contains("AND status IN ('failed', 'retryable')"));
         assert!(!MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("attempt_count = 0"));
     }
 
