@@ -59,10 +59,11 @@ impl WebhookChannelConfig {
         let url = required_string(value, "url", "webhook url is required")?;
         let parsed_url = reqwest::Url::parse(&url)
             .map_err(|_| ExternalConfigError::new("webhook url must use http or https"))?;
+        let lower_url = url.to_ascii_lowercase();
         if !matches!(parsed_url.scheme(), "http" | "https")
             || parsed_url.host_str().is_none()
-            || url.starts_with("http:///")
-            || url.starts_with("https:///")
+            || lower_url.starts_with("http:///")
+            || lower_url.starts_with("https:///")
         {
             return Err(ExternalConfigError::new(
                 "webhook url must use http or https",
@@ -180,7 +181,7 @@ mod tests {
 
     #[test]
     fn webhook_channel_config_rejects_invalid_http_urls() {
-        for url in ["https://", "https:///hook"] {
+        for url in ["https://", "https:///hook", "HTTPS:///hook"] {
             let error = WebhookChannelConfig::parse(&json!({ "url": url }))
                 .expect_err("invalid URL should fail");
 
