@@ -254,11 +254,49 @@ pub fn classify_webhook_response(status_code: u16, body: &str) -> ExternalSendOu
 }
 
 pub fn webhook_network_error_message(url: &str, error: &str) -> String {
-    format!("webhook {} failed: {error}", redact_webhook_url(url))
+    format!(
+        "webhook {} failed: {}",
+        redact_webhook_url(url),
+        redact_webhook_urls_in_text(error)
+    )
+}
+
+pub fn redact_webhook_urls_in_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(url_start) = find_webhook_url_start(rest) {
+        output.push_str(&rest[..url_start]);
+        let after_prefix = &rest[url_start..];
+        let url_end = after_prefix
+            .find(char::is_whitespace)
+            .unwrap_or(after_prefix.len());
+        let (url, tail) = after_prefix.split_at(url_end);
+        output.push_str(&redact_webhook_url(url));
+        rest = tail;
+    }
+    output.push_str(rest);
+    output
+}
+
+fn find_webhook_url_start(text: &str) -> Option<usize> {
+    match (text.find("http://"), text.find("https://")) {
+        (Some(http), Some(https)) => Some(http.min(https)),
+        (Some(http), None) => Some(http),
+        (None, Some(https)) => Some(https),
+        (None, None) => None,
+    }
 }
 
 pub fn truncate_provider_response(body: &str) -> String {
-    body.chars().take(2048).collect()
+    const MAX_BYTES: usize = 2048;
+    if body.len() <= MAX_BYTES {
+        return body.to_string();
+    }
+    let mut end = MAX_BYTES;
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    body[..end].to_string()
 }
 
 pub fn redact_telegram_url(url: &str) -> String {
@@ -304,13 +342,14 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
 mod tests {
     use chrono::{TimeZone, Utc};
     use coin_listener_core::models::AddressEvent;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use uuid::Uuid;
 
     use crate::external::{
         build_webhook_request_parts, classify_webhook_response, notification_idempotency_key,
-        redact_telegram_url, redact_webhook_url, webhook_network_error_message,
-        TelegramChannelConfig, WebhookChannelConfig,
+        redact_telegram_url, redact_webhook_url, truncate_provider_response,
+        webhook_network_error_message, webhook_signature, TelegramChannelConfig,
+        WebhookChannelConfig,
     };
 
     fn uuid(value: u128) -> Uuid {
@@ -476,6 +515,46 @@ mod tests {
         assert!(request
             .body
             .contains("\"idempotency_key\":\"notification:key\""));
+
+        let payload: Value = serde_json::from_str(&request.body).expect("webhook JSON body");
+        assert_eq!(payload["idempotency_key"], json!("notification:key"));
+        assert_eq!(
+            payload["idempotency_key"].as_str(),
+            request
+                .headers
+                .get("X-Coin-Listener-Idempotency-Key")
+                .map(String::as_str)
+        );
+        assert_eq!(
+            payload["event_id"],
+            json!("00000000-0000-0000-0000-00000000000b")
+        );
+        assert_eq!(
+            payload["tenant_id"],
+            json!("00000000-0000-0000-0000-00000000000c")
+        );
+        assert_eq!(
+            payload["chain_id"],
+            json!("00000000-0000-0000-0000-00000000000d")
+        );
+        assert_eq!(
+            payload["address_id"],
+            json!("00000000-0000-0000-0000-00000000000e")
+        );
+        assert_eq!(
+            payload["asset_id"],
+            json!("00000000-0000-0000-0000-00000000000f")
+        );
+        assert_eq!(payload["event_type"], json!("transfer"));
+        assert_eq!(payload["direction"], json!("in"));
+        assert_eq!(payload["is_transfer"], json!(true));
+        assert_eq!(payload["tx_hash"], json!("0xabc"));
+        assert_eq!(payload["block_number"], json!(123));
+        assert_eq!(payload["from_address"], json!("0xfrom"));
+        assert_eq!(payload["to_address"], json!("0xto"));
+        assert_eq!(payload["amount_raw"], json!("1000"));
+        assert_eq!(payload["amount_decimal"], json!("0.000000000000001"));
+        assert_eq!(payload["detected_at"], json!("2026-05-18T15:00:00+00:00"));
     }
 
     #[test]
@@ -497,27 +576,46 @@ mod tests {
             .get("X-Coin-Listener-Signature")
             .expect("signature header");
         assert_eq!(signature.len(), 64);
+        assert_eq!(
+            signature,
+            &webhook_signature("secret-value", request.body.as_bytes())
+        );
         assert!(signature
             .chars()
-            .all(|character| character.is_ascii_hexdigit()));
+            .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character)));
     }
 
     #[test]
     fn webhook_status_classification_distinguishes_retryable_and_permanent_failures() {
-        assert!(classify_webhook_response(202, "accepted").is_sent());
-        assert!(classify_webhook_response(429, "rate limited").is_transient_failure());
-        assert!(classify_webhook_response(500, "server error").is_transient_failure());
-        assert!(classify_webhook_response(401, "unauthorized").is_permanent_failure());
+        for status_code in [200, 202, 299] {
+            assert!(classify_webhook_response(status_code, "accepted").is_sent());
+        }
+        for status_code in [408, 429, 500, 599] {
+            assert!(classify_webhook_response(status_code, "retry").is_transient_failure());
+        }
+        for status_code in [300, 400, 401, 403, 404, 410, 422] {
+            assert!(classify_webhook_response(status_code, "permanent").is_permanent_failure());
+        }
     }
 
     #[test]
     fn webhook_sender_redacts_query_string_from_errors() {
         let message = webhook_network_error_message(
             "https://example.com/hook?token=secret",
-            "connection reset",
+            "connection reset for https://example.com/hook?token=secret",
         );
 
         assert!(message.contains("https://example.com/hook"));
         assert!(!message.contains("token=secret"));
+    }
+
+    #[test]
+    fn provider_response_truncation_respects_byte_limit() {
+        let body = "转".repeat(1000);
+
+        let truncated = truncate_provider_response(&body);
+
+        assert!(truncated.len() <= 2048);
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 }
