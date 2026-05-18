@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use coin_listener_core::{
     models::{
         EventStatus, NotificationStatus, ProviderChainStatus, ProviderStatus, ProviderStatusItem,
@@ -8,6 +8,10 @@ use coin_listener_core::{
 };
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
+
+use crate::repositories;
+
+pub const NOTIFICATION_STATUS_STALE_MINUTES: i64 = 15;
 
 pub const SCAN_STATUS_QUERY: &str = r#"
     SELECT
@@ -157,11 +161,20 @@ pub async fn system_notification_status(pool: &PgPool) -> AppResult<Notification
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
+    let now = Utc::now();
+    let outbox = repositories::notification_outbox_status_counts(
+        pool,
+        now,
+        now - Duration::minutes(NOTIFICATION_STATUS_STALE_MINUTES),
+    )
+    .await?;
+
     Ok(NotificationStatus {
         last_24h_sent: row.last_24h_sent,
         last_24h_skipped: row.last_24h_skipped,
         last_24h_failed: row.last_24h_failed,
         unread_in_app: row.unread_in_app,
+        outbox,
     })
 }
 
@@ -221,8 +234,8 @@ pub async fn system_provider_status(pool: &PgPool) -> AppResult<ProviderStatus> 
 #[cfg(test)]
 mod tests {
     use crate::system_status::{
-        EVENT_STATUS_QUERY, NOTIFICATION_STATUS_QUERY, PROVIDER_CHAIN_STATUS_QUERY,
-        PROVIDER_ITEMS_QUERY, SCAN_STATUS_QUERY,
+        EVENT_STATUS_QUERY, NOTIFICATION_STATUS_QUERY, NOTIFICATION_STATUS_STALE_MINUTES,
+        PROVIDER_CHAIN_STATUS_QUERY, PROVIDER_ITEMS_QUERY, SCAN_STATUS_QUERY,
     };
 
     #[test]
@@ -245,6 +258,11 @@ mod tests {
         assert!(NOTIFICATION_STATUS_QUERY.contains("status = 'skipped'"));
         assert!(NOTIFICATION_STATUS_QUERY.contains("status = 'failed'"));
         assert!(NOTIFICATION_STATUS_QUERY.contains("read_at IS NULL"));
+    }
+
+    #[test]
+    fn notification_status_uses_fifteen_minute_stale_outbox_window() {
+        assert_eq!(NOTIFICATION_STATUS_STALE_MINUTES, 15);
     }
 
     #[test]
