@@ -4,8 +4,9 @@ use coin_listener_core::{
     models::{
         AddressEvent, AddressEventDraft, Asset, BalanceSnapshot, Chain,
         CreateBalanceSnapshotRequest, CreateProviderRequest, CreateWatchedAddressRequest,
-        EventQuery, NotificationOutboxItem, Provider, ScanAddressCandidate, ScanAddressContext,
-        ScanCursor, Tenant, User, WatchedAddress,
+        EventQuery, NotificationOutboxDetail, NotificationOutboxItem, NotificationOutboxListItem,
+        NotificationOutboxQuery, OutboxStatusCounts, Provider, ScanAddressCandidate,
+        ScanAddressContext, ScanCursor, Tenant, User, WatchedAddress,
     },
     AppError, AppResult,
 };
@@ -182,6 +183,152 @@ SET status = 'retryable',
 WHERE status = 'processing'
   AND locked_at < $1
 "#;
+
+pub const LIST_NOTIFICATION_OUTBOX_QUERY: &str = r#"
+WITH delivery_counts AS (
+    SELECT tenant_id,
+           event_id,
+           COUNT(nd.id) AS delivery_total,
+           COUNT(nd.id) FILTER (WHERE nd.status = 'sent') AS delivery_sent,
+           COUNT(nd.id) FILTER (WHERE nd.status = 'failed') AS delivery_failed,
+           COUNT(nd.id) FILTER (WHERE nd.status = 'skipped') AS delivery_skipped
+    FROM notification_deliveries nd
+    WHERE nd.tenant_id = $1
+    GROUP BY tenant_id, event_id
+)
+SELECT o.id,
+       o.tenant_id,
+       o.event_id,
+       o.status,
+       o.attempt_count,
+       o.next_attempt_at,
+       o.locked_at,
+       o.locked_by,
+       o.last_error,
+       o.delivered_at,
+       o.created_at,
+       o.updated_at,
+       ae.event_type,
+       ae.direction,
+       ae.tx_hash,
+       COALESCE(dc.delivery_total, 0) AS delivery_total,
+       COALESCE(dc.delivery_sent, 0) AS delivery_sent,
+       COALESCE(dc.delivery_failed, 0) AS delivery_failed,
+       COALESCE(dc.delivery_skipped, 0) AS delivery_skipped,
+       (o.status = 'processing' AND o.locked_at IS NOT NULL AND o.locked_at < $5) AS is_stale_processing
+FROM notification_outbox o
+LEFT JOIN address_events ae ON ae.id = o.event_id AND ae.tenant_id = o.tenant_id
+LEFT JOIN delivery_counts dc ON dc.tenant_id = o.tenant_id AND dc.event_id = o.event_id
+WHERE o.tenant_id = $1
+  AND ($2::text IS NULL OR o.status = $2)
+  AND ($6::uuid IS NULL OR o.event_id = $6)
+ORDER BY o.created_at DESC
+LIMIT $3 OFFSET $4
+"#;
+
+pub const GET_NOTIFICATION_OUTBOX_ITEM_QUERY: &str = r#"
+WITH delivery_counts AS (
+    SELECT tenant_id,
+           event_id,
+           COUNT(nd.id) AS delivery_total,
+           COUNT(nd.id) FILTER (WHERE nd.status = 'sent') AS delivery_sent,
+           COUNT(nd.id) FILTER (WHERE nd.status = 'failed') AS delivery_failed,
+           COUNT(nd.id) FILTER (WHERE nd.status = 'skipped') AS delivery_skipped
+    FROM notification_deliveries nd
+    WHERE nd.tenant_id = $1
+    GROUP BY tenant_id, event_id
+)
+SELECT o.id,
+       o.tenant_id,
+       o.event_id,
+       o.status,
+       o.attempt_count,
+       o.next_attempt_at,
+       o.locked_at,
+       o.locked_by,
+       o.last_error,
+       o.delivered_at,
+       o.created_at,
+       o.updated_at,
+       ae.event_type,
+       ae.direction,
+       ae.tx_hash,
+       COALESCE(dc.delivery_total, 0) AS delivery_total,
+       COALESCE(dc.delivery_sent, 0) AS delivery_sent,
+       COALESCE(dc.delivery_failed, 0) AS delivery_failed,
+       COALESCE(dc.delivery_skipped, 0) AS delivery_skipped,
+       (o.status = 'processing' AND o.locked_at IS NOT NULL AND o.locked_at < $3) AS is_stale_processing
+FROM notification_outbox o
+LEFT JOIN address_events ae ON ae.id = o.event_id AND ae.tenant_id = o.tenant_id
+LEFT JOIN delivery_counts dc ON dc.tenant_id = o.tenant_id AND dc.event_id = o.event_id
+WHERE o.tenant_id = $1
+  AND o.id = $2
+"#;
+
+pub const SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY: &str = r#"
+SELECT status
+FROM notification_outbox
+WHERE id = $1
+  AND tenant_id = $2
+"#;
+
+pub const MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY: &str = r#"
+UPDATE notification_outbox
+SET status = 'retryable',
+    next_attempt_at = $2,
+    locked_at = NULL,
+    locked_by = NULL,
+    last_error = NULL,
+    updated_at = NOW()
+WHERE id = $1
+  AND tenant_id = $3
+RETURNING id, tenant_id, event_id, status, attempt_count,
+          next_attempt_at, locked_at, locked_by, last_error,
+          delivered_at, created_at, updated_at
+"#;
+
+pub const NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY: &str = r#"
+SELECT COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+       COUNT(*) FILTER (WHERE status = 'retryable') AS retryable,
+       COUNT(*) FILTER (WHERE status = 'processing') AS processing,
+       COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+       COUNT(*) FILTER (
+           WHERE status = 'processing'
+             AND locked_at IS NOT NULL
+             AND locked_at < $2
+       ) AS stale_processing,
+       MIN(next_attempt_at) FILTER (
+           WHERE status IN ('pending', 'retryable')
+             AND next_attempt_at <= $1
+       ) AS next_due_at
+FROM notification_outbox
+WHERE tenant_id = $3
+"#;
+
+pub fn validate_notification_outbox_status(status: &str) -> AppResult<()> {
+    if !matches!(
+        status,
+        "pending" | "processing" | "retryable" | "delivered" | "failed"
+    ) {
+        return Err(AppError::Validation(
+            "outbox status must be pending, processing, retryable, delivered, or failed"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn notification_outbox_status_allows_manual_retry(status: &str) -> bool {
+    matches!(status, "failed" | "retryable")
+}
+
+pub fn notification_ops_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(50).clamp(1, 100)
+}
+
+pub fn notification_ops_offset(offset: Option<i64>) -> i64 {
+    offset.unwrap_or(0).max(0)
+}
 
 pub async fn find_user_by_email(pool: &PgPool, email: &str) -> AppResult<User> {
     sqlx::query_as::<_, User>(
@@ -705,6 +852,97 @@ pub async fn release_stale_notification_outbox(
     Ok(result.rows_affected())
 }
 
+pub async fn list_notification_outbox(
+    pool: &PgPool,
+    query: NotificationOutboxQuery,
+    stale_before: DateTime<Utc>,
+) -> AppResult<Vec<NotificationOutboxListItem>> {
+    if let Some(status) = query.status.as_deref() {
+        validate_notification_outbox_status(status)?;
+    }
+
+    sqlx::query_as::<_, NotificationOutboxListItem>(LIST_NOTIFICATION_OUTBOX_QUERY)
+        .bind(DEFAULT_TENANT_ID)
+        .bind(query.status)
+        .bind(notification_ops_limit(query.limit))
+        .bind(notification_ops_offset(query.offset))
+        .bind(stale_before)
+        .bind(query.event_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn get_notification_outbox_detail(
+    pool: &PgPool,
+    id: Uuid,
+    stale_before: DateTime<Utc>,
+) -> AppResult<NotificationOutboxDetail> {
+    let outbox =
+        sqlx::query_as::<_, NotificationOutboxListItem>(GET_NOTIFICATION_OUTBOX_ITEM_QUERY)
+            .bind(DEFAULT_TENANT_ID)
+            .bind(id)
+            .bind(stale_before)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| AppError::Database(error.to_string()))?
+            .ok_or_else(|| AppError::NotFound("notification outbox".to_string()))?;
+
+    let event =
+        crate::notifications::get_address_event(pool, outbox.event_id, outbox.tenant_id).await?;
+    let deliveries =
+        crate::notifications::list_notification_deliveries_for_event(pool, outbox.event_id).await?;
+
+    Ok(NotificationOutboxDetail {
+        outbox,
+        event,
+        deliveries,
+    })
+}
+
+pub async fn retry_notification_outbox(
+    pool: &PgPool,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> AppResult<NotificationOutboxItem> {
+    let status = sqlx::query_scalar::<_, String>(SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY)
+        .bind(id)
+        .bind(DEFAULT_TENANT_ID)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("notification outbox".to_string()))?;
+
+    if !notification_outbox_status_allows_manual_retry(&status) {
+        return Err(AppError::Validation(
+            "only failed or retryable notification outbox rows can be retried".to_string(),
+        ));
+    }
+
+    sqlx::query_as::<_, NotificationOutboxItem>(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY)
+        .bind(id)
+        .bind(now)
+        .bind(DEFAULT_TENANT_ID)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("notification outbox".to_string()))
+}
+
+pub async fn notification_outbox_status_counts(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+    stale_before: DateTime<Utc>,
+) -> AppResult<OutboxStatusCounts> {
+    sqlx::query_as::<_, OutboxStatusCounts>(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY)
+        .bind(now)
+        .bind(stale_before)
+        .bind(DEFAULT_TENANT_ID)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
 pub async fn create_mock_evm_event(pool: &PgPool, address_id: Uuid) -> AppResult<AddressEvent> {
     let address = get_watched_address(pool, address_id).await?;
     let chain = get_chain(pool, address.chain_id).await?;
@@ -980,16 +1218,21 @@ mod tests {
     use super::{
         next_scan_at_from, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
         ACTIVE_RPC_PROVIDER_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
-        CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY,
-        INSERT_EVENT_IF_NOT_EXISTS_QUERY, INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY,
-        LATEST_BALANCE_SNAPSHOT_QUERY, MARK_CLAIMED_SCAN_ENQUEUED_QUERY,
-        MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY, MARK_NOTIFICATION_OUTBOX_FAILED_QUERY,
-        MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY, RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY,
-        SCAN_CURSOR_QUERY, UPSERT_SCAN_CURSOR_QUERY,
+        CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, GET_NOTIFICATION_OUTBOX_ITEM_QUERY,
+        INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
+        INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY, LATEST_BALANCE_SNAPSHOT_QUERY,
+        LIST_NOTIFICATION_OUTBOX_QUERY, MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY,
+        MARK_CLAIMED_SCAN_ENQUEUED_QUERY, MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY,
+        MARK_NOTIFICATION_OUTBOX_FAILED_QUERY, MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY,
+        NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY, RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY,
+        SCAN_CURSOR_QUERY, SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY, UPSERT_SCAN_CURSOR_QUERY,
     };
     use chrono::{TimeZone, Utc};
     use coin_listener_core::{
-        models::{AddressEvent, AddressEventDraft, NotificationOutboxItem},
+        models::{
+            AddressEvent, AddressEventDraft, NotificationOutboxDetail, NotificationOutboxItem,
+            NotificationOutboxListItem, NotificationOutboxQuery, OutboxStatusCounts,
+        },
         AppResult,
     };
     use sqlx::PgPool;
@@ -1227,6 +1470,132 @@ mod tests {
         assert!(RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY.contains("locked_at < $1"));
         assert!(RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY.contains("status = 'retryable'"));
         assert!(RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY.contains("locked_by = NULL"));
+    }
+
+    #[test]
+    fn notification_outbox_ops_validates_status_and_retryability() {
+        for status in ["pending", "processing", "retryable", "delivered", "failed"] {
+            assert!(
+                super::validate_notification_outbox_status(status).is_ok(),
+                "{status}"
+            );
+        }
+        assert!(super::validate_notification_outbox_status("unknown").is_err());
+        assert!(super::notification_outbox_status_allows_manual_retry(
+            "failed"
+        ));
+        assert!(super::notification_outbox_status_allows_manual_retry(
+            "retryable"
+        ));
+        assert!(!super::notification_outbox_status_allows_manual_retry(
+            "pending"
+        ));
+        assert!(!super::notification_outbox_status_allows_manual_retry(
+            "processing"
+        ));
+        assert!(!super::notification_outbox_status_allows_manual_retry(
+            "delivered"
+        ));
+    }
+
+    #[test]
+    fn notification_ops_pagination_defaults_and_clamps() {
+        let default_query = NotificationOutboxQuery {
+            status: None,
+            event_id: None,
+            limit: None,
+            offset: None,
+        };
+        assert_eq!(super::notification_ops_limit(default_query.limit), 50);
+        assert_eq!(super::notification_ops_offset(default_query.offset), 0);
+        assert_eq!(super::notification_ops_limit(Some(0)), 1);
+        assert_eq!(super::notification_ops_limit(Some(500)), 100);
+        assert_eq!(super::notification_ops_offset(Some(-10)), 0);
+        assert_eq!(super::notification_ops_offset(Some(25)), 25);
+    }
+
+    #[test]
+    fn notification_outbox_list_query_joins_events_and_delivery_counts() {
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("FROM notification_outbox o"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("LEFT JOIN address_events ae"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("notification_deliveries"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("COUNT(nd.id) AS delivery_total"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("delivery_sent"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("delivery_failed"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("delivery_skipped"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("$2::text IS NULL OR o.status = $2"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("$6::uuid IS NULL OR o.event_id = $6"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("LIMIT $3 OFFSET $4"));
+        assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("locked_at < $5"));
+    }
+
+    #[test]
+    fn notification_outbox_detail_and_retry_queries_are_scoped_and_safe() {
+        assert!(GET_NOTIFICATION_OUTBOX_ITEM_QUERY.contains("WHERE o.tenant_id = $1"));
+        assert!(GET_NOTIFICATION_OUTBOX_ITEM_QUERY.contains("AND o.id = $2"));
+        assert!(SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY.contains("WHERE id = $1"));
+        assert!(SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY.contains("AND tenant_id = $2"));
+        assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("status = 'retryable'"));
+        assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("next_attempt_at = $2"));
+        assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("locked_at = NULL"));
+        assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("locked_by = NULL"));
+        assert!(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("last_error = NULL"));
+        assert!(!MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY.contains("attempt_count = 0"));
+    }
+
+    #[test]
+    fn notification_outbox_status_counts_query_counts_backlog_and_next_due() {
+        assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("status = 'pending'"));
+        assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("status = 'retryable'"));
+        assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("status = 'processing'"));
+        assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("status = 'failed'"));
+        assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("locked_at < $2"));
+        assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("MIN(next_attempt_at)"));
+        assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("next_attempt_at <= $1"));
+    }
+
+    #[allow(dead_code)]
+    async fn assert_list_notification_outbox_signature(
+        pool: &PgPool,
+        query: NotificationOutboxQuery,
+        stale_before: chrono::DateTime<Utc>,
+    ) -> AppResult<Vec<NotificationOutboxListItem>> {
+        super::list_notification_outbox(pool, query, stale_before).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_get_notification_outbox_detail_signature(
+        pool: &PgPool,
+        id: uuid::Uuid,
+        stale_before: chrono::DateTime<Utc>,
+    ) -> AppResult<NotificationOutboxDetail> {
+        super::get_notification_outbox_detail(pool, id, stale_before).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_retry_notification_outbox_signature(
+        pool: &PgPool,
+        id: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> AppResult<NotificationOutboxItem> {
+        super::retry_notification_outbox(pool, id, now).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_notification_outbox_status_counts_signature(
+        pool: &PgPool,
+        now: chrono::DateTime<Utc>,
+        stale_before: chrono::DateTime<Utc>,
+    ) -> AppResult<OutboxStatusCounts> {
+        super::notification_outbox_status_counts(pool, now, stale_before).await
+    }
+
+    #[test]
+    fn notification_outbox_ops_helper_signatures_are_stable() {
+        let _ = assert_list_notification_outbox_signature;
+        let _ = assert_get_notification_outbox_detail_signature;
+        let _ = assert_retry_notification_outbox_signature;
+        let _ = assert_notification_outbox_status_counts_signature;
     }
 
     #[test]
