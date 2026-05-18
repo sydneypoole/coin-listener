@@ -11,8 +11,14 @@ import type {
   InAppNotificationQuery,
   LoginResponse,
   NotificationChannel,
+  NotificationDeliveryListResponse,
+  NotificationDeliveryQuery,
+  NotificationOutboxDetail,
+  NotificationOutboxListResponse,
+  NotificationOutboxQuery,
   NotificationRule,
   Provider,
+  RetryNotificationOutboxResponse,
   SystemStatus,
   WatchedAddress,
 } from './types';
@@ -38,6 +44,17 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   return response.json();
+}
+
+function buildQuery(filters: object): string {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      params.set(key, String(value));
+    }
+  });
+  const query = params.toString();
+  return query ? `?${query}` : '';
 }
 
 export function login(email: string, password: string): Promise<LoginResponse> {
@@ -91,15 +108,7 @@ export function deleteWatchedAddress(id: string): Promise<void> {
 }
 
 export function listEvents(filters: EventQuery = {}): Promise<AddressEvent[]> {
-  const params = new URLSearchParams();
-  Object.entries(filters).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== '') {
-      params.set(key, String(value));
-    }
-  });
-
-  const query = params.toString();
-  return request<AddressEvent[]>(`/api/events${query ? `?${query}` : ''}`);
+  return request<AddressEvent[]>(`/api/events${buildQuery(filters)}`);
 }
 
 export function scanAddress(id: string): Promise<AddressEvent> {
@@ -144,19 +153,31 @@ export function deleteNotificationRule(id: string): Promise<void> {
 }
 
 export function listInAppNotifications(filters: InAppNotificationQuery = {}): Promise<InAppNotification[]> {
-  const params = new URLSearchParams();
-  if (filters.unread_only !== undefined) {
-    params.set('unread_only', String(filters.unread_only));
-  }
-
-  const query = params.toString();
-  return request<InAppNotification[]>(`/api/in-app-notifications${query ? `?${query}` : ''}`);
+  return request<InAppNotification[]>(`/api/in-app-notifications${buildQuery(filters)}`);
 }
 
 export function markInAppNotificationRead(id: string): Promise<InAppNotification> {
   return request<InAppNotification>(`/api/in-app-notifications/${id}/read`, {
     method: 'POST',
   });
+}
+
+export function listNotificationOutbox(filters: NotificationOutboxQuery = {}): Promise<NotificationOutboxListResponse> {
+  return request<NotificationOutboxListResponse>(`/api/notification-outbox${buildQuery(filters)}`);
+}
+
+export function getNotificationOutbox(id: string): Promise<NotificationOutboxDetail> {
+  return request<NotificationOutboxDetail>(`/api/notification-outbox/${id}`);
+}
+
+export function retryNotificationOutbox(id: string): Promise<RetryNotificationOutboxResponse> {
+  return request<RetryNotificationOutboxResponse>(`/api/notification-outbox/${id}/retry`, {
+    method: 'POST',
+  });
+}
+
+export function listNotificationDeliveries(filters: NotificationDeliveryQuery = {}): Promise<NotificationDeliveryListResponse> {
+  return request<NotificationDeliveryListResponse>(`/api/notification-deliveries${buildQuery(filters)}`);
 }
 
 export function getSystemStatus(): Promise<SystemStatus> {

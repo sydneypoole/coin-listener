@@ -167,6 +167,95 @@ export type InAppNotificationQuery = {
   unread_only?: boolean;
 };
 
+export type OutboxStatusCounts = {
+  pending: number;
+  retryable: number;
+  processing: number;
+  failed: number;
+  stale_processing: number;
+  next_due_at?: string | null;
+};
+
+export type NotificationOutboxQuery = {
+  status?: string;
+  event_id?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type NotificationOutboxListItem = {
+  id: string;
+  tenant_id: string;
+  event_id: string;
+  status: string;
+  attempt_count: number;
+  next_attempt_at: string;
+  locked_at?: string | null;
+  locked_by?: string | null;
+  last_error?: string | null;
+  delivered_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  event_type?: string | null;
+  direction?: string | null;
+  tx_hash?: string | null;
+  delivery_total: number;
+  delivery_sent: number;
+  delivery_failed: number;
+  delivery_skipped: number;
+  is_stale_processing: boolean;
+};
+
+export type NotificationDeliveryQuery = {
+  event_id?: string;
+  status?: string;
+  channel_type?: string;
+  rule_id?: string;
+  channel_id?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type NotificationDeliveryListItem = {
+  id: string;
+  tenant_id: string;
+  event_id: string;
+  rule_id?: string | null;
+  channel_id?: string | null;
+  channel_type?: string | null;
+  status: string;
+  attempt_count: number;
+  last_error?: string | null;
+  sent_at?: string | null;
+  created_at: string;
+  idempotency_key?: string | null;
+  provider_message_id?: string | null;
+  provider_status_code?: number | null;
+  provider_response?: string | null;
+};
+
+export type NotificationOutboxListResponse = {
+  items: NotificationOutboxListItem[];
+  limit: number;
+  offset: number;
+};
+
+export type NotificationOutboxDetail = {
+  outbox: NotificationOutboxListItem;
+  event: AddressEvent;
+  deliveries: NotificationDeliveryListItem[];
+};
+
+export type NotificationDeliveryListResponse = {
+  items: NotificationDeliveryListItem[];
+  limit: number;
+  offset: number;
+};
+
+export type RetryNotificationOutboxResponse = {
+  outbox: NotificationOutboxListItem;
+};
+
 export type QueueStatus = {
   scan_queue_key: string;
   scan_queue_depth?: number | null;
@@ -193,6 +282,7 @@ export type NotificationStatus = {
   last_24h_skipped: number;
   last_24h_failed: number;
   unread_in_app: number;
+  outbox: OutboxStatusCounts;
 };
 
 export type ProviderChainStatus = {
