@@ -57,7 +57,13 @@ pub struct WebhookChannelConfig {
 impl WebhookChannelConfig {
     pub fn parse(value: &Value) -> Result<Self, ExternalConfigError> {
         let url = required_string(value, "url", "webhook url is required")?;
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
+        let parsed_url = reqwest::Url::parse(&url)
+            .map_err(|_| ExternalConfigError::new("webhook url must use http or https"))?;
+        if !matches!(parsed_url.scheme(), "http" | "https")
+            || parsed_url.host_str().is_none()
+            || url.starts_with("http:///")
+            || url.starts_with("https:///")
+        {
             return Err(ExternalConfigError::new(
                 "webhook url must use http or https",
             ));
@@ -170,6 +176,39 @@ mod tests {
 
         assert_eq!(config.timeout_ms, 5000);
         assert_eq!(config.secret_env, None);
+    }
+
+    #[test]
+    fn webhook_channel_config_rejects_invalid_http_urls() {
+        for url in ["https://", "https:///hook"] {
+            let error = WebhookChannelConfig::parse(&json!({ "url": url }))
+                .expect_err("invalid URL should fail");
+
+            assert_eq!(error.message, "webhook url must use http or https");
+        }
+    }
+
+    #[test]
+    fn webhook_channel_config_clamps_timeout() {
+        let low = WebhookChannelConfig::parse(&json!({
+            "url": "https://example.com/hook",
+            "timeout_ms": 999
+        }))
+        .expect("low timeout config");
+        let high = WebhookChannelConfig::parse(&json!({
+            "url": "https://example.com/hook",
+            "timeout_ms": 30001
+        }))
+        .expect("high timeout config");
+        let explicit = WebhookChannelConfig::parse(&json!({
+            "url": "https://example.com/hook",
+            "timeout_ms": 7000
+        }))
+        .expect("explicit timeout config");
+
+        assert_eq!(low.timeout_ms, 1000);
+        assert_eq!(high.timeout_ms, 30000);
+        assert_eq!(explicit.timeout_ms, 7000);
     }
 
     #[test]
