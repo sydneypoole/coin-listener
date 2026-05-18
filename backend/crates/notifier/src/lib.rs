@@ -249,34 +249,27 @@ pub async fn process_notify_task(
         .iter()
         .filter(|rule| notification_rule_matches_event(rule, &event))
     {
-        let channels = match resolve_rule_channels(pool, task.tenant_id, rule).await {
-            Ok(channels) => channels,
-            Err(error) => {
-                warn!(
-                    rule_id = %rule.id,
-                    event_id = %task.event_id,
-                    error = %error,
-                    "failed to resolve notification rule channels"
-                );
-                continue;
-            }
-        };
-
+        let channels = resolve_rule_channels(pool, task.tenant_id, rule).await?;
         for channel in channels {
-            if let Err(error) =
-                process_resolved_channel(pool, &task, &event, rule, channel, now).await
-            {
-                warn!(
-                    rule_id = %rule.id,
-                    event_id = %task.event_id,
-                    error = %error,
-                    "failed to process notification channel"
-                );
-            }
-            deliveries += 1;
+            deliveries += delivery_result_count([process_resolved_channel(
+                pool, &task, &event, rule, channel, now,
+            )
+            .await])?;
         }
     }
 
+    Ok(deliveries)
+}
+
+pub fn delivery_result_count<I>(results: I) -> AppResult<usize>
+where
+    I: IntoIterator<Item = AppResult<()>>,
+{
+    let mut deliveries = 0usize;
+    for result in results {
+        result?;
+        deliveries += 1;
+    }
     Ok(deliveries)
 }
 
@@ -475,37 +468,20 @@ async fn process_channel_delivery(
 ) -> AppResult<()> {
     if plan.create_in_app {
         let (title, body) = build_in_app_notification_content(event);
-        if let Err(error) = notifications::create_sent_in_app_delivery(
-            pool,
-            task.tenant_id,
-            task.event_id,
-            Some(rule.id),
-            Some(plan.channel_id),
-            task.attempt as i32,
-            now,
-            title,
-            body,
-        )
-        .await
-        {
-            warn!(
-                channel_id = %plan.channel_id,
-                error = %error,
-                "failed to create sent in-app delivery atomically"
-            );
-            notifications::create_notification_delivery(
+        sent_in_app_delivery_result(
+            notifications::create_sent_in_app_delivery(
                 pool,
                 task.tenant_id,
                 task.event_id,
                 Some(rule.id),
                 Some(plan.channel_id),
-                DELIVERY_STATUS_FAILED,
                 task.attempt as i32,
-                Some(error.to_string()),
-                None,
+                now,
+                title,
+                body,
             )
-            .await?;
-        }
+            .await,
+        )?;
         return Ok(());
     }
 
@@ -525,6 +501,20 @@ async fn process_channel_delivery(
     Ok(())
 }
 
+pub fn sent_in_app_delivery_result<T>(result: AppResult<T>) -> AppResult<()> {
+    result.map(|_| ())
+}
+
+pub fn notifier_batch_claimed_count(result: AppResult<usize>) -> usize {
+    match result {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            warn!(error = %error, "notification outbox batch failed");
+            0
+        }
+    }
+}
+
 pub async fn run_notifier(
     pool: PgPool,
     config: NotificationOutboxDispatcherConfig,
@@ -533,8 +523,9 @@ pub async fn run_notifier(
     let worker_id = format!("notifier-{}", uuid::Uuid::new_v4());
 
     while !notifier_shutdown_requested(&shutdown) {
-        let claimed =
-            process_notification_outbox_batch(&pool, &worker_id, &config, Utc::now()).await?;
+        let claimed = notifier_batch_claimed_count(
+            process_notification_outbox_batch(&pool, &worker_id, &config, Utc::now()).await,
+        );
         if claimed == 0 {
             tokio::time::sleep(config.idle_sleep).await;
         }
@@ -562,16 +553,17 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use coin_listener_core::{
         models::{AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule},
-        NotifyConfig,
+        AppError, NotifyConfig,
     };
 
     use crate::{
         amount_raw_meets_minimum, build_delivery_plan, build_in_app_notification_content,
-        build_unavailable_channel_delivery_plan, delivery_sent_at, missing_channel_error,
-        notification_outbox_next_attempt_at, notification_outbox_should_fail,
-        notification_outbox_task_attempt, notification_rule_matches_event,
-        notifier_shutdown_requested, notify_channel_decision, notify_task_from_outbox_item,
-        resolve_explicit_rule_channels, NotificationOutboxDispatcherConfig, NotifyChannelDecision,
+        build_unavailable_channel_delivery_plan, delivery_result_count, delivery_sent_at,
+        missing_channel_error, notification_outbox_next_attempt_at,
+        notification_outbox_should_fail, notification_outbox_task_attempt,
+        notification_rule_matches_event, notifier_batch_claimed_count, notifier_shutdown_requested,
+        notify_channel_decision, notify_task_from_outbox_item, resolve_explicit_rule_channels,
+        sent_in_app_delivery_result, NotificationOutboxDispatcherConfig, NotifyChannelDecision,
         ResolvedNotifyChannel, DELIVERY_STATUS_SENT, DELIVERY_STATUS_SKIPPED,
         MISSING_CHANNEL_ERROR_PREFIX, UNAVAILABLE_CHANNEL_ERROR,
     };
@@ -750,6 +742,37 @@ mod tests {
     }
 
     #[test]
+    fn delivery_result_count_propagates_processing_errors() {
+        let results = [
+            Ok(()),
+            Err(AppError::Database("delivery write failed".to_string())),
+        ];
+
+        let error = delivery_result_count(results).expect_err("delivery failure should propagate");
+
+        assert!(error.to_string().contains("delivery write failed"));
+    }
+
+    #[test]
+    fn delivery_result_count_counts_successful_business_skips() {
+        let results = [Ok(()), Ok(())];
+
+        assert_eq!(delivery_result_count(results).unwrap(), 2);
+    }
+
+    #[test]
+    fn sent_in_app_delivery_result_propagates_atomic_write_error() {
+        let error = AppError::NotFound("in-app notification target".to_string());
+
+        let result = sent_in_app_delivery_result(Err::<(), _>(error));
+
+        assert!(matches!(
+            result,
+            Err(AppError::NotFound(entity)) if entity == "in-app notification target"
+        ));
+    }
+
+    #[test]
     fn rule_does_not_match_when_amount_is_below_minimum() {
         let mut event = event();
         event.amount_raw = Some("999".to_string());
@@ -858,5 +881,12 @@ mod tests {
         let shutdown = AtomicBool::new(true);
 
         assert!(notifier_shutdown_requested(&shutdown));
+    }
+
+    #[test]
+    fn notifier_batch_claimed_count_keeps_loop_alive_after_error() {
+        let error = AppError::Database("claim failed".to_string());
+
+        assert_eq!(notifier_batch_claimed_count(Err(error)), 0);
     }
 }
