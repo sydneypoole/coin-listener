@@ -147,7 +147,7 @@ impl ExternalNotificationSender {
         match response {
             Ok(response) => {
                 let status = response.status().as_u16();
-                let body = response.text().await.unwrap_or_default();
+                let body = read_provider_response_prefix(response).await;
                 classify_telegram_response(status, &body)
             }
             Err(error) => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
@@ -171,7 +171,7 @@ impl ExternalNotificationSender {
         match request.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
-                let body = response.text().await.unwrap_or_default();
+                let body = read_provider_response_prefix(response).await;
                 classify_webhook_response(status, &body)
             }
             Err(error) => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
@@ -342,10 +342,11 @@ pub fn classify_webhook_response(status_code: u16, body: &str) -> ExternalSendOu
 }
 
 pub fn classify_telegram_response(status_code: u16, body: &str) -> ExternalSendOutcome {
-    let provider_message_id = serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| value.get("result").cloned())
-        .and_then(|result| result.get("message_id").cloned())
+    let parsed_body = serde_json::from_str::<Value>(body).ok();
+    let provider_message_id = parsed_body
+        .as_ref()
+        .and_then(|value| value.get("result"))
+        .and_then(|result| result.get("message_id"))
         .and_then(|message_id| message_id.as_i64().map(|value| value.to_string()));
 
     let metadata = ExternalSendMetadata {
@@ -355,7 +356,11 @@ pub fn classify_telegram_response(status_code: u16, body: &str) -> ExternalSendO
         provider_response: Some(truncate_provider_response(body)),
     };
     match status_code {
-        200..=299 => ExternalSendOutcome::Sent(metadata),
+        200..=299 if parsed_body.is_some() => ExternalSendOutcome::Sent(metadata),
+        200..=299 => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+            last_error: Some("telegram returned unparsable success body".to_string()),
+            ..metadata
+        }),
         408 | 429 | 500..=599 => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
             last_error: Some(format!("telegram returned retryable status {status_code}")),
             ..metadata
@@ -431,12 +436,27 @@ fn find_url_start(text: &str) -> Option<usize> {
     }
 }
 
+pub const PROVIDER_RESPONSE_MAX_BYTES: usize = 2048;
+
+pub async fn read_provider_response_prefix(mut response: reqwest::Response) -> String {
+    let mut bytes = Vec::with_capacity(PROVIDER_RESPONSE_MAX_BYTES);
+    while bytes.len() < PROVIDER_RESPONSE_MAX_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = PROVIDER_RESPONSE_MAX_BYTES - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 pub fn truncate_provider_response(body: &str) -> String {
-    const MAX_BYTES: usize = 2048;
-    if body.len() <= MAX_BYTES {
+    if body.len() <= PROVIDER_RESPONSE_MAX_BYTES {
         return body.to_string();
     }
-    let mut end = MAX_BYTES;
+    let mut end = PROVIDER_RESPONSE_MAX_BYTES;
     while !body.is_char_boundary(end) {
         end -= 1;
     }
@@ -801,6 +821,19 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("permanent status 401"));
+    }
+
+    #[test]
+    fn telegram_sender_retries_unparsable_success_body() {
+        let outcome = classify_telegram_response(200, "not-json");
+
+        assert!(outcome.is_transient_failure());
+        assert!(outcome
+            .metadata()
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("unparsable success body"));
     }
 
     #[test]
