@@ -655,7 +655,7 @@ pub async fn mark_notification_outbox_delivered(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    ensure_updated(result.rows_affected())
+    ensure_notification_outbox_updated(result.rows_affected())
 }
 
 pub async fn mark_notification_outbox_retryable(
@@ -672,7 +672,7 @@ pub async fn mark_notification_outbox_retryable(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    ensure_updated(result.rows_affected())
+    ensure_notification_outbox_updated(result.rows_affected())
 }
 
 pub async fn mark_notification_outbox_failed(
@@ -687,7 +687,7 @@ pub async fn mark_notification_outbox_failed(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    ensure_updated(result.rows_affected())
+    ensure_notification_outbox_updated(result.rows_affected())
 }
 
 pub async fn release_stale_notification_outbox(
@@ -826,6 +826,16 @@ pub async fn finish_address_scan(
 fn ensure_updated(rows_affected: u64) -> AppResult<()> {
     if rows_affected == 0 {
         return Err(AppError::NotFound("watched address".to_string()));
+    }
+
+    Ok(())
+}
+
+fn ensure_notification_outbox_updated(rows_affected: u64) -> AppResult<()> {
+    if rows_affected == 0 {
+        return Err(AppError::NotFound(
+            "processing notification outbox item".to_string(),
+        ));
     }
 
     Ok(())
@@ -1182,6 +1192,16 @@ mod tests {
             assert!(query.contains("WHERE id = $1"));
             assert!(query.contains("status = 'processing'"));
         }
+    }
+
+    #[test]
+    fn notification_outbox_update_miss_reports_outbox_item() {
+        let error = super::ensure_notification_outbox_updated(0)
+            .expect_err("missing processing outbox item");
+
+        assert!(error
+            .to_string()
+            .contains("processing notification outbox item"));
     }
 
     #[test]
