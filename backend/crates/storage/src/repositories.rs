@@ -1086,6 +1086,23 @@ mod tests {
     }
 
     #[test]
+    fn notification_ops_indexes_migration_adds_outbox_and_delivery_indexes() {
+        let migration = include_str!("../migrations/0009_notification_ops_indexes.sql");
+
+        assert!(migration.contains("idx_notification_outbox_tenant_status_created"));
+        assert!(migration.contains("ON notification_outbox(tenant_id, status, created_at DESC)"));
+        assert!(migration.contains("idx_notification_outbox_tenant_next_attempt"));
+        assert!(migration.contains("ON notification_outbox(tenant_id, next_attempt_at)"));
+        assert!(migration.contains("idx_notification_deliveries_tenant_status_created"));
+        assert!(
+            migration.contains("ON notification_deliveries(tenant_id, status, created_at DESC)")
+        );
+        assert!(migration.contains("idx_notification_deliveries_tenant_channel_type_created"));
+        assert!(migration
+            .contains("ON notification_deliveries(tenant_id, channel_type, created_at DESC)"));
+    }
+
+    #[test]
     fn notification_outbox_insert_query_links_new_event() {
         assert!(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY.contains("notification_outbox"));
         assert!(INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY.contains("tenant_id"));
