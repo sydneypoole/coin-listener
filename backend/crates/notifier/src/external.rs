@@ -348,6 +348,12 @@ pub fn classify_telegram_response(status_code: u16, body: &str) -> ExternalSendO
         .and_then(|value| value.get("result"))
         .and_then(|result| result.get("message_id"))
         .and_then(|message_id| message_id.as_i64().map(|value| value.to_string()));
+    let telegram_success = parsed_body
+        .as_ref()
+        .and_then(|value| value.get("ok"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        && provider_message_id.is_some();
 
     let metadata = ExternalSendMetadata {
         last_error: None,
@@ -356,9 +362,15 @@ pub fn classify_telegram_response(status_code: u16, body: &str) -> ExternalSendO
         provider_response: Some(truncate_provider_response(body)),
     };
     match status_code {
-        200..=299 if parsed_body.is_some() => ExternalSendOutcome::Sent(metadata),
+        200..=299 if telegram_success => ExternalSendOutcome::Sent(metadata),
+        200..=299 if parsed_body.is_none() => {
+            ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+                last_error: Some("telegram returned unparsable success body".to_string()),
+                ..metadata
+            })
+        }
         200..=299 => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
-            last_error: Some("telegram returned unparsable success body".to_string()),
+            last_error: Some("telegram returned unsuccessful success body".to_string()),
             ..metadata
         }),
         408 | 429 | 500..=599 => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
@@ -834,6 +846,22 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("unparsable success body"));
+    }
+
+    #[test]
+    fn telegram_sender_retries_unsuccessful_success_body() {
+        let outcome = classify_telegram_response(
+            200,
+            r#"{"ok":false,"description":"Bad Request: chat not found"}"#,
+        );
+
+        assert!(outcome.is_transient_failure());
+        assert!(outcome
+            .metadata()
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("unsuccessful success body"));
     }
 
     #[test]
