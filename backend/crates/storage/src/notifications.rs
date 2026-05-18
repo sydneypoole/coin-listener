@@ -5,7 +5,7 @@ use coin_listener_core::{
     models::{
         AddressEvent, CreateNotificationChannelRequest, CreateNotificationRuleRequest,
         InAppNotification, InAppNotificationQuery, NotificationChannel, NotificationDelivery,
-        NotificationRule,
+        NotificationDeliveryListItem, NotificationDeliveryQuery, NotificationRule,
     },
     AppError, AppResult,
 };
@@ -132,6 +132,55 @@ pub const MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY: &str = r#"
                   last_error, sent_at, created_at
         "#;
 
+pub const LIST_NOTIFICATION_DELIVERIES_QUERY: &str = r#"
+SELECT id,
+       tenant_id,
+       event_id,
+       rule_id,
+       channel_id,
+       channel_type,
+       status,
+       attempt_count,
+       last_error,
+       sent_at,
+       created_at,
+       idempotency_key,
+       provider_message_id,
+       provider_status_code,
+       provider_response
+FROM notification_deliveries
+WHERE tenant_id = $1
+  AND ($2::uuid IS NULL OR event_id = $2)
+  AND ($3::text IS NULL OR status = $3)
+  AND ($4::text IS NULL OR channel_type = $4)
+  AND ($5::uuid IS NULL OR rule_id = $5)
+  AND ($6::uuid IS NULL OR channel_id = $6)
+ORDER BY created_at DESC
+LIMIT $7 OFFSET $8
+"#;
+
+pub const LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY: &str = r#"
+SELECT id,
+       tenant_id,
+       event_id,
+       rule_id,
+       channel_id,
+       channel_type,
+       status,
+       attempt_count,
+       last_error,
+       sent_at,
+       created_at,
+       idempotency_key,
+       provider_message_id,
+       provider_status_code,
+       provider_response
+FROM notification_deliveries
+WHERE tenant_id = $1
+  AND event_id = $2
+ORDER BY created_at DESC
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalDeliveryStart {
     AlreadyComplete { delivery_id: Uuid },
@@ -210,6 +259,26 @@ pub fn validate_notification_delivery_status(status: &str) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+pub fn validate_notification_delivery_channel_type(channel_type: &str) -> AppResult<()> {
+    if !matches!(
+        channel_type,
+        CHANNEL_TYPE_IN_APP | CHANNEL_TYPE_TELEGRAM | CHANNEL_TYPE_WEBHOOK
+    ) {
+        return Err(AppError::Validation(
+            "channel_type must be in_app, telegram, or webhook".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn notification_delivery_ops_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(50).clamp(1, 100)
+}
+
+pub fn notification_delivery_ops_offset(offset: Option<i64>) -> i64 {
+    offset.unwrap_or(0).max(0)
 }
 
 pub fn external_delivery_start_from_status(
@@ -793,6 +862,43 @@ pub async fn mark_external_notification_delivery_failed(
         .ok_or_else(|| AppError::NotFound("external notification delivery".to_string()))
 }
 
+pub async fn list_notification_deliveries(
+    pool: &PgPool,
+    query: NotificationDeliveryQuery,
+) -> AppResult<Vec<NotificationDeliveryListItem>> {
+    if let Some(status) = query.status.as_deref() {
+        validate_notification_delivery_status(status)?;
+    }
+    if let Some(channel_type) = query.channel_type.as_deref() {
+        validate_notification_delivery_channel_type(channel_type)?;
+    }
+
+    sqlx::query_as::<_, NotificationDeliveryListItem>(LIST_NOTIFICATION_DELIVERIES_QUERY)
+        .bind(DEFAULT_TENANT_ID)
+        .bind(query.event_id)
+        .bind(query.status)
+        .bind(query.channel_type)
+        .bind(query.rule_id)
+        .bind(query.channel_id)
+        .bind(notification_delivery_ops_limit(query.limit))
+        .bind(notification_delivery_ops_offset(query.offset))
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn list_notification_deliveries_for_event(
+    pool: &PgPool,
+    event_id: Uuid,
+) -> AppResult<Vec<NotificationDeliveryListItem>> {
+    sqlx::query_as::<_, NotificationDeliveryListItem>(LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY)
+        .bind(DEFAULT_TENANT_ID)
+        .bind(event_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
 async fn create_notification_delivery_with_executor(
     executor: &mut sqlx::PgConnection,
     tenant_id: Uuid,
@@ -1061,16 +1167,20 @@ mod tests {
         validate_notification_channel_request, validate_notification_delivery_status,
         validate_notification_rule_reference_consistency, validate_notification_rule_request,
         ExternalDeliveryStart, CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
-        INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
-        MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
+        INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY, LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY,
+        LIST_NOTIFICATION_DELIVERIES_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
         MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY,
         SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY,
         UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY,
     };
     use coin_listener_core::{
-        models::{CreateNotificationChannelRequest, CreateNotificationRuleRequest},
-        AppError,
+        models::{
+            CreateNotificationChannelRequest, CreateNotificationRuleRequest,
+            NotificationDeliveryListItem, NotificationDeliveryQuery,
+        },
+        AppError, AppResult,
     };
+    use sqlx::PgPool;
     use uuid::Uuid;
 
     #[test]
@@ -1244,6 +1354,86 @@ mod tests {
         assert!(
             MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY.contains("provider_message_id = NULL")
         );
+    }
+
+    #[test]
+    fn delivery_ops_validates_channel_type_filter() {
+        for channel_type in ["in_app", "telegram", "webhook"] {
+            assert!(super::validate_notification_delivery_channel_type(channel_type).is_ok());
+        }
+        assert!(super::validate_notification_delivery_channel_type("email").is_err());
+    }
+
+    #[test]
+    fn delivery_ops_pagination_defaults_and_clamps() {
+        let default_query = NotificationDeliveryQuery {
+            event_id: None,
+            status: None,
+            channel_type: None,
+            rule_id: None,
+            channel_id: None,
+            limit: None,
+            offset: None,
+        };
+        assert_eq!(
+            super::notification_delivery_ops_limit(default_query.limit),
+            50
+        );
+        assert_eq!(
+            super::notification_delivery_ops_offset(default_query.offset),
+            0
+        );
+        assert_eq!(super::notification_delivery_ops_limit(Some(0)), 1);
+        assert_eq!(super::notification_delivery_ops_limit(Some(500)), 100);
+        assert_eq!(super::notification_delivery_ops_offset(Some(-10)), 0);
+        assert_eq!(super::notification_delivery_ops_offset(Some(25)), 25);
+    }
+
+    #[test]
+    fn delivery_ops_list_query_filters_metadata_and_orders_newest_first() {
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("FROM notification_deliveries"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("tenant_id = $1"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("$2::uuid IS NULL OR event_id = $2"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("$3::text IS NULL OR status = $3"));
+        assert!(
+            LIST_NOTIFICATION_DELIVERIES_QUERY.contains("$4::text IS NULL OR channel_type = $4")
+        );
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("$5::uuid IS NULL OR rule_id = $5"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("$6::uuid IS NULL OR channel_id = $6"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("provider_message_id"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("provider_status_code"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("provider_response"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("ORDER BY created_at DESC"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("LIMIT $7 OFFSET $8"));
+    }
+
+    #[test]
+    fn delivery_ops_event_query_is_event_scoped() {
+        assert!(LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY.contains("tenant_id = $1"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY.contains("event_id = $2"));
+        assert!(LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY.contains("ORDER BY created_at DESC"));
+    }
+
+    #[allow(dead_code)]
+    async fn assert_list_notification_deliveries_signature(
+        pool: &PgPool,
+        query: NotificationDeliveryQuery,
+    ) -> AppResult<Vec<NotificationDeliveryListItem>> {
+        super::list_notification_deliveries(pool, query).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_list_notification_deliveries_for_event_signature(
+        pool: &PgPool,
+        event_id: uuid::Uuid,
+    ) -> AppResult<Vec<NotificationDeliveryListItem>> {
+        super::list_notification_deliveries_for_event(pool, event_id).await
+    }
+
+    #[test]
+    fn delivery_ops_helper_signatures_are_stable() {
+        let _ = assert_list_notification_deliveries_signature;
+        let _ = assert_list_notification_deliveries_for_event_signature;
     }
 
     #[test]
