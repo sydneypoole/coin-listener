@@ -19,6 +19,7 @@ const CHANNEL_TYPE_TELEGRAM: &str = "telegram";
 const CHANNEL_TYPE_WEBHOOK: &str = "webhook";
 const STATUS_ACTIVE: &str = "active";
 const STATUS_INACTIVE: &str = "inactive";
+const DELIVERY_STATUS_PROCESSING: &str = "processing";
 const DELIVERY_STATUS_SENT: &str = "sent";
 const DELIVERY_STATUS_SKIPPED: &str = "skipped";
 const DELIVERY_STATUS_FAILED: &str = "failed";
@@ -38,6 +39,93 @@ const CREATE_IN_APP_NOTIFICATION_QUERY: &str = r#"
           ))
         RETURNING id, tenant_id, event_id, delivery_id, title, body, read_at, created_at
         "#;
+
+pub const SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY: &str = r#"
+        SELECT id, status
+        FROM notification_deliveries
+        WHERE tenant_id = $1
+          AND event_id = $2
+          AND rule_id = $3
+          AND channel_id = $4
+          AND idempotency_key = $5
+        FOR UPDATE
+        "#;
+
+pub const INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY: &str = r#"
+        INSERT INTO notification_deliveries (
+            tenant_id, event_id, rule_id, channel_id, channel_type, status, attempt_count,
+            idempotency_key, last_error
+        )
+        SELECT $1, $2, $3, $4, $5, 'processing', $6, $7, NULL
+        WHERE EXISTS (
+            SELECT 1 FROM address_events
+            WHERE id = $2
+              AND tenant_id = $1
+        )
+          AND EXISTS (
+              SELECT 1 FROM notification_rules
+              WHERE id = $3
+                AND tenant_id = $1
+          )
+          AND EXISTS (
+              SELECT 1 FROM notification_channels
+              WHERE id = $4
+                AND tenant_id = $1
+          )
+        RETURNING id, tenant_id, event_id, rule_id, channel_id, channel_type, status, attempt_count,
+                  idempotency_key, provider_message_id, provider_status_code, provider_response,
+                  last_error, sent_at, created_at
+        "#;
+
+pub const UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY: &str = r#"
+        UPDATE notification_deliveries
+        SET status = 'processing',
+            attempt_count = $3,
+            last_error = NULL,
+            provider_message_id = NULL,
+            provider_status_code = NULL,
+            provider_response = NULL,
+            sent_at = NULL
+        WHERE id = $1
+          AND tenant_id = $2
+        RETURNING id, tenant_id, event_id, rule_id, channel_id, channel_type, status, attempt_count,
+                  idempotency_key, provider_message_id, provider_status_code, provider_response,
+                  last_error, sent_at, created_at
+        "#;
+
+pub const MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY: &str = r#"
+        UPDATE notification_deliveries
+        SET status = 'sent',
+            last_error = NULL,
+            sent_at = $3,
+            provider_message_id = $4,
+            provider_status_code = $5,
+            provider_response = $6
+        WHERE id = $1
+          AND tenant_id = $2
+        RETURNING id, tenant_id, event_id, rule_id, channel_id, channel_type, status, attempt_count,
+                  idempotency_key, provider_message_id, provider_status_code, provider_response,
+                  last_error, sent_at, created_at
+        "#;
+
+pub const MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY: &str = r#"
+        UPDATE notification_deliveries
+        SET status = 'failed',
+            last_error = $3,
+            provider_status_code = $4,
+            provider_response = $5
+        WHERE id = $1
+          AND tenant_id = $2
+        RETURNING id, tenant_id, event_id, rule_id, channel_id, channel_type, status, attempt_count,
+                  idempotency_key, provider_message_id, provider_status_code, provider_response,
+                  last_error, sent_at, created_at
+        "#;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalDeliveryStart {
+    AlreadyComplete { delivery_id: Uuid },
+    ReadyToSend { delivery_id: Uuid },
+}
 
 pub fn validate_notification_channel_request(
     request: &CreateNotificationChannelRequest,
@@ -101,13 +189,28 @@ pub fn validate_notification_rule_request(
 pub fn validate_notification_delivery_status(status: &str) -> AppResult<()> {
     if !matches!(
         status,
-        DELIVERY_STATUS_SENT | DELIVERY_STATUS_SKIPPED | DELIVERY_STATUS_FAILED
+        DELIVERY_STATUS_PROCESSING
+            | DELIVERY_STATUS_SENT
+            | DELIVERY_STATUS_SKIPPED
+            | DELIVERY_STATUS_FAILED
     ) {
         return Err(AppError::Validation(
-            "delivery status must be sent, skipped, or failed".to_string(),
+            "delivery status must be processing, sent, skipped, or failed".to_string(),
         ));
     }
     Ok(())
+}
+
+pub fn external_delivery_start_from_status(
+    delivery_id: Uuid,
+    status: &str,
+) -> ExternalDeliveryStart {
+    match status {
+        DELIVERY_STATUS_SENT | DELIVERY_STATUS_SKIPPED => {
+            ExternalDeliveryStart::AlreadyComplete { delivery_id }
+        }
+        _ => ExternalDeliveryStart::ReadyToSend { delivery_id },
+    }
 }
 
 pub fn validate_notification_rule_reference_consistency(
@@ -538,6 +641,123 @@ pub async fn create_notification_delivery(
     .ok_or_else(|| AppError::NotFound("notification delivery target".to_string()))
 }
 
+pub async fn begin_external_notification_delivery(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    event_id: Uuid,
+    rule_id: Uuid,
+    channel_id: Uuid,
+    channel_type: &str,
+    idempotency_key: &str,
+    attempt_count: i32,
+) -> AppResult<ExternalDeliveryStart> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    let start = if let Some((delivery_id, status)) =
+        sqlx::query_as::<_, (Uuid, String)>(SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY)
+            .bind(tenant_id)
+            .bind(event_id)
+            .bind(rule_id)
+            .bind(channel_id)
+            .bind(idempotency_key)
+            .fetch_optional(transaction.as_mut())
+            .await
+            .map_err(|error| AppError::Database(error.to_string()))?
+    {
+        match external_delivery_start_from_status(delivery_id, &status) {
+            ExternalDeliveryStart::AlreadyComplete { delivery_id } => {
+                ExternalDeliveryStart::AlreadyComplete { delivery_id }
+            }
+            ExternalDeliveryStart::ReadyToSend { delivery_id } => {
+                sqlx::query_as::<_, NotificationDelivery>(
+                    UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY,
+                )
+                .bind(delivery_id)
+                .bind(tenant_id)
+                .bind(attempt_count)
+                .fetch_optional(transaction.as_mut())
+                .await
+                .map_err(|error| AppError::Database(error.to_string()))?
+                .ok_or_else(|| AppError::NotFound("external notification delivery".to_string()))?;
+
+                ExternalDeliveryStart::ReadyToSend { delivery_id }
+            }
+        }
+    } else {
+        let delivery =
+            sqlx::query_as::<_, NotificationDelivery>(INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY)
+                .bind(tenant_id)
+                .bind(event_id)
+                .bind(rule_id)
+                .bind(channel_id)
+                .bind(channel_type)
+                .bind(attempt_count)
+                .bind(idempotency_key)
+                .fetch_optional(transaction.as_mut())
+                .await
+                .map_err(|error| AppError::Database(error.to_string()))?
+                .ok_or_else(|| {
+                    AppError::NotFound("external notification delivery target".to_string())
+                })?;
+
+        ExternalDeliveryStart::ReadyToSend {
+            delivery_id: delivery.id,
+        }
+    };
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(start)
+}
+
+pub async fn mark_external_notification_delivery_sent(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    delivery_id: Uuid,
+    sent_at: DateTime<Utc>,
+    provider_message_id: Option<String>,
+    provider_status_code: Option<i32>,
+    provider_response: Option<String>,
+) -> AppResult<NotificationDelivery> {
+    sqlx::query_as::<_, NotificationDelivery>(MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY)
+        .bind(delivery_id)
+        .bind(tenant_id)
+        .bind(sent_at)
+        .bind(provider_message_id)
+        .bind(provider_status_code)
+        .bind(provider_response)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("external notification delivery".to_string()))
+}
+
+pub async fn mark_external_notification_delivery_failed(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    delivery_id: Uuid,
+    last_error: String,
+    provider_status_code: Option<i32>,
+    provider_response: Option<String>,
+) -> AppResult<NotificationDelivery> {
+    sqlx::query_as::<_, NotificationDelivery>(MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY)
+        .bind(delivery_id)
+        .bind(tenant_id)
+        .bind(last_error)
+        .bind(provider_status_code)
+        .bind(provider_response)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("external notification delivery".to_string()))
+}
+
 async fn create_notification_delivery_with_executor(
     executor: &mut sqlx::PgConnection,
     tenant_id: Uuid,
@@ -802,9 +1022,15 @@ async fn validate_notification_rule_channel_ids(
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_notification_channel_request, validate_notification_delivery_status,
-        validate_notification_rule_reference_consistency, validate_notification_rule_request,
+        external_delivery_start_from_status, validate_notification_channel_request,
+        validate_notification_delivery_status, validate_notification_rule_reference_consistency,
+        validate_notification_rule_request, ExternalDeliveryStart,
         CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
+        INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
+        MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
+        MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY,
+        SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY,
+        UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY,
     };
     use coin_listener_core::{
         models::{CreateNotificationChannelRequest, CreateNotificationRuleRequest},
@@ -887,8 +1113,47 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(AppError::Validation(message)) if message == "delivery status must be sent, skipped, or failed"
+            Err(AppError::Validation(message)) if message == "delivery status must be processing, sent, skipped, or failed"
         ));
+    }
+
+    #[test]
+    fn delivery_status_validation_accepts_processing_for_external_sends() {
+        assert!(validate_notification_delivery_status("processing").is_ok());
+    }
+
+    #[test]
+    fn external_delivery_start_skips_already_sent_delivery() {
+        let delivery_id = Uuid::from_u128(41);
+
+        let start = external_delivery_start_from_status(delivery_id, "sent");
+
+        assert_eq!(
+            start,
+            ExternalDeliveryStart::AlreadyComplete { delivery_id }
+        );
+    }
+
+    #[test]
+    fn external_delivery_start_reuses_failed_delivery_for_retry() {
+        let delivery_id = Uuid::from_u128(42);
+
+        let start = external_delivery_start_from_status(delivery_id, "failed");
+
+        assert_eq!(start, ExternalDeliveryStart::ReadyToSend { delivery_id });
+    }
+
+    #[test]
+    fn external_delivery_queries_use_idempotency_key_and_row_lock() {
+        assert!(SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY.contains("FOR UPDATE"));
+        assert!(
+            SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY.contains("idempotency_key = $5")
+        );
+        assert!(INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY.contains("idempotency_key"));
+        assert!(UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY
+            .contains("status = 'processing'"));
+        assert!(MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY.contains("provider_message_id"));
+        assert!(MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY.contains("provider_status_code"));
     }
 
     #[test]
