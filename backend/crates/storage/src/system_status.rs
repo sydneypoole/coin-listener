@@ -233,9 +233,12 @@ pub async fn system_provider_status(pool: &PgPool) -> AppResult<ProviderStatus> 
 
 #[cfg(test)]
 mod tests {
-    use crate::system_status::{
-        EVENT_STATUS_QUERY, NOTIFICATION_STATUS_QUERY, NOTIFICATION_STATUS_STALE_MINUTES,
-        PROVIDER_CHAIN_STATUS_QUERY, PROVIDER_ITEMS_QUERY, SCAN_STATUS_QUERY,
+    use crate::{
+        service_heartbeats::SERVICE_HEARTBEAT_STALE_SECONDS,
+        system_status::{
+            EVENT_STATUS_QUERY, NOTIFICATION_STATUS_QUERY, NOTIFICATION_STATUS_STALE_MINUTES,
+            PROVIDER_CHAIN_STATUS_QUERY, PROVIDER_ITEMS_QUERY, SCAN_STATUS_QUERY,
+        },
     };
 
     #[test]
@@ -263,6 +266,11 @@ mod tests {
     #[test]
     fn notification_status_uses_fifteen_minute_stale_outbox_window() {
         assert_eq!(NOTIFICATION_STATUS_STALE_MINUTES, 15);
+    }
+
+    #[test]
+    fn system_status_uses_service_heartbeat_stale_threshold() {
+        assert_eq!(SERVICE_HEARTBEAT_STALE_SECONDS, 90);
     }
 
     #[test]
