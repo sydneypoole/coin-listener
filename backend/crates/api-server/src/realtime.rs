@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgListener;
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -106,7 +107,17 @@ pub async fn run_realtime_notification_listener(
                 }
 
                 while !shutdown.load(Ordering::Relaxed) {
-                    match listener.recv().await {
+                    let Some(result) = shutdown_aware_recv(
+                        listener.recv(),
+                        Arc::clone(&shutdown),
+                        Duration::from_millis(100),
+                    )
+                    .await
+                    else {
+                        break;
+                    };
+
+                    match result {
                         Ok(notification) => {
                             match message_from_notify_payload(notification.payload()) {
                                 Ok(message) => {
@@ -129,6 +140,28 @@ pub async fn run_realtime_notification_listener(
 
         if !shutdown.load(Ordering::Relaxed) {
             time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+async fn shutdown_aware_recv<T, E, F>(
+    recv: F,
+    shutdown: Arc<AtomicBool>,
+    shutdown_check_interval: Duration,
+) -> Option<Result<T, E>>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    tokio::pin!(recv);
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        match time::timeout(shutdown_check_interval, &mut recv).await {
+            Ok(result) => return Some(result),
+            Err(_) => continue,
         }
     }
 }
@@ -195,11 +228,19 @@ async fn send_json(socket: &mut WebSocket, message: &RealtimeServerMessage) -> A
 #[cfg(test)]
 mod tests {
     use super::{
-        notification_message, realtime_token_from_query, recv_realtime_message, RealtimeHub,
-        RealtimeServerMessage,
+        notification_message, realtime_token_from_query, recv_realtime_message,
+        shutdown_aware_recv, RealtimeHub, RealtimeServerMessage,
     };
     use chrono::Utc;
     use coin_listener_core::models::InAppNotification;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use tokio::time;
     use uuid::Uuid;
 
     fn notification_for_tenant(tenant_id: Uuid) -> InAppNotification {
@@ -299,5 +340,25 @@ mod tests {
             received,
             RealtimeServerMessage::InAppNotificationCreated(notification) if notification.id == latest_id
         ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_aware_recv_exits_when_idle_shutdown_is_requested() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let receiver_shutdown = Arc::clone(&shutdown);
+        let receiver = shutdown_aware_recv(
+            std::future::pending::<Result<&'static str, &'static str>>(),
+            receiver_shutdown,
+            Duration::from_millis(5),
+        );
+
+        time::sleep(Duration::from_millis(15)).await;
+        shutdown.store(true, Ordering::Relaxed);
+
+        let result = time::timeout(Duration::from_millis(100), receiver)
+            .await
+            .expect("idle receive exits shortly after shutdown");
+
+        assert!(result.is_none());
     }
 }
