@@ -195,6 +195,27 @@ pub fn ensure_provider_page_limit(
     Ok(())
 }
 
+pub fn is_provider_availability_error(error: &AppError) -> bool {
+    matches!(error, AppError::Config(_))
+}
+
+pub fn provider_capacity_error(chain_id: uuid::Uuid) -> AppError {
+    AppError::Config(format!(
+        "no active rpc provider capacity for chain {chain_id}"
+    ))
+}
+
+pub fn provider_timeout_duration(provider: &Provider) -> AppResult<Duration> {
+    let timeout_ms = u64::try_from(provider.timeout_ms)
+        .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
+    if timeout_ms == 0 {
+        return Err(AppError::Validation(
+            "timeout_ms must be positive".to_string(),
+        ));
+    }
+    Ok(Duration::from_millis(timeout_ms))
+}
+
 fn should_process_btc_transaction_page(
     pages_processed: usize,
     transaction_count: usize,
@@ -216,15 +237,9 @@ pub async fn scan_evm_native_balance(
     let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
     let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
-    let timeout_ms = u64::try_from(provider.timeout_ms)
-        .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
-    if timeout_ms == 0 {
-        return Err(AppError::Validation(
-            "timeout_ms must be positive".to_string(),
-        ));
-    }
+    let timeout = provider_timeout_duration(&provider)?;
 
-    let rpc = EvmRpcClient::new(provider.base_url.clone(), Duration::from_millis(timeout_ms));
+    let rpc = EvmRpcClient::new(provider.base_url.clone(), timeout);
     let block_number = rpc.eth_block_number().await?;
     scan_evm_native_balance_with_context(pool, &rpc, &context, &asset, &provider, block_number)
         .await
@@ -352,14 +367,8 @@ pub async fn scan_evm_address(
     let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
     let chain = repositories::chain_by_id(pool, context.chain_id).await?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
-    let timeout_ms = u64::try_from(provider.timeout_ms)
-        .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
-    if timeout_ms == 0 {
-        return Err(AppError::Validation(
-            "timeout_ms must be positive".to_string(),
-        ));
-    }
-    let rpc = EvmRpcClient::new(provider.base_url.clone(), Duration::from_millis(timeout_ms));
+    let timeout = provider_timeout_duration(&provider)?;
+    let rpc = EvmRpcClient::new(provider.base_url.clone(), timeout);
     let latest_block = rpc.eth_block_number().await?;
 
     let mut events = Vec::new();
@@ -396,15 +405,9 @@ pub async fn scan_tron_address(
     let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
-    let timeout_ms = u64::try_from(provider.timeout_ms)
-        .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
-    if timeout_ms == 0 {
-        return Err(AppError::Validation(
-            "timeout_ms must be positive".to_string(),
-        ));
-    }
+    let timeout = provider_timeout_duration(&provider)?;
 
-    let client = TronClient::new(provider.base_url.clone(), Duration::from_millis(timeout_ms));
+    let client = TronClient::new(provider.base_url.clone(), timeout);
 
     let trx_cursor = repositories::scan_cursor(pool, context.id, TRON_TRX_TRANSFER_CURSOR).await?;
     let trx_from = trx_cursor
@@ -567,15 +570,9 @@ pub async fn scan_btc_address(
     let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
-    let timeout_ms = u64::try_from(provider.timeout_ms)
-        .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
-    if timeout_ms == 0 {
-        return Err(AppError::Validation(
-            "timeout_ms must be positive".to_string(),
-        ));
-    }
+    let timeout = provider_timeout_duration(&provider)?;
 
-    let client = BtcClient::new(provider.base_url.clone(), Duration::from_millis(timeout_ms));
+    let client = BtcClient::new(provider.base_url.clone(), timeout);
     let balance = client.address_balance(&context.address).await?;
     repositories::insert_balance_snapshot(
         pool,
@@ -777,6 +774,84 @@ mod tests {
                 scan_plan_for_chain("solana"),
                 ScanPlan::Unsupported("solana".to_string())
             );
+        }
+    }
+
+    mod provider_failover_helpers {
+        use coin_listener_core::{models::Provider, AppError};
+        use uuid::Uuid;
+
+        use crate::{
+            is_provider_availability_error, provider_capacity_error, provider_timeout_duration,
+        };
+
+        #[test]
+        fn config_errors_are_provider_availability_errors() {
+            assert!(is_provider_availability_error(&AppError::Config(
+                "provider request failed: timeout".to_string()
+            )));
+        }
+
+        #[test]
+        fn validation_database_and_redis_errors_do_not_fallback() {
+            assert!(!is_provider_availability_error(&AppError::Validation(
+                "bad decoded data".to_string()
+            )));
+            assert!(!is_provider_availability_error(&AppError::Database(
+                "db unavailable".to_string()
+            )));
+            assert!(!is_provider_availability_error(&AppError::Redis(
+                "redis unavailable".to_string()
+            )));
+        }
+
+        #[test]
+        fn provider_capacity_error_names_chain() {
+            let error = provider_capacity_error(Uuid::from_u128(7));
+
+            assert!(
+                matches!(error, AppError::Config(message) if message.contains("no active rpc provider capacity for chain 00000000-0000-0000-0000-000000000007"))
+            );
+        }
+
+        #[test]
+        fn provider_timeout_duration_rejects_zero_or_negative_values() {
+            let provider = provider_with_timeout(0);
+            let error = provider_timeout_duration(&provider).unwrap_err();
+            assert!(
+                matches!(error, AppError::Validation(message) if message == "timeout_ms must be positive")
+            );
+
+            let provider = provider_with_timeout(-1);
+            let error = provider_timeout_duration(&provider).unwrap_err();
+            assert!(
+                matches!(error, AppError::Validation(message) if message == "timeout_ms must be positive")
+            );
+        }
+
+        #[test]
+        fn provider_timeout_duration_accepts_positive_values() {
+            let provider = provider_with_timeout(1500);
+
+            assert_eq!(
+                provider_timeout_duration(&provider).unwrap().as_millis(),
+                1500
+            );
+        }
+
+        fn provider_with_timeout(timeout_ms: i32) -> Provider {
+            Provider {
+                id: Uuid::from_u128(1),
+                chain_id: Uuid::from_u128(2),
+                provider_type: "rpc".to_string(),
+                name: "provider".to_string(),
+                base_url: "https://example.invalid".to_string(),
+                api_key_ref: None,
+                priority: 1,
+                qps_limit: 10,
+                timeout_ms,
+                status: "active".to_string(),
+            }
         }
     }
 
