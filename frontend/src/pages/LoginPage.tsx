@@ -29,10 +29,10 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     <div className="login-page">
       <Card className="login-card">
         <Title heading={3}>Coin Listener</Title>
-        <Text type="tertiary">默认账号：admin@example.com / admin</Text>
+        <Text type="tertiary">请输入账号信息登录</Text>
         <Form onSubmit={handleSubmit} className="login-form">
           <Form.Input field="email" label="邮箱" initValue="admin@example.com" rules={[{ required: true, message: '请输入邮箱' }]} />
-          <Form.Input field="password" label="密码" mode="password" initValue="admin" rules={[{ required: true, message: '请输入密码' }]} />
+          <Form.Input field="password" label="密码" mode="password" rules={[{ required: true, message: '请输入密码' }]} />
           <Button htmlType="submit" type="primary" loading={loading} block>
             登录
           </Button>

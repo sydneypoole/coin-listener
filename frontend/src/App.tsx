@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Banner, Button, Card, Layout, Nav, Space, Tag, Typography } from '@douyinfe/semi-ui';
 import { IconBell, IconPulse, IconServer, IconSetting, IconUser } from '@douyinfe/semi-icons';
 import { fetchHealth, type HealthResponse } from './api/health';
 import type { LoginResponse } from './api/types';
+import { clearSession, loadStoredSession, saveSession, setUnauthorizedHandler } from './auth/session';
 import { AddressesPage } from './pages/AddressesPage';
 import { AssetsPage } from './pages/AssetsPage';
 import { ChainsPage } from './pages/ChainsPage';
@@ -31,16 +32,32 @@ type PageKey =
   | 'in-app-notifications';
 
 export function App() {
-  const [session, setSession] = useState<LoginResponse | null>(null);
+  const [session, setSession] = useState<LoginResponse | null>(() => loadStoredSession());
   const [page, setPage] = useState<PageKey>('dashboard');
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => setSession(null));
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
   const healthQuery = useQuery({
     queryKey: ['health'],
     queryFn: fetchHealth,
     retry: 1,
   });
 
+  function handleLogin(nextSession: LoginResponse) {
+    saveSession(nextSession);
+    setSession(nextSession);
+  }
+
+  function handleLogout() {
+    clearSession();
+    setSession(null);
+  }
+
   if (!session) {
-    return <LoginPage onLogin={setSession} />;
+    return <LoginPage onLogin={handleLogin} />;
   }
 
   return (
@@ -67,7 +84,10 @@ export function App() {
       <Layout>
         <Header className="app-header">
           <Title heading={4}>多链地址监听平台</Title>
-          <Text type="tertiary">{session.user.display_name} / {session.tenant.name}</Text>
+          <Space>
+            <Text type="tertiary">{session.user.display_name} / {session.tenant.name}</Text>
+            <Button onClick={handleLogout}>退出登录</Button>
+          </Space>
         </Header>
         <Content className="app-content">{renderPage(page, healthQuery)}</Content>
       </Layout>
