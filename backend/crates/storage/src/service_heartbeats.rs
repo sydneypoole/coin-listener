@@ -123,6 +123,19 @@ pub async fn write_service_heartbeat_tick(
     .await
 }
 
+async fn wait_for_heartbeat_tick_or_shutdown(shutdown: &AtomicBool) {
+    tokio::select! {
+        _ = time::sleep(TokioDuration::from_secs(SERVICE_HEARTBEAT_INTERVAL_SECONDS as u64)) => {}
+        _ = wait_for_service_heartbeat_shutdown(shutdown) => {}
+    }
+}
+
+async fn wait_for_service_heartbeat_shutdown(shutdown: &AtomicBool) {
+    while !shutdown.load(Ordering::Relaxed) {
+        time::sleep(TokioDuration::from_millis(50)).await;
+    }
+}
+
 pub async fn run_service_heartbeat(
     pool: PgPool,
     service_name: &'static str,
@@ -144,10 +157,7 @@ pub async fn run_service_heartbeat(
             break;
         }
 
-        time::sleep(TokioDuration::from_secs(
-            SERVICE_HEARTBEAT_INTERVAL_SECONDS as u64,
-        ))
-        .await;
+        wait_for_heartbeat_tick_or_shutdown(&shutdown).await;
     }
 }
 
@@ -194,8 +204,9 @@ mod tests {
 
     use crate::service_heartbeats::{
         heartbeat_metadata, service_heartbeat_instance_id, service_heartbeat_is_stale,
-        validate_service_heartbeat, SERVICE_HEARTBEAT_INTERVAL_SECONDS,
-        SERVICE_HEARTBEAT_STALE_SECONDS, UPSERT_SERVICE_HEARTBEAT_QUERY,
+        validate_service_heartbeat, wait_for_heartbeat_tick_or_shutdown,
+        SERVICE_HEARTBEAT_INTERVAL_SECONDS, SERVICE_HEARTBEAT_STALE_SECONDS,
+        UPSERT_SERVICE_HEARTBEAT_QUERY,
     };
 
     #[test]
@@ -267,6 +278,19 @@ mod tests {
         assert!(UPSERT_SERVICE_HEARTBEAT_QUERY.contains("ON CONFLICT (service_name, instance_id)"));
         assert!(UPSERT_SERVICE_HEARTBEAT_QUERY.contains("last_seen_at = EXCLUDED.last_seen_at"));
         assert!(!UPSERT_SERVICE_HEARTBEAT_QUERY.contains("started_at = EXCLUDED.started_at"));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_wait_exits_when_shutdown_is_set() {
+        let shutdown = std::sync::atomic::AtomicBool::new(true);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            wait_for_heartbeat_tick_or_shutdown(&shutdown),
+        )
+        .await;
+
+        assert!(result.is_ok());
     }
 
     #[test]

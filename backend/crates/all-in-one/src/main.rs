@@ -20,7 +20,7 @@ use std::{
 };
 use tokio::{net::TcpListener, signal, task::JoinHandle, time};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let event = tokio::select! {
-        result = signal::ctrl_c() => {
+        result = shutdown_signal() => {
             result?;
             info!("all-in-one shutdown requested");
             RuntimeEvent::Shutdown
@@ -113,40 +113,50 @@ async fn main() -> anyhow::Result<()> {
     shutdown.store(true, Ordering::Relaxed);
     match event {
         RuntimeEvent::Shutdown => {
-            wait_for_server_shutdown(server_handle).await?;
-            wait_for_service_shutdown("scheduler", scheduler_handle).await?;
-            wait_for_service_shutdown("worker", worker_handle).await?;
-            wait_for_service_shutdown("notifier", notifier_handle).await?;
+            let secondary = collect_shutdown_errors(vec![
+                wait_for_server_shutdown(server_handle).await,
+                wait_for_service_shutdown("scheduler", scheduler_handle).await,
+                wait_for_service_shutdown("worker", worker_handle).await,
+                wait_for_service_shutdown("notifier", notifier_handle).await,
+            ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
-            Ok(())
+            secondary
         }
         RuntimeEvent::Server(result) => {
-            wait_for_service_shutdown("scheduler", scheduler_handle).await?;
-            wait_for_service_shutdown("worker", worker_handle).await?;
-            wait_for_service_shutdown("notifier", notifier_handle).await?;
+            let secondary = collect_shutdown_errors(vec![
+                wait_for_service_shutdown("scheduler", scheduler_handle).await,
+                wait_for_service_shutdown("worker", worker_handle).await,
+                wait_for_service_shutdown("notifier", notifier_handle).await,
+            ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
-            result
+            preserve_primary_result(result, secondary)
         }
         RuntimeEvent::Scheduler(result) => {
-            wait_for_server_shutdown(server_handle).await?;
-            wait_for_service_shutdown("worker", worker_handle).await?;
-            wait_for_service_shutdown("notifier", notifier_handle).await?;
+            let secondary = collect_shutdown_errors(vec![
+                wait_for_server_shutdown(server_handle).await,
+                wait_for_service_shutdown("worker", worker_handle).await,
+                wait_for_service_shutdown("notifier", notifier_handle).await,
+            ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
-            result
+            preserve_primary_result(result, secondary)
         }
         RuntimeEvent::Worker(result) => {
-            wait_for_server_shutdown(server_handle).await?;
-            wait_for_service_shutdown("scheduler", scheduler_handle).await?;
-            wait_for_service_shutdown("notifier", notifier_handle).await?;
+            let secondary = collect_shutdown_errors(vec![
+                wait_for_server_shutdown(server_handle).await,
+                wait_for_service_shutdown("scheduler", scheduler_handle).await,
+                wait_for_service_shutdown("notifier", notifier_handle).await,
+            ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
-            result
+            preserve_primary_result(result, secondary)
         }
         RuntimeEvent::Notifier(result) => {
-            wait_for_server_shutdown(server_handle).await?;
-            wait_for_service_shutdown("scheduler", scheduler_handle).await?;
-            wait_for_service_shutdown("worker", worker_handle).await?;
+            let secondary = collect_shutdown_errors(vec![
+                wait_for_server_shutdown(server_handle).await,
+                wait_for_service_shutdown("scheduler", scheduler_handle).await,
+                wait_for_service_shutdown("worker", worker_handle).await,
+            ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
-            result
+            preserve_primary_result(result, secondary)
         }
     }
 }
@@ -164,6 +174,21 @@ fn init_tracing() {
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(tracing_subscriber::fmt::layer())
         .try_init();
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> anyhow::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    tokio::select! {
+        result = signal::ctrl_c() => result.map_err(Into::into),
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> anyhow::Result<()> {
+    signal::ctrl_c().await.map_err(Into::into)
 }
 
 async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
@@ -206,6 +231,38 @@ async fn wait_for_heartbeat_shutdown(handles: Vec<JoinHandle<()>>) {
     }
 }
 
+fn collect_shutdown_errors(results: Vec<anyhow::Result<()>>) -> anyhow::Result<()> {
+    let mut first_error = None;
+    for result in results {
+        if let Err(error) = result {
+            warn!(error = %error, "all-in-one secondary shutdown task failed");
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn preserve_primary_result(
+    primary: anyhow::Result<()>,
+    secondary: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match primary {
+        Ok(()) => secondary,
+        Err(error) => {
+            if let Err(secondary_error) = secondary {
+                warn!(error = %secondary_error, "all-in-one ignored secondary shutdown error");
+            }
+            Err(error)
+        }
+    }
+}
+
 fn log_service_result(service: &'static str, result: anyhow::Result<()>) -> anyhow::Result<()> {
     if let Err(error) = &result {
         error!(service, error = %error, "all-in-one service stopped with error");
@@ -230,5 +287,8 @@ mod tests {
         assert!(source.contains("wait_for_server_shutdown("));
         assert!(source.contains("wait_for_service_shutdown(\"scheduler\""));
         assert!(source.contains("wait_for_heartbeat_shutdown("));
+        assert!(source.contains("shutdown_signal()"));
+        assert!(source.contains("SignalKind::terminate()"));
+        assert!(source.contains("preserve_primary_result("));
     }
 }
