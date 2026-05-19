@@ -315,6 +315,23 @@ export type ProviderStatus = {
   items: ProviderStatusItem[];
 };
 
+export type ServiceHeartbeatStatusItem = {
+  service_name: string;
+  instance_id: string;
+  status: string;
+  started_at: string;
+  last_seen_at: string;
+  stale_after_seconds: number;
+  is_stale: boolean;
+  metadata: Record<string, unknown>;
+};
+
+export type ServiceHealthStatus = {
+  online: number;
+  stale: number;
+  items: ServiceHeartbeatStatusItem[];
+};
+
 export type SystemStatus = {
   generated_at: string;
   queues: QueueStatus;
@@ -322,4 +339,5 @@ export type SystemStatus = {
   events: EventStatus;
   notifications: NotificationStatus;
   providers: ProviderStatus;
+  services: ServiceHealthStatus;
 };

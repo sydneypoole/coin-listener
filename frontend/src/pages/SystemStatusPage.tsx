@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Banner, Card, Col, Row, Space, Table, Tag, Typography } from '@douyinfe/semi-ui';
 import { getSystemStatus } from '../api/client';
-import type { ProviderChainStatus, ProviderStatusItem } from '../api/types';
+import type { ProviderChainStatus, ProviderStatusItem, ServiceHeartbeatStatusItem } from '../api/types';
 
 const { Text, Title } = Typography;
 
@@ -15,6 +15,24 @@ function formatTime(value?: string | null) {
 
 function statusColor(status: string): 'green' | 'grey' {
   return status === 'active' ? 'green' : 'grey';
+}
+
+function serviceStatusColor(item: ServiceHeartbeatStatusItem): 'green' | 'red' {
+  return item.is_stale ? 'red' : 'green';
+}
+
+function shortInstanceId(instanceId: string) {
+  return instanceId.length > 12 ? `${instanceId.slice(0, 8)}…` : instanceId;
+}
+
+function metadataText(metadata: Record<string, unknown>) {
+  const pid = typeof metadata.pid === 'number' || typeof metadata.pid === 'string' ? metadata.pid : '-';
+  const version = typeof metadata.version === 'string' ? metadata.version : '-';
+  return `pid ${pid} / v${version}`;
+}
+
+function serviceHeartbeatRowKey(record?: ServiceHeartbeatStatusItem) {
+  return record ? `${record.service_name}:${record.instance_id}` : '';
 }
 
 export function SystemStatusPage() {
@@ -68,6 +86,9 @@ export function SystemStatusPage() {
               hint={`24h delivery failed ${status?.notifications.last_24h_failed ?? 0}`}
             />
           </Col>
+          <Col span={8}>
+            <Metric title="服务在线" value={status?.services.online ?? 0} hint={`stale ${status?.services.stale ?? 0}`} />
+          </Col>
         </Row>
       </Card>
 
@@ -88,7 +109,34 @@ export function SystemStatusPage() {
             {status?.notifications.outbox.stale_processing ?? 0} / next due {formatTime(status?.notifications.outbox.next_due_at)}
           </Text>
           <Text>Provider：active {status?.providers.active ?? 0} / inactive {status?.providers.inactive ?? 0}</Text>
+          <Text>服务：online {status?.services.online ?? 0} / stale {status?.services.stale ?? 0}</Text>
         </Space>
+      </Card>
+
+      <Card title="服务心跳" loading={statusQuery.isLoading}>
+        <Table<ServiceHeartbeatStatusItem>
+          dataSource={status?.services.items ?? []}
+          rowKey={serviceHeartbeatRowKey}
+          pagination={false}
+          scroll={{ x: 900 }}
+          columns={[
+            { title: '服务', dataIndex: 'service_name', width: 140 },
+            {
+              title: '状态',
+              dataIndex: 'status',
+              width: 120,
+              render: (_value, record) => {
+                const item = record as ServiceHeartbeatStatusItem;
+                return <Tag color={serviceStatusColor(item)}>{item.is_stale ? 'stale' : item.status}</Tag>;
+              },
+            },
+            { title: '实例', dataIndex: 'instance_id', width: 140, render: value => shortInstanceId(String(value)) },
+            { title: '启动时间', dataIndex: 'started_at', width: 190, render: value => formatTime(String(value)) },
+            { title: '最后心跳', dataIndex: 'last_seen_at', width: 190, render: value => formatTime(String(value)) },
+            { title: '超时阈值', dataIndex: 'stale_after_seconds', width: 110, render: value => `${String(value)}s` },
+            { title: '运行信息', dataIndex: 'metadata', width: 160, render: value => metadataText(value as Record<string, unknown>) },
+          ]}
+        />
       </Card>
 
       <Card title="Provider 按链状态" loading={statusQuery.isLoading}>
