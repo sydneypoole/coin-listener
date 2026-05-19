@@ -2,8 +2,17 @@ use argon2::{
     password_hash::{PasswordHash, PasswordVerifier},
     Argon2,
 };
+use std::sync::Arc;
+
+use axum::{
+    extract::{Request, State},
+    http::header,
+    middleware::Next,
+    response::Response,
+};
 use chrono::{Duration, Utc};
 use coin_listener_core::{AppError, AppResult};
+use coin_listener_storage::repositories;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -12,6 +21,13 @@ use uuid::Uuid;
 pub struct TokenSettings {
     pub secret: String,
     pub ttl: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub user_id: Uuid,
+    pub tenant_id: Uuid,
+    pub email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +121,38 @@ pub fn validate_token(settings: &TokenSettings, token: &str) -> AppResult<AuthCl
     )
     .map(|data| data.claims)
     .map_err(|_| AppError::Unauthorized)
+}
+
+pub fn bearer_token(headers: &axum::http::HeaderMap) -> AppResult<&str> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AppError::Unauthorized)?;
+
+    value
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.trim().is_empty())
+        .ok_or(AppError::Unauthorized)
+}
+
+pub async fn require_auth(
+    State(state): State<Arc<crate::ApiState>>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, crate::ApiError> {
+    let token = bearer_token(request.headers())?;
+    let claims = validate_token(&state.auth, token)?;
+    let user_id = claims.subject_uuid()?;
+    let tenant_id = claims.tenant_uuid()?;
+    repositories::active_tenant_membership(&state.postgres, user_id, tenant_id).await?;
+
+    request.extensions_mut().insert(AuthContext {
+        user_id,
+        tenant_id,
+        email: claims.email,
+    });
+
+    Ok(next.run(request).await)
 }
 
 #[cfg(test)]

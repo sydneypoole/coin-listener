@@ -1,6 +1,8 @@
+use crate::auth::{self, AuthContext, TokenSettings};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
@@ -35,6 +37,7 @@ pub struct ApiState {
     pub scan_queue_key: String,
     pub notify_queue_key: String,
     pub enable_dev_routes: bool,
+    pub auth: TokenSettings,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,10 +52,8 @@ pub struct ErrorResponse {
 }
 
 pub fn build_router(state: Arc<ApiState>) -> Router {
-    let router = Router::new()
-        .route("/health", get(health))
+    let protected = Router::new()
         .route("/api/system/status", get(system_status_handler))
-        .route("/api/auth/login", post(login))
         .route("/api/chains", get(list_chains))
         .route("/api/assets", get(list_assets))
         .route("/api/providers", get(list_providers).post(create_provider))
@@ -90,12 +91,21 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
             get(list_notification_deliveries),
         );
 
-    if state.enable_dev_routes {
-        router.route("/api/dev/scan-address/:id", post(scan_address))
+    let protected = if state.enable_dev_routes {
+        protected.route("/api/dev/scan-address/:id", post(scan_address))
     } else {
-        router
+        protected
     }
-    .with_state(state)
+    .route_layer(middleware::from_fn_with_state(
+        Arc::clone(&state),
+        auth::require_auth,
+    ));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/api/auth/login", post(login))
+        .merge(protected)
+        .with_state(state)
 }
 
 async fn health(State(_state): State<Arc<ApiState>>) -> Json<HealthResponse> {
@@ -177,12 +187,12 @@ async fn login(
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
     let user = repositories::find_user_by_email(&state.postgres, &request.email).await?;
-    if user.password_hash != request.password {
+    if !auth::verify_password(&request.password, &user.password_hash)? {
         return Err(AppError::Unauthorized.into());
     }
 
     let tenant = repositories::default_tenant_for_user(&state.postgres, user.id).await?;
-    let token = format!("dev-token-{}", user.id);
+    let token = auth::issue_token(&state.auth, user.id, tenant.id, &user.email)?;
 
     Ok(Json(LoginResponse {
         token,
@@ -225,8 +235,10 @@ async fn list_addresses(State(state): State<Arc<ApiState>>) -> Result<Response, 
 
 async fn create_address(
     State(state): State<Arc<ApiState>>,
-    Json(request): Json<CreateWatchedAddressRequest>,
+    Extension(auth): Extension<AuthContext>,
+    Json(mut request): Json<CreateWatchedAddressRequest>,
 ) -> Result<Response, ApiError> {
+    request.tenant_id = Some(auth.tenant_id);
     let address = repositories::create_watched_address(&state.postgres, request).await?;
     Ok((StatusCode::CREATED, Json(address)).into_response())
 }
@@ -419,14 +431,37 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{build_router, ApiState};
+    use crate::auth::TokenSettings;
     use axum::{
         body::Body,
-        http::{Method, Request, StatusCode},
+        http::{header, Method, Request, StatusCode},
         response::IntoResponse,
     };
+    use chrono::Duration;
     use sqlx::PgPool;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    fn test_state() -> Arc<ApiState> {
+        test_state_with_dev_routes(true)
+    }
+
+    fn test_state_with_dev_routes(enable_dev_routes: bool) -> Arc<ApiState> {
+        Arc::new(ApiState {
+            postgres: PgPool::connect_lazy(
+                "postgres://postgres:postgres@localhost/coin_listener_test",
+            )
+            .expect("valid postgres url"),
+            redis: None,
+            scan_queue_key: "scan:address:queue".to_string(),
+            notify_queue_key: "notify:event:queue".to_string(),
+            enable_dev_routes,
+            auth: TokenSettings {
+                secret: "test-secret-with-enough-entropy".to_string(),
+                ttl: Duration::seconds(3600),
+            },
+        })
+    }
 
     #[test]
     fn forbidden_errors_map_to_http_403() {
@@ -437,17 +472,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_exposes_events_filter_query() {
-        let app = build_router(Arc::new(ApiState {
-            postgres: PgPool::connect_lazy(
-                "postgres://postgres:postgres@localhost/coin_listener_test",
+    async fn protected_api_route_rejects_missing_token() {
+        let app = build_router(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/chains")
+                    .body(Body::empty())
+                    .expect("valid request"),
             )
-            .expect("valid postgres url"),
-            redis: None,
-            scan_queue_key: "scan:address:queue".to_string(),
-            notify_queue_key: "notify:event:queue".to_string(),
-            enable_dev_routes: true,
-        }));
+            .await
+            .expect("router response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn health_route_remains_public() {
+        let app = build_router(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_route_remains_public() {
+        let app = build_router(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"email":"missing@example.com","password":"wrong"}"#,
+                    ))
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn router_exposes_events_filter_query() {
+        let app = build_router(test_state());
 
         let response = app
             .oneshot(
@@ -460,26 +543,17 @@ mod tests {
             .await
             .expect("router response");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn router_exposes_system_status_route() {
-        let app = build_router(Arc::new(ApiState {
-            postgres: PgPool::connect_lazy(
-                "postgres://postgres:postgres@localhost/coin_listener_test",
-            )
-            .expect("valid postgres url"),
-            redis: None,
-            scan_queue_key: "scan:address:queue".to_string(),
-            notify_queue_key: "notify:event:queue".to_string(),
-            enable_dev_routes: false,
-        }));
+        let app = build_router(test_state());
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .method(Method::POST)
+                    .method(Method::GET)
                     .uri("/api/system/status")
                     .body(Body::empty())
                     .expect("valid request"),
@@ -487,62 +561,53 @@ mod tests {
             .await
             .expect("router response");
 
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn router_exposes_notification_routes() {
-        let app = build_router(Arc::new(ApiState {
-            postgres: PgPool::connect_lazy(
-                "postgres://postgres:postgres@localhost/coin_listener_test",
-            )
-            .expect("valid postgres url"),
-            redis: None,
-            scan_queue_key: "scan:address:queue".to_string(),
-            notify_queue_key: "notify:event:queue".to_string(),
-            enable_dev_routes: true,
-        }));
+        let app = build_router(test_state());
 
         for (method, uri, status) in [
             (
                 Method::PUT,
                 "/api/notification-channels",
-                StatusCode::METHOD_NOT_ALLOWED,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::PATCH,
                 "/api/notification-rules",
-                StatusCode::METHOD_NOT_ALLOWED,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::POST,
                 "/api/notification-channels",
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::POST,
                 "/api/notification-rules",
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::PUT,
                 "/api/notification-rules/not-a-uuid",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::DELETE,
                 "/api/notification-rules/not-a-uuid",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::GET,
                 "/api/in-app-notifications?unread_only=not-bool",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::POST,
                 "/api/in-app-notifications/not-a-uuid/read",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
         ] {
             let response = app
@@ -563,47 +628,38 @@ mod tests {
 
     #[tokio::test]
     async fn router_exposes_notification_operations_routes() {
-        let app = build_router(Arc::new(ApiState {
-            postgres: PgPool::connect_lazy(
-                "postgres://postgres:postgres@localhost/coin_listener_test",
-            )
-            .expect("valid postgres url"),
-            redis: None,
-            scan_queue_key: "scan:address:queue".to_string(),
-            notify_queue_key: "notify:event:queue".to_string(),
-            enable_dev_routes: true,
-        }));
+        let app = build_router(test_state());
 
         for (method, uri, status) in [
             (
                 Method::GET,
                 "/api/notification-outbox?status=unknown",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::GET,
                 "/api/notification-deliveries?status=unknown",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::GET,
                 "/api/notification-deliveries?channel_type=email",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::GET,
                 "/api/notification-outbox/not-a-uuid",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::POST,
                 "/api/notification-outbox/not-a-uuid/retry",
-                StatusCode::BAD_REQUEST,
+                StatusCode::UNAUTHORIZED,
             ),
             (
                 Method::POST,
                 "/api/notification-deliveries",
-                StatusCode::METHOD_NOT_ALLOWED,
+                StatusCode::UNAUTHORIZED,
             ),
         ] {
             let response = app
@@ -624,16 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_exposes_dev_scan_address_route_when_enabled() {
-        let app = build_router(Arc::new(ApiState {
-            postgres: PgPool::connect_lazy(
-                "postgres://postgres:postgres@localhost/coin_listener_test",
-            )
-            .expect("valid postgres url"),
-            redis: None,
-            scan_queue_key: "scan:address:queue".to_string(),
-            notify_queue_key: "notify:event:queue".to_string(),
-            enable_dev_routes: true,
-        }));
+        let app = build_router(test_state());
 
         let response = app
             .oneshot(
@@ -646,21 +693,12 @@ mod tests {
             .await
             .expect("router response");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn router_hides_dev_scan_address_route_when_disabled() {
-        let app = build_router(Arc::new(ApiState {
-            postgres: PgPool::connect_lazy(
-                "postgres://postgres:postgres@localhost/coin_listener_test",
-            )
-            .expect("valid postgres url"),
-            redis: None,
-            scan_queue_key: "scan:address:queue".to_string(),
-            notify_queue_key: "notify:event:queue".to_string(),
-            enable_dev_routes: false,
-        }));
+        let app = build_router(test_state_with_dev_routes(false));
 
         let response = app
             .oneshot(

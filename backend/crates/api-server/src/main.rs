@@ -1,4 +1,4 @@
-use api_server::{build_router, ApiState};
+use api_server::{auth, build_router, ApiState};
 use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
@@ -22,6 +22,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = AppConfig::from_env()?;
+    let auth_settings = auth::token_settings(
+        config.auth.token_secret.clone(),
+        config.auth.token_ttl_seconds,
+    )?;
     let postgres = connect_postgres(&config.postgres).await?;
     run_migrations(&postgres).await?;
     let redis = connect_redis(&config.redis)?;
@@ -42,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
         scan_queue_key: config.scan.queue_key.clone(),
         notify_queue_key: config.notify.queue_key.clone(),
         enable_dev_routes: config.server.enable_dev_routes,
+        auth: auth_settings,
     });
     let app = build_router(state)
         .layer(CorsLayer::permissive())
