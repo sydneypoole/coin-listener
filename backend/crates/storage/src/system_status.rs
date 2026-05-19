@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::repositories;
 
 pub const NOTIFICATION_STATUS_STALE_MINUTES: i64 = 15;
+pub const PROVIDER_STATUS_DEFAULT_FAILURES: i32 = 0;
 
 pub const SCAN_STATUS_QUERY: &str = r#"
     SELECT
@@ -71,9 +72,19 @@ pub const PROVIDER_ITEMS_QUERY: &str = r#"
         p.priority,
         p.qps_limit,
         p.timeout_ms,
-        p.status
+        p.status,
+        COALESCE(ph.consecutive_failures, 0) AS consecutive_failures,
+        ph.last_success_at,
+        ph.last_failure_at,
+        ph.disabled_until,
+        ph.last_error,
+        CASE
+            WHEN ph.disabled_until IS NOT NULL AND ph.disabled_until > NOW() THEN TRUE
+            ELSE FALSE
+        END AS is_circuit_open
     FROM providers p
     JOIN chains c ON c.id = p.chain_id
+    LEFT JOIN provider_health ph ON ph.provider_id = p.id
     ORDER BY c.name ASC, p.priority ASC, p.name ASC
 "#;
 
@@ -126,6 +137,12 @@ struct ProviderStatusItemRow {
     qps_limit: i32,
     timeout_ms: i32,
     status: String,
+    consecutive_failures: i32,
+    last_success_at: Option<DateTime<Utc>>,
+    last_failure_at: Option<DateTime<Utc>>,
+    disabled_until: Option<DateTime<Utc>>,
+    last_error: Option<String>,
+    is_circuit_open: bool,
 }
 
 pub async fn system_scan_status(pool: &PgPool) -> AppResult<ScanStatus> {
@@ -221,12 +238,12 @@ pub async fn system_provider_status(pool: &PgPool) -> AppResult<ProviderStatus> 
             timeout_ms: row.timeout_ms,
             status: row.status,
             health: ProviderHealthStatus {
-                consecutive_failures: 0,
-                last_success_at: None,
-                last_failure_at: None,
-                disabled_until: None,
-                last_error: None,
-                is_circuit_open: false,
+                consecutive_failures: row.consecutive_failures,
+                last_success_at: row.last_success_at,
+                last_failure_at: row.last_failure_at,
+                disabled_until: row.disabled_until,
+                last_error: row.last_error,
+                is_circuit_open: row.is_circuit_open,
             },
         })
         .collect();
@@ -245,7 +262,8 @@ mod tests {
         service_heartbeats::SERVICE_HEARTBEAT_STALE_SECONDS,
         system_status::{
             EVENT_STATUS_QUERY, NOTIFICATION_STATUS_QUERY, NOTIFICATION_STATUS_STALE_MINUTES,
-            PROVIDER_CHAIN_STATUS_QUERY, PROVIDER_ITEMS_QUERY, SCAN_STATUS_QUERY,
+            PROVIDER_CHAIN_STATUS_QUERY, PROVIDER_ITEMS_QUERY, PROVIDER_STATUS_DEFAULT_FAILURES,
+            SCAN_STATUS_QUERY,
         },
     };
 
@@ -287,5 +305,20 @@ mod tests {
         assert!(PROVIDER_CHAIN_STATUS_QUERY.contains("chain_name"));
         assert!(PROVIDER_ITEMS_QUERY.contains("JOIN chains"));
         assert!(PROVIDER_ITEMS_QUERY.contains("chain_name"));
+    }
+
+    #[test]
+    fn provider_items_query_includes_runtime_health_left_join() {
+        assert!(PROVIDER_ITEMS_QUERY.contains("LEFT JOIN provider_health ph"));
+        assert!(PROVIDER_ITEMS_QUERY.contains("COALESCE(ph.consecutive_failures, 0)"));
+        assert!(PROVIDER_ITEMS_QUERY.contains("last_success_at"));
+        assert!(PROVIDER_ITEMS_QUERY.contains("last_failure_at"));
+        assert!(PROVIDER_ITEMS_QUERY.contains("disabled_until"));
+        assert!(PROVIDER_ITEMS_QUERY.contains("last_error"));
+    }
+
+    #[test]
+    fn provider_status_defaults_missing_health_to_zero_failures() {
+        assert_eq!(PROVIDER_STATUS_DEFAULT_FAILURES, 0);
     }
 }
