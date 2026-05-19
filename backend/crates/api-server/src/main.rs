@@ -1,12 +1,10 @@
-mod routes;
-
 use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
     connect_postgres, connect_redis, run_migrations,
     service_heartbeats::{run_service_heartbeat, service_heartbeat_instance_id},
 };
-use routes::{build_router, ApiState};
+use api_server::{build_router, ApiState};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
