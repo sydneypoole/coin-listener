@@ -1368,9 +1368,15 @@ mod tests {
     fn scan_entrypoints_receive_redis_for_provider_qps() {
         let source = include_str!("lib.rs");
 
-        assert!(source.contains("scan_evm_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"));
-        assert!(source.contains("scan_tron_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"));
-        assert!(source.contains("scan_btc_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"));
+        assert!(source.contains(
+            "scan_evm_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"
+        ));
+        assert!(source.contains(
+            "scan_tron_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"
+        ));
+        assert!(source.contains(
+            "scan_btc_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"
+        ));
     }
 
     #[test]
