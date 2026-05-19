@@ -138,6 +138,48 @@ mod tests {
         path
     }
 
+    fn repository_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_path_buf()
+    }
+
+    #[test]
+    fn dockerfile_builds_binary_and_copies_frontend_dist() {
+        let dockerfile =
+            fs::read_to_string(repository_root().join("docker/all-in-one.Dockerfile")).unwrap();
+
+        assert!(dockerfile.contains("npm ci"));
+        assert!(dockerfile.contains("npm run build"));
+        assert!(dockerfile.contains("cargo build --release --workspace --bin all-in-one"));
+        assert!(dockerfile.contains("/usr/local/bin/all-in-one"));
+        assert!(dockerfile.contains("/usr/local/share/coin-listener/frontend"));
+        assert!(dockerfile.contains("COIN_LISTENER_FRONTEND_DIST"));
+    }
+
+    #[test]
+    fn compose_exposes_all_in_one_profile_without_removing_multi_process_services() {
+        let compose = fs::read_to_string(repository_root().join("docker-compose.yml")).unwrap();
+
+        assert!(compose.contains("all-in-one:"));
+        assert!(compose.contains("docker/all-in-one.Dockerfile"));
+        assert!(compose.contains("profiles:"));
+        assert!(compose.contains("all-in-one"));
+        assert!(compose.contains("api-server:"));
+        assert!(compose.contains("scheduler:"));
+        assert!(compose.contains("worker:"));
+        assert!(compose.contains("notifier:"));
+    }
+
+    #[test]
+    fn env_example_documents_frontend_dist_path() {
+        let env_example = fs::read_to_string(repository_root().join(".env.example")).unwrap();
+
+        assert!(env_example.contains("COIN_LISTENER_FRONTEND_DIST=./frontend/dist"));
+    }
+
     #[test]
     fn frontend_dist_path_uses_default_and_env_override() {
         assert_eq!(
