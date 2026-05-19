@@ -163,6 +163,18 @@ export type InAppNotification = {
   created_at: string;
 };
 
+export type RealtimeNotificationCreatedMessage = {
+  type: 'in_app_notification.created';
+  payload: InAppNotification;
+};
+
+export type RealtimePingMessage = {
+  type: 'ping';
+  payload: { sent_at: string };
+};
+
+export type RealtimeServerMessage = RealtimeNotificationCreatedMessage | RealtimePingMessage;
+
 export type InAppNotificationQuery = {
   unread_only?: boolean;
 };
