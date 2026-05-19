@@ -26,6 +26,8 @@ services:
       retries: 10
 
   api-server:
+    profiles:
+      - multi-process
     build:
       context: ./backend
       dockerfile: ../docker/backend.Dockerfile
@@ -40,6 +42,8 @@ services:
         condition: service_healthy
 
   scheduler:
+    profiles:
+      - multi-process
     build:
       context: ./backend
       dockerfile: ../docker/backend.Dockerfile
@@ -52,6 +56,8 @@ services:
         condition: service_healthy
 
   worker:
+    profiles:
+      - multi-process
     build:
       context: ./backend
       dockerfile: ../docker/backend.Dockerfile
@@ -64,6 +70,8 @@ services:
         condition: service_healthy
 
   notifier:
+    profiles:
+      - multi-process
     build:
       context: ./backend
       dockerfile: ../docker/backend.Dockerfile

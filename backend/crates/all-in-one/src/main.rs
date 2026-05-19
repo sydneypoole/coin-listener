@@ -33,17 +33,6 @@ async fn main() -> anyhow::Result<()> {
     let redis_client = connect_redis(&config.redis)?;
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    let mut heartbeat_handles = Vec::new();
-    for service_name in ALL_IN_ONE_SERVICE_NAMES {
-        heartbeat_handles.push(tokio::spawn(run_service_heartbeat(
-            postgres.clone(),
-            service_name,
-            service_heartbeat_instance_id(),
-            Utc::now(),
-            Arc::clone(&shutdown),
-        )));
-    }
-
     let api_state = Arc::new(ApiState {
         postgres: postgres.clone(),
         redis: Some(redis_client.clone()),
@@ -59,6 +48,24 @@ async fn main() -> anyhow::Result<()> {
     let scheduler_redis = connect_scan_queue(&redis_client).await?;
     let scheduler_queue =
         ScanQueue::new(config.scan.queue_key.clone(), config.scan.lock_ttl_seconds);
+    let worker_redis = connect_scan_queue(&redis_client).await?;
+    let worker_queue = ScanQueue::new(config.scan.queue_key.clone(), config.scan.lock_ttl_seconds);
+    let dispatcher_config = NotificationOutboxDispatcherConfig::from_notify_config(&config.notify);
+    let external_sender = ExternalNotificationSender::new(reqwest::Client::new());
+    let listener = TcpListener::bind(config.server_addr()).await?;
+    info!(address = %listener.local_addr()?, "all-in-one server listening");
+
+    let mut heartbeat_handles = Vec::new();
+    for service_name in ALL_IN_ONE_SERVICE_NAMES {
+        heartbeat_handles.push(tokio::spawn(run_service_heartbeat(
+            postgres.clone(),
+            service_name,
+            service_heartbeat_instance_id(),
+            Utc::now(),
+            Arc::clone(&shutdown),
+        )));
+    }
+
     let mut scheduler_handle = tokio::spawn(scheduler::run_scheduler(
         postgres.clone(),
         scheduler_redis,
@@ -68,8 +75,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&shutdown),
     ));
 
-    let worker_redis = connect_scan_queue(&redis_client).await?;
-    let worker_queue = ScanQueue::new(config.scan.queue_key.clone(), config.scan.lock_ttl_seconds);
     let mut worker_handle = tokio::spawn(worker::run_worker(
         postgres.clone(),
         worker_redis,
@@ -77,17 +82,12 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&shutdown),
     ));
 
-    let dispatcher_config = NotificationOutboxDispatcherConfig::from_notify_config(&config.notify);
-    let external_sender = ExternalNotificationSender::new(reqwest::Client::new());
     let mut notifier_handle = tokio::spawn(notifier::run_notifier(
         postgres.clone(),
         dispatcher_config,
         external_sender,
         Arc::clone(&shutdown),
     ));
-
-    let listener = TcpListener::bind(config.server_addr()).await?;
-    info!(address = %listener.local_addr()?, "all-in-one server listening");
 
     let server_shutdown = Arc::clone(&shutdown);
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
@@ -281,6 +281,14 @@ mod tests {
         assert!(source.contains("notifier::run_notifier("));
         assert!(source.contains("build_all_in_one_router("));
         assert!(source.contains("run_service_heartbeat("));
+        assert!(
+            source.find("TcpListener::bind(").unwrap()
+                < source.find("run_service_heartbeat(").unwrap()
+        );
+        assert!(
+            source.find("TcpListener::bind(").unwrap()
+                < source.find("scheduler::run_scheduler(").unwrap()
+        );
         assert!(source.contains("service_task_result(\"scheduler\""));
         assert!(source.contains("service_task_result(\"worker\""));
         assert!(source.contains("service_task_result(\"notifier\""));

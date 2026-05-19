@@ -146,6 +146,35 @@ mod tests {
             .to_path_buf()
     }
 
+    fn compose_service_block(compose: &str, service: &str) -> String {
+        let marker = format!("  {service}:");
+        let mut block = Vec::new();
+        let mut in_service = false;
+
+        for line in compose.lines() {
+            if line == marker {
+                in_service = true;
+                block.push(line);
+                continue;
+            }
+
+            if in_service
+                && line.starts_with("  ")
+                && !line.starts_with("    ")
+                && !line.trim().is_empty()
+            {
+                break;
+            }
+
+            if in_service {
+                block.push(line);
+            }
+        }
+
+        assert!(in_service, "missing compose service {service}");
+        block.join("\n")
+    }
+
     #[test]
     fn dockerfile_builds_binary_and_copies_frontend_dist() {
         let dockerfile =
@@ -162,15 +191,33 @@ mod tests {
     #[test]
     fn compose_exposes_all_in_one_profile_without_removing_multi_process_services() {
         let compose = fs::read_to_string(repository_root().join("docker-compose.yml")).unwrap();
+        let all_in_one = compose_service_block(&compose, "all-in-one");
 
-        assert!(compose.contains("all-in-one:"));
-        assert!(compose.contains("docker/all-in-one.Dockerfile"));
-        assert!(compose.contains("profiles:"));
-        assert!(compose.contains("all-in-one"));
+        assert!(all_in_one.contains("profiles:"));
+        assert!(all_in_one.contains("all-in-one"));
+        assert!(all_in_one.contains("docker/all-in-one.Dockerfile"));
         assert!(compose.contains("api-server:"));
         assert!(compose.contains("scheduler:"));
         assert!(compose.contains("worker:"));
         assert!(compose.contains("notifier:"));
+    }
+
+    #[test]
+    fn compose_default_app_services_are_separated_from_all_in_one_profile() {
+        let compose = fs::read_to_string(repository_root().join("docker-compose.yml")).unwrap();
+
+        for service in ["api-server", "scheduler", "worker", "notifier"] {
+            let block = compose_service_block(&compose, service);
+            assert!(block.contains("profiles:"), "{service} missing profile");
+            assert!(
+                block.contains("multi-process"),
+                "{service} missing multi-process profile"
+            );
+            assert!(
+                !block.contains("all-in-one"),
+                "{service} should not be in all-in-one profile"
+            );
+        }
     }
 
     #[test]
