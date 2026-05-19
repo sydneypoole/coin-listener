@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod realtime;
 mod routes;
 
 pub use routes::{build_router, ApiError, ApiState, HealthResponse};
