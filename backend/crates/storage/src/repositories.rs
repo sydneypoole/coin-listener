@@ -344,15 +344,41 @@ pub fn notification_ops_offset(offset: Option<i64>) -> i64 {
     offset.unwrap_or(0).max(0)
 }
 
+pub const ACTIVE_TENANT_MEMBERSHIP_QUERY: &str = r#"
+SELECT t.id, t.name, t.status
+FROM tenants t
+INNER JOIN tenant_members tm ON tm.tenant_id = t.id
+INNER JOIN users u ON u.id = tm.user_id
+WHERE tm.user_id = $1
+  AND tm.tenant_id = $2
+  AND u.status = 'active'
+  AND t.status = 'active'
+LIMIT 1
+"#;
+
 pub async fn find_user_by_email(pool: &PgPool, email: &str) -> AppResult<User> {
     sqlx::query_as::<_, User>(
-        "SELECT id, email, password_hash, display_name, status FROM users WHERE email = $1",
+        "SELECT id, email, password_hash, display_name, status FROM users WHERE email = $1 AND status = 'active'",
     )
     .bind(email)
     .fetch_optional(pool)
     .await
     .map_err(|error| AppError::Database(error.to_string()))?
-    .ok_or_else(|| AppError::Unauthorized)
+    .ok_or(AppError::Unauthorized)
+}
+
+pub async fn active_tenant_membership(
+    pool: &PgPool,
+    user_id: Uuid,
+    tenant_id: Uuid,
+) -> AppResult<Tenant> {
+    sqlx::query_as::<_, Tenant>(ACTIVE_TENANT_MEMBERSHIP_QUERY)
+        .bind(user_id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or(AppError::Forbidden)
 }
 
 pub async fn default_tenant_for_user(pool: &PgPool, user_id: Uuid) -> AppResult<Tenant> {
@@ -361,7 +387,10 @@ pub async fn default_tenant_for_user(pool: &PgPool, user_id: Uuid) -> AppResult<
         SELECT t.id, t.name, t.status
         FROM tenants t
         INNER JOIN tenant_members tm ON tm.tenant_id = t.id
+        INNER JOIN users u ON u.id = tm.user_id
         WHERE tm.user_id = $1
+          AND u.status = 'active'
+          AND t.status = 'active'
         ORDER BY tm.created_at ASC
         LIMIT 1
         "#,
@@ -370,7 +399,7 @@ pub async fn default_tenant_for_user(pool: &PgPool, user_id: Uuid) -> AppResult<
     .fetch_optional(pool)
     .await
     .map_err(|error| AppError::Database(error.to_string()))?
-    .ok_or_else(|| AppError::NotFound("tenant".to_string()))
+    .ok_or(AppError::Forbidden)
 }
 
 pub async fn list_chains(pool: &PgPool) -> AppResult<Vec<Chain>> {
@@ -1241,15 +1270,16 @@ fn validate_address_for_chain(chain: &Chain, address: &str) -> AppResult<()> {
 mod tests {
     use super::{
         next_scan_at_from, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
-        ACTIVE_RPC_PROVIDER_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
-        CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, GET_NOTIFICATION_OUTBOX_ITEM_QUERY,
-        INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
-        INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY, LATEST_BALANCE_SNAPSHOT_QUERY,
-        LIST_NOTIFICATION_OUTBOX_QUERY, MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY,
-        MARK_CLAIMED_SCAN_ENQUEUED_QUERY, MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY,
-        MARK_NOTIFICATION_OUTBOX_FAILED_QUERY, MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY,
-        NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY, RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY,
-        SCAN_CURSOR_QUERY, SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY, UPSERT_SCAN_CURSOR_QUERY,
+        ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY,
+        CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY, CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY,
+        GET_NOTIFICATION_OUTBOX_ITEM_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY,
+        INSERT_EVENT_IF_NOT_EXISTS_QUERY, INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY,
+        LATEST_BALANCE_SNAPSHOT_QUERY, LIST_NOTIFICATION_OUTBOX_QUERY,
+        MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY, MARK_CLAIMED_SCAN_ENQUEUED_QUERY,
+        MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY, MARK_NOTIFICATION_OUTBOX_FAILED_QUERY,
+        MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY, NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY,
+        RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY, SCAN_CURSOR_QUERY,
+        SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY, UPSERT_SCAN_CURSOR_QUERY,
     };
     use chrono::{TimeZone, Utc};
     use coin_listener_core::{
@@ -1260,6 +1290,28 @@ mod tests {
         AppError, AppResult,
     };
     use sqlx::PgPool;
+
+    #[test]
+    fn auth_baseline_migration_hashes_only_legacy_admin_password() {
+        let migration = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("migrations/0009_auth_session_baseline.sql"),
+        )
+        .expect("migration readable");
+
+        assert!(migration.contains("WHERE email = 'admin@example.com'"));
+        assert!(migration.contains("password_hash = 'admin'"));
+        assert!(migration.contains("$argon2id$"));
+        assert!(!migration.contains("UPDATE users SET password_hash"));
+    }
+
+    #[test]
+    fn active_tenant_membership_query_checks_user_and_tenant_status() {
+        assert!(ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("u.status = 'active'"));
+        assert!(ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("t.status = 'active'"));
+        assert!(ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("tm.user_id = $1"));
+        assert!(ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("tm.tenant_id = $2"));
+    }
 
     #[test]
     fn next_scan_at_from_adds_scan_interval_seconds() {
