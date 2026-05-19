@@ -113,6 +113,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_token_secret() {
+        let error = super::token_settings("   ".to_string(), 3600)
+            .expect_err("empty token secret is rejected");
+
+        assert!(matches!(error, coin_listener_core::AppError::Config(_)));
+    }
+
+    #[test]
     fn token_round_trips_claims() {
         let user_id = Uuid::from_u128(7);
         let tenant_id = Uuid::from_u128(9);
