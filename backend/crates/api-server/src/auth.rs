@@ -25,18 +25,31 @@ pub struct AuthClaims {
 
 impl AuthClaims {
     pub fn subject_uuid(&self) -> AppResult<Uuid> {
-        Uuid::parse_str(&self.sub).map_err(|error| AppError::Validation(error.to_string()))
+        Uuid::parse_str(&self.sub).map_err(|_| AppError::Unauthorized)
     }
 
     pub fn tenant_uuid(&self) -> AppResult<Uuid> {
-        Uuid::parse_str(&self.tenant_id).map_err(|error| AppError::Validation(error.to_string()))
+        Uuid::parse_str(&self.tenant_id).map_err(|_| AppError::Unauthorized)
     }
 }
 
+const MIN_TOKEN_SECRET_BYTES: usize = 32;
+
 pub fn token_settings(secret: String, ttl_seconds: i64) -> AppResult<TokenSettings> {
-    if secret.trim().is_empty() {
+    let secret = secret.trim().to_string();
+    if secret.is_empty() {
         return Err(AppError::Config(
             "AUTH_TOKEN_SECRET is required".to_string(),
+        ));
+    }
+    if secret.len() < MIN_TOKEN_SECRET_BYTES {
+        return Err(AppError::Config(
+            "AUTH_TOKEN_SECRET must be at least 32 bytes".to_string(),
+        ));
+    }
+    if ttl_seconds <= 0 {
+        return Err(AppError::Config(
+            "AUTH_TOKEN_TTL_SECONDS must be positive".to_string(),
         ));
     }
 
@@ -118,6 +131,42 @@ mod tests {
             .expect_err("empty token secret is rejected");
 
         assert!(matches!(error, coin_listener_core::AppError::Config(_)));
+    }
+
+    #[test]
+    fn rejects_short_token_secret() {
+        let error = super::token_settings("short-secret".to_string(), 3600)
+            .expect_err("short token secret is rejected");
+
+        assert!(matches!(error, coin_listener_core::AppError::Config(_)));
+    }
+
+    #[test]
+    fn rejects_non_positive_token_ttl() {
+        let error = super::token_settings("test-secret-with-enough-entropy-32".to_string(), 0)
+            .expect_err("non-positive token ttl is rejected");
+
+        assert!(matches!(error, coin_listener_core::AppError::Config(_)));
+    }
+
+    #[test]
+    fn invalid_claim_uuids_are_unauthorized() {
+        let claims = super::AuthClaims {
+            sub: "not-a-uuid".to_string(),
+            tenant_id: "not-a-uuid".to_string(),
+            email: "admin@example.com".to_string(),
+            iat: Utc::now().timestamp(),
+            exp: (Utc::now() + Duration::seconds(3600)).timestamp(),
+        };
+
+        assert!(matches!(
+            claims.subject_uuid(),
+            Err(coin_listener_core::AppError::Unauthorized)
+        ));
+        assert!(matches!(
+            claims.tenant_uuid(),
+            Err(coin_listener_core::AppError::Unauthorized)
+        ));
     }
 
     #[test]
