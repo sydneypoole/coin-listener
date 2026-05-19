@@ -98,16 +98,41 @@ pub async fn run_realtime_notification_listener(
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
-        match PgListener::connect(&database_url).await {
+        let Some(connect_result) = shutdown_aware_await(
+            PgListener::connect(&database_url),
+            Arc::clone(&shutdown),
+            Duration::from_millis(100),
+        )
+        .await
+        else {
+            break;
+        };
+
+        match connect_result {
             Ok(mut listener) => {
-                if let Err(error) = listener.listen(REALTIME_NOTIFICATION_CHANNEL).await {
+                let Some(listen_result) = shutdown_aware_await(
+                    listener.listen(REALTIME_NOTIFICATION_CHANNEL),
+                    Arc::clone(&shutdown),
+                    Duration::from_millis(100),
+                )
+                .await
+                else {
+                    break;
+                };
+
+                if let Err(error) = listen_result {
                     warn!(%error, "realtime notification listen failed");
-                    time::sleep(Duration::from_secs(1)).await;
+                    shutdown_aware_sleep(
+                        Duration::from_secs(1),
+                        Arc::clone(&shutdown),
+                        Duration::from_millis(100),
+                    )
+                    .await;
                     continue;
                 }
 
                 while !shutdown.load(Ordering::Relaxed) {
-                    let Some(result) = shutdown_aware_recv(
+                    let Some(result) = shutdown_aware_await(
                         listener.recv(),
                         Arc::clone(&shutdown),
                         Duration::from_millis(100),
@@ -138,31 +163,58 @@ pub async fn run_realtime_notification_listener(
             Err(error) => warn!(%error, "realtime notification listener connect failed"),
         }
 
-        if !shutdown.load(Ordering::Relaxed) {
-            time::sleep(Duration::from_secs(1)).await;
+        if !shutdown_aware_sleep(
+            Duration::from_secs(1),
+            Arc::clone(&shutdown),
+            Duration::from_millis(100),
+        )
+        .await
+        {
+            break;
         }
     }
 }
 
-async fn shutdown_aware_recv<T, E, F>(
-    recv: F,
+async fn shutdown_aware_await<T, E, F>(
+    future: F,
     shutdown: Arc<AtomicBool>,
     shutdown_check_interval: Duration,
 ) -> Option<Result<T, E>>
 where
     F: Future<Output = Result<T, E>>,
 {
-    tokio::pin!(recv);
+    tokio::pin!(future);
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
             return None;
         }
 
-        match time::timeout(shutdown_check_interval, &mut recv).await {
+        match time::timeout(shutdown_check_interval, &mut future).await {
             Ok(result) => return Some(result),
             Err(_) => continue,
         }
+    }
+}
+
+async fn shutdown_aware_sleep(
+    duration: Duration,
+    shutdown: Arc<AtomicBool>,
+    shutdown_check_interval: Duration,
+) -> bool {
+    let deadline = time::Instant::now() + duration;
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let now = time::Instant::now();
+        if now >= deadline {
+            return true;
+        }
+
+        time::sleep(std::cmp::min(shutdown_check_interval, deadline - now)).await;
     }
 }
 
@@ -229,7 +281,7 @@ async fn send_json(socket: &mut WebSocket, message: &RealtimeServerMessage) -> A
 mod tests {
     use super::{
         notification_message, realtime_token_from_query, recv_realtime_message,
-        shutdown_aware_recv, RealtimeHub, RealtimeServerMessage,
+        shutdown_aware_await, shutdown_aware_sleep, RealtimeHub, RealtimeServerMessage,
     };
     use chrono::Utc;
     use coin_listener_core::models::InAppNotification;
@@ -343,10 +395,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_aware_recv_exits_when_idle_shutdown_is_requested() {
+    async fn shutdown_aware_await_exits_when_idle_shutdown_is_requested() {
         let shutdown = Arc::new(AtomicBool::new(false));
         let receiver_shutdown = Arc::clone(&shutdown);
-        let receiver = shutdown_aware_recv(
+        let receiver = shutdown_aware_await(
             std::future::pending::<Result<&'static str, &'static str>>(),
             receiver_shutdown,
             Duration::from_millis(5),
@@ -360,5 +412,23 @@ mod tests {
             .expect("idle receive exits shortly after shutdown");
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_aware_sleep_exits_before_full_delay_when_shutdown_is_requested() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let sleep_shutdown = Arc::clone(&shutdown);
+        let sleeper = shutdown_aware_sleep(
+            Duration::from_secs(60),
+            sleep_shutdown,
+            Duration::from_millis(5),
+        );
+
+        time::sleep(Duration::from_millis(15)).await;
+        shutdown.store(true, Ordering::Relaxed);
+
+        assert!(!time::timeout(Duration::from_millis(100), sleeper)
+            .await
+            .expect("retry sleep exits shortly after shutdown"));
     }
 }
