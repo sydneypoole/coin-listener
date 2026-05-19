@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useCallback, useEffect, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Banner, Button, Card, Layout, Nav, Space, Tag, Typography } from '@douyinfe/semi-ui';
 import { IconBell, IconPulse, IconServer, IconSetting, IconUser } from '@douyinfe/semi-icons';
 import { fetchHealth, type HealthResponse } from './api/health';
@@ -32,13 +32,20 @@ type PageKey =
   | 'in-app-notifications';
 
 export function App() {
+  const queryClient = useQueryClient();
   const [session, setSession] = useState<LoginResponse | null>(() => loadStoredSession());
   const [page, setPage] = useState<PageKey>('dashboard');
 
+  const resetAuthenticatedState = useCallback(() => {
+    queryClient.clear();
+    setPage('dashboard');
+    setSession(null);
+  }, [queryClient]);
+
   useEffect(() => {
-    setUnauthorizedHandler(() => setSession(null));
+    setUnauthorizedHandler(resetAuthenticatedState);
     return () => setUnauthorizedHandler(null);
-  }, []);
+  }, [resetAuthenticatedState]);
 
   const healthQuery = useQuery({
     queryKey: ['health'],
@@ -53,7 +60,7 @@ export function App() {
 
   function handleLogout() {
     clearSession();
-    setSession(null);
+    resetAuthenticatedState();
   }
 
   if (!session) {
