@@ -119,14 +119,16 @@ impl Eq for ProviderCandidate {}
 
 impl From<ProviderCandidateRow> for ProviderCandidate {
     fn from(row: ProviderCandidateRow) -> Self {
-        let health = row.consecutive_failures.map(|consecutive_failures| ProviderHealthRow {
-            provider_id: row.id,
-            consecutive_failures,
-            last_success_at: row.last_success_at,
-            last_failure_at: row.last_failure_at,
-            disabled_until: row.disabled_until,
-            last_error: row.last_error.clone(),
-        });
+        let health = row
+            .consecutive_failures
+            .map(|consecutive_failures| ProviderHealthRow {
+                provider_id: row.id,
+                consecutive_failures,
+                last_success_at: row.last_success_at,
+                last_failure_at: row.last_failure_at,
+                disabled_until: row.disabled_until,
+                last_error: row.last_error.clone(),
+            });
 
         Self {
             provider: Provider {
@@ -258,7 +260,9 @@ pub async fn try_acquire_provider_qps(
         .map_err(|error| AppError::Redis(error.to_string()))?;
 
     if !expire_set {
-        return Err(AppError::Redis("failed to expire provider QPS key".to_string()));
+        return Err(AppError::Redis(
+            "failed to expire provider QPS key".to_string(),
+        ));
     }
 
     Ok(provider_qps_permits(current_count, qps_limit))
@@ -274,7 +278,10 @@ pub fn sanitize_provider_error(error: &str) -> String {
     sanitized = redact_query_value(&sanitized, "api_key=<redacted>");
     sanitized = redact_query_value(&sanitized, "key=<redacted>");
 
-    sanitized.chars().take(PROVIDER_LAST_ERROR_MAX_CHARS).collect()
+    sanitized
+        .chars()
+        .take(PROVIDER_LAST_ERROR_MAX_CHARS)
+        .collect()
 }
 
 fn redact_query_value(input: &str, marker: &str) -> String {
@@ -304,10 +311,9 @@ mod tests {
     use crate::provider_health::{
         is_provider_circuit_open, provider_candidate_health, provider_disabled_until,
         provider_qps_key, provider_qps_permits, sanitize_provider_error, ProviderCandidate,
-        ProviderHealthRow, ACTIVE_RPC_PROVIDER_CANDIDATES_QUERY,
-        PROVIDER_CIRCUIT_COOLDOWN_SECONDS, PROVIDER_CIRCUIT_FAILURE_THRESHOLD,
-        PROVIDER_LAST_ERROR_MAX_CHARS, RECORD_PROVIDER_FAILURE_QUERY,
-        RECORD_PROVIDER_SUCCESS_QUERY,
+        ProviderHealthRow, ACTIVE_RPC_PROVIDER_CANDIDATES_QUERY, PROVIDER_CIRCUIT_COOLDOWN_SECONDS,
+        PROVIDER_CIRCUIT_FAILURE_THRESHOLD, PROVIDER_LAST_ERROR_MAX_CHARS,
+        RECORD_PROVIDER_FAILURE_QUERY, RECORD_PROVIDER_SUCCESS_QUERY,
     };
 
     #[test]
@@ -315,7 +321,8 @@ mod tests {
         let migration = include_str!("../migrations/0011_provider_health.sql");
 
         assert!(migration.contains("CREATE TABLE IF NOT EXISTS provider_health"));
-        assert!(migration.contains("provider_id UUID PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE"));
+        assert!(migration
+            .contains("provider_id UUID PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE"));
         assert!(migration.contains("disabled_until TIMESTAMPTZ"));
         assert!(migration.contains("idx_provider_health_disabled_until"));
         assert!(migration.contains("idx_provider_health_last_failure"));
@@ -341,7 +348,10 @@ mod tests {
             provider_disabled_until(PROVIDER_CIRCUIT_FAILURE_THRESHOLD, now),
             Some(Utc.with_ymd_and_hms(2026, 5, 19, 10, 5, 0).unwrap())
         );
-        assert_eq!(provider_disabled_until(PROVIDER_CIRCUIT_FAILURE_THRESHOLD - 1, now), None);
+        assert_eq!(
+            provider_disabled_until(PROVIDER_CIRCUIT_FAILURE_THRESHOLD - 1, now),
+            None
+        );
     }
 
     #[test]
@@ -380,15 +390,18 @@ mod tests {
         assert!(ACTIVE_RPC_PROVIDER_CANDIDATES_QUERY.contains("p.status = 'active'"));
         assert!(ACTIVE_RPC_PROVIDER_CANDIDATES_QUERY
             .contains("(ph.disabled_until IS NULL OR ph.disabled_until <= $2)"));
-        assert!(ACTIVE_RPC_PROVIDER_CANDIDATES_QUERY
-            .contains("ORDER BY p.priority ASC, p.name ASC"));
+        assert!(
+            ACTIVE_RPC_PROVIDER_CANDIDATES_QUERY.contains("ORDER BY p.priority ASC, p.name ASC")
+        );
         assert!(!ACTIVE_RPC_PROVIDER_CANDIDATES_QUERY.contains("LIMIT 1"));
     }
 
     #[test]
     fn success_query_resets_failures_and_clears_error_state() {
         assert!(RECORD_PROVIDER_SUCCESS_QUERY.contains("consecutive_failures = 0"));
-        assert!(RECORD_PROVIDER_SUCCESS_QUERY.contains("last_success_at = EXCLUDED.last_success_at"));
+        assert!(
+            RECORD_PROVIDER_SUCCESS_QUERY.contains("last_success_at = EXCLUDED.last_success_at")
+        );
         assert!(RECORD_PROVIDER_SUCCESS_QUERY.contains("disabled_until = NULL"));
         assert!(RECORD_PROVIDER_SUCCESS_QUERY.contains("last_error = NULL"));
     }

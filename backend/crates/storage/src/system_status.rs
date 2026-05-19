@@ -1,8 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use coin_listener_core::{
     models::{
-        EventStatus, NotificationStatus, ProviderChainStatus, ProviderHealthStatus,
-        ProviderStatus, ProviderStatusItem, ScanStatus,
+        EventStatus, NotificationStatus, ProviderChainStatus, ProviderHealthStatus, ProviderStatus,
+        ProviderStatusItem, ScanStatus,
     },
     AppError, AppResult,
 };
