@@ -399,6 +399,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
+            AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Validation(_) => StatusCode::BAD_REQUEST,
             AppError::Config(_)
@@ -421,10 +422,19 @@ mod tests {
     use axum::{
         body::Body,
         http::{Method, Request, StatusCode},
+        response::IntoResponse,
     };
     use sqlx::PgPool;
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    #[test]
+    fn forbidden_errors_map_to_http_403() {
+        let response =
+            super::ApiError::from(coin_listener_core::AppError::Forbidden).into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
 
     #[tokio::test]
     async fn router_exposes_events_filter_query() {

@@ -18,4 +18,6 @@ pub enum AppError {
     Validation(String),
     #[error("unauthorized")]
     Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
 }

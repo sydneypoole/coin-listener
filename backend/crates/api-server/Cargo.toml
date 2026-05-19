@@ -6,9 +6,11 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
 coin-listener-core = { path = "../core" }
 coin-listener-storage = { path = "../storage" }
 axum.workspace = true
+jsonwebtoken.workspace = true
 chrono.workspace = true
 redis.workspace = true
 serde.workspace = true

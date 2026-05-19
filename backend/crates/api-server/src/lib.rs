@@ -1,6 +1,7 @@
+pub mod auth;
 mod routes;
 
-pub use routes::{build_router, ApiState, HealthResponse};
+pub use routes::{build_router, ApiError, ApiState, HealthResponse};
 
 #[cfg(test)]
 mod tests {

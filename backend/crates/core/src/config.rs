@@ -11,6 +11,13 @@ pub struct AppConfig {
     pub redis: RedisConfig,
     pub scan: ScanConfig,
     pub notify: NotifyConfig,
+    pub auth: AuthConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    pub token_secret: String,
+    pub token_ttl_seconds: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +101,14 @@ impl AppConfig {
                 "notify.outbox_idle_sleep_ms",
                 env::var("NOTIFICATION_OUTBOX_IDLE_SLEEP_MS").unwrap_or_else(|_| "500".to_string()),
             ))
+            .merge((
+                "auth.token_secret",
+                env::var("AUTH_TOKEN_SECRET").unwrap_or_default(),
+            ))
+            .merge((
+                "auth.token_ttl_seconds",
+                env::var("AUTH_TOKEN_TTL_SECONDS").unwrap_or_else(|_| "43200".to_string()),
+            ))
             .extract()
             .map_err(|error| AppError::Config(error.to_string()))
     }
@@ -105,7 +120,18 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::NotifyConfig;
+    use crate::config::{AuthConfig, NotifyConfig};
+
+    #[test]
+    fn auth_config_carries_token_runtime_settings() {
+        let config = AuthConfig {
+            token_secret: "test-secret-with-enough-entropy".to_string(),
+            token_ttl_seconds: 43_200,
+        };
+
+        assert_eq!(config.token_secret, "test-secret-with-enough-entropy");
+        assert_eq!(config.token_ttl_seconds, 43_200);
+    }
 
     #[test]
     fn notify_config_carries_outbox_runtime_settings() {

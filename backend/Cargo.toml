@@ -18,8 +18,10 @@ license = "UNLICENSED"
 
 [workspace.dependencies]
 anyhow = "1"
+argon2 = "0.5"
 axum = { version = "0.7", features = ["ws"] }
 figment = "0.10"
+jsonwebtoken = "9"
 num-bigint = "0.4"
 redis = { version = "0.25", features = ["tokio-comp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
