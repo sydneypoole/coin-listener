@@ -1295,7 +1295,7 @@ mod tests {
     fn auth_baseline_migration_hashes_only_legacy_admin_password() {
         let migration = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("migrations/0009_auth_session_baseline.sql"),
+                .join("migrations/0012_auth_session_baseline.sql"),
         )
         .expect("migration readable");
 
@@ -1303,6 +1303,33 @@ mod tests {
         assert!(migration.contains("password_hash = 'admin'"));
         assert!(migration.contains("$argon2id$"));
         assert!(!migration.contains("UPDATE users SET password_hash"));
+    }
+
+    #[test]
+    fn migration_versions_are_unique() {
+        let migration_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut versions = std::collections::HashSet::new();
+
+        for entry in std::fs::read_dir(migration_dir).expect("migration dir readable") {
+            let path = entry.expect("migration entry readable").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("sql") {
+                continue;
+            }
+
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("migration file name utf8");
+            let version = file_name
+                .split_once('_')
+                .map(|(version, _)| version)
+                .expect("migration file uses version prefix");
+
+            assert!(
+                versions.insert(version.to_string()),
+                "duplicate migration version {version}"
+            );
+        }
     }
 
     #[test]

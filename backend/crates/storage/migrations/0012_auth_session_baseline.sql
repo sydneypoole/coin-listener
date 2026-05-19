@@ -5,5 +5,5 @@ WHERE email = 'admin@example.com'
   AND password_hash = 'admin';
 
 INSERT INTO schema_migrations_marker (name)
-VALUES ('0009_auth_session_baseline')
+VALUES ('0012_auth_session_baseline')
 ON CONFLICT (name) DO NOTHING;

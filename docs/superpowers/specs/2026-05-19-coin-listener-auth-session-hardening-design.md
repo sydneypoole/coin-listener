@@ -66,7 +66,7 @@ The login response keeps the current shape (`token`, `user`, `tenant`) so fronte
 
 Use Argon2id through the Rust `argon2` crate. The login handler should verify the submitted password against `users.password_hash`; it must not accept plaintext equality as a fallback.
 
-Add a new migration, `backend/crates/storage/migrations/0009_auth_session_baseline.sql`, that updates the seeded admin user only when it still has the legacy plaintext hash:
+Add a new migration, `backend/crates/storage/migrations/0012_auth_session_baseline.sql`, that updates the seeded admin user only when it still has the legacy plaintext hash:
 
 - Match `email = 'admin@example.com'` and `password_hash = 'admin'`.
 - Replace the value with a precomputed Argon2id hash for the same local bootstrap password.

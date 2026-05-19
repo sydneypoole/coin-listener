@@ -21,7 +21,7 @@
 - Modify `backend/crates/core/src/error.rs`: add `Forbidden` for authenticated-but-not-allowed responses.
 - Modify `backend/Cargo.toml`: add workspace dependencies for `argon2` and `jsonwebtoken`.
 - Modify `backend/crates/api-server/Cargo.toml`: use the new auth dependencies.
-- Create `backend/crates/storage/migrations/0009_auth_session_baseline.sql`: replace only the legacy seeded admin plaintext password with a precomputed Argon2id hash.
+- Create `backend/crates/storage/migrations/0012_auth_session_baseline.sql`: replace only the legacy seeded admin plaintext password with a precomputed Argon2id hash.
 - Modify `backend/crates/storage/src/repositories.rs`: add active user/tenant membership helpers needed by middleware and tests.
 - Modify `.env.example`: document `AUTH_TOKEN_SECRET` and `AUTH_TOKEN_TTL_SECONDS`.
 - Create `frontend/src/auth/session.ts`: single browser-storage session boundary.
@@ -366,7 +366,7 @@ git commit -m "Add auth token primitives"
 ## Task 2: Seed migration and tenant membership repository helpers
 
 **Files:**
-- Create: `backend/crates/storage/migrations/0009_auth_session_baseline.sql`
+- Create: `backend/crates/storage/migrations/0012_auth_session_baseline.sql`
 - Modify: `backend/crates/storage/src/repositories.rs`
 
 - [ ] **Step 1: Add failing repository and migration tests**
@@ -378,7 +378,7 @@ In `backend/crates/storage/src/repositories.rs`, add these tests inside the exis
 fn auth_baseline_migration_hashes_only_legacy_admin_password() {
     let migration = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("migrations/0009_auth_session_baseline.sql"),
+            .join("migrations/0012_auth_session_baseline.sql"),
     )
     .expect("migration readable");
 
@@ -410,7 +410,7 @@ Expected: FAIL because the migration file and `ACTIVE_TENANT_MEMBERSHIP_QUERY` d
 
 - [ ] **Step 3: Create migration**
 
-Create `backend/crates/storage/migrations/0009_auth_session_baseline.sql`:
+Create `backend/crates/storage/migrations/0012_auth_session_baseline.sql`:
 
 ```sql
 UPDATE users
@@ -420,7 +420,7 @@ WHERE email = 'admin@example.com'
   AND password_hash = 'admin';
 
 INSERT INTO schema_migrations_marker (name)
-VALUES ('0009_auth_session_baseline')
+VALUES ('0012_auth_session_baseline')
 ON CONFLICT (name) DO NOTHING;
 ```
 
@@ -514,7 +514,7 @@ Expected: PASS.
 Run:
 
 ```bash
-git add backend/crates/storage/migrations/0009_auth_session_baseline.sql backend/crates/storage/src/repositories.rs
+git add backend/crates/storage/migrations/0012_auth_session_baseline.sql backend/crates/storage/src/repositories.rs
 git commit -m "Hash seeded admin password"
 ```
 
@@ -1170,7 +1170,7 @@ If Steps 1-5 required fixes, stage only the files changed by those fixes and com
 
 ```bash
 git status --short
-git add backend/crates/api-server/src/auth.rs backend/crates/api-server/src/routes.rs backend/crates/api-server/src/main.rs backend/crates/all-in-one/src/main.rs backend/crates/core/src/config.rs backend/crates/core/src/error.rs backend/crates/core/src/lib.rs backend/crates/storage/src/repositories.rs backend/crates/storage/migrations/0009_auth_session_baseline.sql frontend/src/auth/session.ts frontend/src/api/client.ts frontend/src/App.tsx frontend/src/pages/LoginPage.tsx .env.example
+git add backend/crates/api-server/src/auth.rs backend/crates/api-server/src/routes.rs backend/crates/api-server/src/main.rs backend/crates/all-in-one/src/main.rs backend/crates/core/src/config.rs backend/crates/core/src/error.rs backend/crates/core/src/lib.rs backend/crates/storage/src/repositories.rs backend/crates/storage/migrations/0012_auth_session_baseline.sql frontend/src/auth/session.ts frontend/src/api/client.ts frontend/src/App.tsx frontend/src/pages/LoginPage.tsx .env.example
 git commit -m "Verify auth session hardening"
 ```
 
