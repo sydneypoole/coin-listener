@@ -108,7 +108,7 @@ Heartbeat message：
 
 新增 `storage::notifications::publish_in_app_notification_created(pool, notification)`，发送 `NOTIFY coin_listener_in_app_notifications, '<json>'`。
 
-`create_sent_in_app_delivery` 在 transaction commit 成功后发布 notification payload。发布失败返回数据库错误，让 outbox retry 覆盖实时广播失败；已写入的站内通知保证用户仍可在页面列表看到。
+`create_sent_in_app_delivery` 在 transaction commit 成功后发布 notification payload。发布失败只记录 warning，不让已成功写入的站内通知触发 outbox retry，避免重复生成站内通知；实时消息丢失由站内通知列表补偿。
 
 新增 `api-server::realtime::run_realtime_notification_listener(pool, hub, shutdown)`：
 
