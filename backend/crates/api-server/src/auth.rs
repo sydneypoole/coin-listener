@@ -150,6 +150,7 @@ pub async fn require_auth(
     let claims = validate_token(&state.auth, token)?;
     let user_id = claims.subject_uuid()?;
     let tenant_id = claims.tenant_uuid()?;
+    repositories::active_user(&state.postgres, user_id).await?;
     repositories::active_tenant_membership(&state.postgres, user_id, tenant_id).await?;
 
     request.extensions_mut().insert(AuthContext {

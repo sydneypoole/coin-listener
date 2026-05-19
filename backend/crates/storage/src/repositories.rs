@@ -405,14 +405,20 @@ pub fn notification_ops_offset(offset: Option<i64>) -> i64 {
     offset.unwrap_or(0).max(0)
 }
 
+pub const ACTIVE_USER_QUERY: &str = r#"
+SELECT id, email, password_hash, display_name, status
+FROM users
+WHERE id = $1
+  AND status = 'active'
+LIMIT 1
+"#;
+
 pub const ACTIVE_TENANT_MEMBERSHIP_QUERY: &str = r#"
 SELECT t.id, t.name, t.status
 FROM tenants t
 INNER JOIN tenant_members tm ON tm.tenant_id = t.id
-INNER JOIN users u ON u.id = tm.user_id
 WHERE tm.user_id = $1
   AND tm.tenant_id = $2
-  AND u.status = 'active'
   AND t.status = 'active'
 LIMIT 1
 "#;
@@ -426,6 +432,15 @@ pub async fn find_user_by_email(pool: &PgPool, email: &str) -> AppResult<User> {
     .await
     .map_err(|error| AppError::Database(error.to_string()))?
     .ok_or(AppError::Unauthorized)
+}
+
+pub async fn active_user(pool: &PgPool, user_id: Uuid) -> AppResult<User> {
+    sqlx::query_as::<_, User>(ACTIVE_USER_QUERY)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or(AppError::Unauthorized)
 }
 
 pub async fn active_tenant_membership(
@@ -1303,7 +1318,7 @@ fn validate_address_for_chain(chain: &Chain, address: &str) -> AppResult<()> {
 mod tests {
     use super::{
         next_scan_at_from, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
-        ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY,
+        ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY, ACTIVE_USER_QUERY,
         CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY, CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY,
         DELETE_WATCHED_ADDRESS_QUERY, GET_NOTIFICATION_OUTBOX_ITEM_QUERY,
         GET_WATCHED_ADDRESS_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
@@ -1368,11 +1383,19 @@ mod tests {
     }
 
     #[test]
-    fn active_tenant_membership_query_checks_user_and_tenant_status() {
-        assert!(ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("u.status = 'active'"));
+    fn active_user_query_checks_user_status_only() {
+        assert!(ACTIVE_USER_QUERY.contains("FROM users"));
+        assert!(ACTIVE_USER_QUERY.contains("id = $1"));
+        assert!(ACTIVE_USER_QUERY.contains("status = 'active'"));
+    }
+
+    #[test]
+    fn active_tenant_membership_query_checks_tenant_membership_status_only() {
         assert!(ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("t.status = 'active'"));
         assert!(ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("tm.user_id = $1"));
         assert!(ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("tm.tenant_id = $2"));
+        assert!(!ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("JOIN users"));
+        assert!(!ACTIVE_TENANT_MEMBERSHIP_QUERY.contains("u.status = 'active'"));
     }
 
     #[test]
