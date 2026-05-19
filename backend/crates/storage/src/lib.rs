@@ -1,6 +1,7 @@
 pub mod notifications;
 pub mod notify_queue;
 pub mod postgres;
+pub mod provider_health;
 pub mod redis;
 pub mod repositories;
 pub mod scan_queue;
