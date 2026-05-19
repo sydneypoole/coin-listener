@@ -1,14 +1,27 @@
-use axum::{response::Response, routing::get_service, Router};
-use std::{convert::Infallible, env, path::PathBuf};
+use axum::{
+    body::Body,
+    http::{header, HeaderMap, Method, Request, StatusCode},
+    response::{IntoResponse, Response},
+    Router,
+};
+use std::{convert::Infallible, env, path::PathBuf, sync::Arc};
 use tokio::task::JoinError;
+use tower::util::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
 pub const FRONTEND_DIST_ENV: &str = "COIN_LISTENER_FRONTEND_DIST";
 pub const DEFAULT_FRONTEND_DIST: &str = "./frontend/dist";
 pub const ALL_IN_ONE_SERVICE_NAMES: [&str; 4] = ["api-server", "scheduler", "worker", "notifier"];
 
+#[derive(Clone)]
+struct FrontendAssets {
+    dist: PathBuf,
+    index: PathBuf,
+}
+
 pub fn frontend_dist_path(value: Option<String>) -> PathBuf {
     value
+        .filter(|path| !path.trim().is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_FRONTEND_DIST))
 }
@@ -18,13 +31,78 @@ pub fn frontend_dist_path_from_env() -> PathBuf {
 }
 
 pub fn build_all_in_one_router(api_router: Router, frontend_dist: PathBuf) -> Router {
-    let index = frontend_dist.join("index.html");
-    let static_service = ServeDir::new(frontend_dist).fallback(ServeFile::new(index));
+    let assets = Arc::new(FrontendAssets {
+        index: frontend_dist.join("index.html"),
+        dist: frontend_dist,
+    });
 
-    api_router.fallback_service(get_service(static_service).handle_error(static_asset_error))
+    api_router.fallback(move |request| {
+        let assets = Arc::clone(&assets);
+        async move { frontend_fallback(request, assets).await }
+    })
 }
 
-async fn static_asset_error(error: Infallible) -> Response {
+async fn frontend_fallback(request: Request<Body>, assets: Arc<FrontendAssets>) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+
+    if is_api_path(&path) || (method != Method::GET && method != Method::HEAD) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if is_spa_navigation(&path, request.headers()) {
+        return serve_index(request, assets.index.clone()).await;
+    }
+
+    serve_static(request, assets.dist.clone()).await
+}
+
+fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
+}
+
+fn is_spa_navigation(path: &str, headers: &HeaderMap) -> bool {
+    !is_asset_path(path) && accepts_html(headers)
+}
+
+fn is_asset_path(path: &str) -> bool {
+    path == "/assets"
+        || path.starts_with("/assets/")
+        || path
+            .rsplit('/')
+            .next()
+            .is_some_and(|segment| segment.contains('.'))
+}
+
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|part| {
+                matches!(
+                    part.split(';').next().map(str::trim),
+                    Some("text/html" | "application/xhtml+xml")
+                )
+            })
+        })
+}
+
+async fn serve_static(request: Request<Body>, dist: PathBuf) -> Response {
+    match ServeDir::new(dist).oneshot(request).await {
+        Ok(response) => response.map(Body::new),
+        Err(error) => static_asset_error(error),
+    }
+}
+
+async fn serve_index(request: Request<Body>, index: PathBuf) -> Response {
+    match ServeFile::new(index).oneshot(request).await {
+        Ok(response) => response.map(Body::new),
+        Err(error) => static_asset_error(error),
+    }
+}
+
+fn static_asset_error(error: Infallible) -> Response {
     match error {}
 }
 
@@ -103,6 +181,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/events")
+                    .header("accept", "text/html")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -113,6 +192,107 @@ mod tests {
 
         assert_eq!(&body[..], b"frontend-shell");
         fs::remove_dir_all(dist).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_api_routes_do_not_return_frontend_index() {
+        let dist = test_dist("api-not-found");
+        let api = Router::new().route("/health", get(|| async { "api-health" }));
+        let app = crate::build_all_in_one_router(api, dist.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/missing")
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        assert_ne!(&body[..], b"frontend-shell");
+        fs::remove_dir_all(dist).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_assets_do_not_return_frontend_index() {
+        let dist = test_dist("missing-asset");
+        let api = Router::new().route("/health", get(|| async { "api-health" }));
+        let app = crate::build_all_in_one_router(api, dist.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/missing.js")
+                    .header("accept", "*/*")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        assert_ne!(&body[..], b"frontend-shell");
+        fs::remove_dir_all(dist).unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_get_frontend_routes_do_not_return_frontend_index() {
+        let dist = test_dist("non-get");
+        let api = Router::new().route("/health", get(|| async { "api-health" }));
+        let app = crate::build_all_in_one_router(api, dist.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/events")
+                    .header("accept", "text/html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        assert_ne!(&body[..], b"frontend-shell");
+        fs::remove_dir_all(dist).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_frontend_dist_does_not_block_api_routes() {
+        let dist = std::env::temp_dir().join(format!(
+            "coin-listener-all-in-one-missing-dist-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let api = Router::new().route("/health", get(|| async { "api-health" }));
+        let app = crate::build_all_in_one_router(api, dist);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        assert_eq!(&body[..], b"api-health");
+    }
+
+    #[test]
+    fn frontend_dist_path_ignores_empty_override() {
+        assert_eq!(
+            crate::frontend_dist_path(Some("".to_string())),
+            PathBuf::from(crate::DEFAULT_FRONTEND_DIST)
+        );
     }
 
     #[test]

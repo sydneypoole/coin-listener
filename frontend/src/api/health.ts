@@ -3,7 +3,7 @@ export type HealthResponse = {
   service: string;
 };
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080';
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '';
 
 export async function fetchHealth(): Promise<HealthResponse> {
   const response = await fetch(`${apiBaseUrl}/health`);
