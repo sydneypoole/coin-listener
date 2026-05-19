@@ -1,10 +1,17 @@
 mod routes;
 
+use chrono::Utc;
 use coin_listener_core::AppConfig;
-use coin_listener_storage::{connect_postgres, connect_redis, run_migrations};
+use coin_listener_storage::{
+    connect_postgres, connect_redis, run_migrations,
+    service_heartbeats::{run_service_heartbeat, service_heartbeat_instance_id},
+};
 use routes::{build_router, ApiState};
-use std::sync::Arc;
-use tokio::net::TcpListener;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::{net::TcpListener, signal};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -21,6 +28,16 @@ async fn main() -> anyhow::Result<()> {
     run_migrations(&postgres).await?;
     let redis = connect_redis(&config.redis)?;
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let heartbeat_shutdown = Arc::clone(&shutdown);
+    tokio::spawn(run_service_heartbeat(
+        postgres.clone(),
+        "api-server",
+        service_heartbeat_instance_id(),
+        Utc::now(),
+        heartbeat_shutdown,
+    ));
+
     let state = Arc::new(ApiState {
         postgres,
         redis: Some(redis),
@@ -35,6 +52,13 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(config.server_addr()).await?;
     info!(address = %listener.local_addr()?, "api server listening");
 
-    axum::serve(listener, app).await?;
+    let shutdown_signal = Arc::clone(&shutdown);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            if signal::ctrl_c().await.is_ok() {
+                shutdown_signal.store(true, Ordering::Relaxed);
+            }
+        })
+        .await?;
     Ok(())
 }

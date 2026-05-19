@@ -3,9 +3,16 @@ use coin_listener_core::AppConfig;
 use coin_listener_storage::{
     connect_postgres, connect_redis, run_migrations,
     scan_queue::{connect_scan_queue, ScanQueue},
+    service_heartbeats::{run_service_heartbeat, service_heartbeat_instance_id},
 };
 use scheduler::enqueue_due_addresses;
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{signal, time};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -24,6 +31,15 @@ async fn main() -> anyhow::Result<()> {
     let mut redis = connect_scan_queue(&redis_client).await?;
     let queue = ScanQueue::new(config.scan.queue_key.clone(), config.scan.lock_ttl_seconds);
     let mut ticker = time::interval(Duration::from_secs(config.scan.scheduler_tick_seconds));
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let heartbeat_shutdown = Arc::clone(&shutdown);
+    tokio::spawn(run_service_heartbeat(
+        postgres.clone(),
+        "scheduler",
+        service_heartbeat_instance_id(),
+        Utc::now(),
+        heartbeat_shutdown,
+    ));
 
     info!(
         service = "scheduler",
@@ -52,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
             }
             result = signal::ctrl_c() => {
                 result?;
+                shutdown.store(true, Ordering::Relaxed);
                 break;
             }
         }

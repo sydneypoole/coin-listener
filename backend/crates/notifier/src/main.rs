@@ -3,8 +3,12 @@ use std::sync::{
     Arc,
 };
 
+use chrono::Utc;
 use coin_listener_core::AppConfig;
-use coin_listener_storage::{connect_postgres, run_migrations};
+use coin_listener_storage::{
+    connect_postgres, run_migrations,
+    service_heartbeats::{run_service_heartbeat, service_heartbeat_instance_id},
+};
 use notifier::{
     external::ExternalNotificationSender, run_notifier, NotificationOutboxDispatcherConfig,
 };
@@ -33,6 +37,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let heartbeat_shutdown = Arc::clone(&shutdown);
+    tokio::spawn(run_service_heartbeat(
+        postgres.clone(),
+        "notifier",
+        service_heartbeat_instance_id(),
+        Utc::now(),
+        heartbeat_shutdown,
+    ));
     let shutdown_signal = Arc::clone(&shutdown);
     tokio::spawn(async move {
         if signal::ctrl_c().await.is_ok() {

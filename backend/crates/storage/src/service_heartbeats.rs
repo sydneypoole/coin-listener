@@ -1,3 +1,8 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use chrono::{DateTime, Duration, Utc};
 use coin_listener_core::{
     models::{ServiceHealthStatus, ServiceHeartbeatStatusItem},
@@ -5,8 +10,12 @@ use coin_listener_core::{
 };
 use serde_json::json;
 use sqlx::{FromRow, PgPool};
+use tokio::time::{self, Duration as TokioDuration};
+use tracing::{error, info};
+use uuid::Uuid;
 
 pub const SERVICE_HEARTBEAT_STALE_SECONDS: i64 = 90;
+pub const SERVICE_HEARTBEAT_INTERVAL_SECONDS: i64 = 30;
 
 pub const UPSERT_SERVICE_HEARTBEAT_QUERY: &str = r#"
 INSERT INTO service_heartbeats (
@@ -62,6 +71,10 @@ pub fn heartbeat_metadata() -> serde_json::Value {
     })
 }
 
+pub fn service_heartbeat_instance_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
 pub async fn upsert_service_heartbeat(
     pool: &PgPool,
     service_name: &str,
@@ -88,6 +101,47 @@ pub async fn list_service_heartbeats(pool: &PgPool) -> AppResult<Vec<ServiceHear
         .fetch_all(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn write_service_heartbeat_tick(
+    pool: &PgPool,
+    service_name: &'static str,
+    instance_id: &str,
+    started_at: DateTime<Utc>,
+) -> AppResult<ServiceHeartbeatRow> {
+    upsert_service_heartbeat(
+        pool,
+        service_name,
+        instance_id,
+        started_at,
+        Utc::now(),
+        heartbeat_metadata(),
+    )
+    .await
+}
+
+pub async fn run_service_heartbeat(
+    pool: PgPool,
+    service_name: &'static str,
+    instance_id: String,
+    started_at: DateTime<Utc>,
+    shutdown: Arc<AtomicBool>,
+) {
+    loop {
+        match write_service_heartbeat_tick(&pool, service_name, &instance_id, started_at).await {
+            Ok(_) => info!(service = service_name, instance_id = %instance_id, "service heartbeat written"),
+            Err(error) => error!(service = service_name, instance_id = %instance_id, error = %error, "service heartbeat write failed"),
+        }
+
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        time::sleep(TokioDuration::from_secs(
+            SERVICE_HEARTBEAT_INTERVAL_SECONDS as u64,
+        ))
+        .await;
+    }
 }
 
 pub async fn system_service_health(pool: &PgPool, now: DateTime<Utc>) -> AppResult<ServiceHealthStatus> {
@@ -125,9 +179,23 @@ mod tests {
     use coin_listener_core::AppError;
 
     use crate::service_heartbeats::{
-        heartbeat_metadata, service_heartbeat_is_stale, validate_service_heartbeat,
+        heartbeat_metadata, service_heartbeat_instance_id, service_heartbeat_is_stale,
+        validate_service_heartbeat, SERVICE_HEARTBEAT_INTERVAL_SECONDS,
         SERVICE_HEARTBEAT_STALE_SECONDS, UPSERT_SERVICE_HEARTBEAT_QUERY,
     };
+
+    #[test]
+    fn service_heartbeat_instance_id_is_uuid_shaped() {
+        let instance_id = service_heartbeat_instance_id();
+
+        uuid::Uuid::parse_str(&instance_id).expect("uuid instance id");
+    }
+
+    #[test]
+    fn heartbeat_interval_is_shorter_than_stale_threshold() {
+        assert_eq!(SERVICE_HEARTBEAT_INTERVAL_SECONDS, 30);
+        assert!(SERVICE_HEARTBEAT_INTERVAL_SECONDS < SERVICE_HEARTBEAT_STALE_SECONDS);
+    }
 
     #[test]
     fn heartbeat_validation_accepts_known_services() {

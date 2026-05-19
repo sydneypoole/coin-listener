@@ -3,10 +3,12 @@ use std::sync::{
     Arc,
 };
 
+use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
     connect_postgres, connect_redis, run_migrations,
     scan_queue::{connect_scan_queue, ScanQueue},
+    service_heartbeats::{run_service_heartbeat, service_heartbeat_instance_id},
 };
 use tokio::signal;
 use tracing::info;
@@ -35,6 +37,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let heartbeat_shutdown = Arc::clone(&shutdown);
+    tokio::spawn(run_service_heartbeat(
+        postgres.clone(),
+        "worker",
+        service_heartbeat_instance_id(),
+        Utc::now(),
+        heartbeat_shutdown,
+    ));
     let shutdown_signal = Arc::clone(&shutdown);
     tokio::spawn(async move {
         if signal::ctrl_c().await.is_ok() {
