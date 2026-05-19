@@ -22,7 +22,14 @@ use coin_listener_core::{
     },
     AppError, AppResult,
 };
-use coin_listener_storage::{repositories, scan_queue::ScanQueue};
+use coin_listener_storage::{
+    provider_health::{
+        active_rpc_provider_candidates, record_provider_failure, record_provider_success,
+        try_acquire_provider_qps,
+    },
+    repositories,
+    scan_queue::ScanQueue,
+};
 use redis::aio::MultiplexedConnection;
 use sqlx::PgPool;
 use tracing::{info, warn};
@@ -365,18 +372,15 @@ pub async fn scan_evm_erc20_transfers(
     Ok(events)
 }
 
-pub async fn scan_evm_address(
+pub async fn scan_evm_address_with_provider(
     pool: &PgPool,
-    redis: &mut MultiplexedConnection,
     task: &ScanAddressTask,
-    _now: DateTime<Utc>,
+    provider: &Provider,
 ) -> AppResult<Vec<AddressEvent>> {
-    let _ = redis;
     let context = repositories::get_scan_address_context(pool, task.address_id).await?;
-    let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
     let chain = repositories::chain_by_id(pool, context.chain_id).await?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
-    let timeout = provider_timeout_duration(&provider)?;
+    let timeout = provider_timeout_duration(provider)?;
     let rpc = EvmRpcClient::new(provider.base_url.clone(), timeout);
     let latest_block = rpc.eth_block_number().await?;
 
@@ -386,7 +390,7 @@ pub async fn scan_evm_address(
         &rpc,
         &context,
         &native_asset,
-        &provider,
+        provider,
         latest_block,
     )
     .await?
@@ -404,6 +408,48 @@ pub async fn scan_evm_address(
         .await?,
     );
     Ok(events)
+}
+
+pub async fn scan_evm_address(
+    pool: &PgPool,
+    redis: &mut MultiplexedConnection,
+    task: &ScanAddressTask,
+    now: DateTime<Utc>,
+) -> AppResult<Vec<AddressEvent>> {
+    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
+    let candidates = active_rpc_provider_candidates(pool, context.chain_id, now).await?;
+    if candidates.is_empty() {
+        return Err(provider_capacity_error(context.chain_id));
+    }
+
+    let mut last_provider_error = None;
+    for candidate in candidates {
+        let provider = candidate.provider;
+        if !try_acquire_provider_qps(redis, provider.id, provider.qps_limit, now).await? {
+            info!(provider_id = %provider.id, chain_id = %context.chain_id, "provider qps limit reached");
+            continue;
+        }
+
+        match scan_evm_address_with_provider(pool, task, &provider).await {
+            Ok(events) => {
+                if let Err(error) = record_provider_success(pool, provider.id, now).await {
+                    warn!(provider_id = %provider.id, error = %error, "failed to record provider success");
+                }
+                return Ok(events);
+            }
+            Err(error) if is_provider_availability_error(&error) => {
+                if let Err(write_error) =
+                    record_provider_failure(pool, provider.id, now, &error).await
+                {
+                    warn!(provider_id = %provider.id, error = %write_error, "failed to record provider failure");
+                }
+                last_provider_error = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_provider_error.unwrap_or_else(|| provider_capacity_error(context.chain_id)))
 }
 
 pub async fn scan_tron_address(
@@ -1377,6 +1423,37 @@ mod tests {
         assert!(source.contains(
             "scan_btc_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"
         ));
+    }
+
+    #[test]
+    fn evm_scan_uses_provider_candidates_and_health_records() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub async fn scan_evm_address(")
+            .expect("EVM scan function");
+        let end = source
+            .find("pub async fn scan_tron_address(")
+            .expect("TRON scan function");
+        let source = &source[start..end];
+
+        assert!(
+            source.contains("active_rpc_provider_candidates(pool, context.chain_id, now).await?")
+        );
+        assert!(source.contains(
+            "try_acquire_provider_qps(redis, provider.id, provider.qps_limit, now).await?"
+        ));
+        assert!(source.contains("record_provider_success(pool, provider.id, now).await"));
+        assert!(source.contains("record_provider_failure(pool, provider.id, now, &error).await"));
+    }
+
+    #[test]
+    fn evm_scan_has_with_provider_function_for_single_candidate_attempt() {
+        let source = include_str!("lib.rs");
+        let end = source.find("#[cfg(test)]").expect("test module");
+        let source = &source[..end];
+
+        assert!(source.contains("scan_evm_address_with_provider"));
+        assert!(source.contains("provider_capacity_error(context.chain_id)"));
     }
 
     #[test]
