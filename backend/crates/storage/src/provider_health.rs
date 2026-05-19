@@ -250,12 +250,16 @@ pub async fn try_acquire_provider_qps(
         .await
         .map_err(|error| AppError::Redis(error.to_string()))?;
 
-    let _: bool = redis::cmd("EXPIRE")
+    let expire_set: bool = redis::cmd("EXPIRE")
         .arg(&key)
         .arg(2)
         .query_async(redis)
         .await
         .map_err(|error| AppError::Redis(error.to_string()))?;
+
+    if !expire_set {
+        return Err(AppError::Redis("failed to expire provider QPS key".to_string()));
+    }
 
     Ok(provider_qps_permits(current_count, qps_limit))
 }
