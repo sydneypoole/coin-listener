@@ -1,7 +1,10 @@
-use crate::auth::{self, AuthContext, TokenSettings};
+use crate::{
+    auth::{self, AuthContext, TokenSettings},
+    realtime::{self, RealtimeHub},
+};
 use axum::{
-    extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    extract::{ws::WebSocketUpgrade, Extension, FromRequestParts, Path, Query, Request, State},
+    http::{StatusCode, Uri},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -38,6 +41,7 @@ pub struct ApiState {
     pub notify_queue_key: String,
     pub enable_dev_routes: bool,
     pub auth: TokenSettings,
+    pub realtime: RealtimeHub,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +108,7 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/auth/login", post(login))
+        .route("/api/realtime/notifications", get(realtime_notifications))
         .merge(protected)
         .with_state(state)
 }
@@ -113,6 +118,30 @@ async fn health(State(_state): State<Arc<ApiState>>) -> Json<HealthResponse> {
         status: "ok",
         service: "api-server",
     })
+}
+
+async fn realtime_notifications(
+    State(state): State<Arc<ApiState>>,
+    uri: Uri,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let query = uri.query().unwrap_or_default();
+    let token = realtime::realtime_token_from_query(query)?;
+    let claims = auth::validate_token(&state.auth, token)?;
+    let user_id = claims.subject_uuid()?;
+    let tenant_id = claims.tenant_uuid()?;
+    repositories::active_user(&state.postgres, user_id).await?;
+    repositories::active_tenant_membership(&state.postgres, user_id, tenant_id).await?;
+    let hub = state.realtime.clone();
+    let (mut parts, _) = request.into_parts();
+    let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
+        Ok(ws) => ws,
+        Err(rejection) => return Ok(rejection.into_response()),
+    };
+
+    Ok(ws
+        .on_upgrade(move |socket| realtime::websocket_connection(socket, hub, tenant_id))
+        .into_response())
 }
 
 async fn system_status_handler(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
@@ -466,7 +495,7 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{build_router, ApiState};
-    use crate::auth::TokenSettings;
+    use crate::{auth::TokenSettings, realtime::RealtimeHub};
     use axum::{
         body::Body,
         http::{header, Method, Request, StatusCode},
@@ -495,6 +524,7 @@ mod tests {
                 secret: "test-secret-with-enough-entropy".to_string(),
                 ttl: Duration::seconds(3600),
             },
+            realtime: RealtimeHub::new(16),
         })
     }
 
@@ -559,6 +589,50 @@ mod tests {
             .expect("router response");
 
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn realtime_websocket_rejects_missing_token() {
+        let app = build_router(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/realtime/notifications")
+                    .header(header::CONNECTION, "upgrade")
+                    .header(header::UPGRADE, "websocket")
+                    .header(header::SEC_WEBSOCKET_VERSION, "13")
+                    .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn realtime_websocket_rejects_malformed_token_before_database_lookup() {
+        let app = build_router(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/realtime/notifications?token=not-a-jwt")
+                    .header(header::CONNECTION, "upgrade")
+                    .header(header::UPGRADE, "websocket")
+                    .header(header::SEC_WEBSOCKET_VERSION, "13")
+                    .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

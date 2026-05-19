@@ -1,4 +1,4 @@
-use api_server::{auth, build_router, ApiState};
+use api_server::{auth, build_router, realtime::RealtimeHub, ApiState};
 use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         notify_queue_key: config.notify.queue_key.clone(),
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
+        realtime: RealtimeHub::new(256),
     });
     let app = build_router(state)
         .layer(CorsLayer::permissive())

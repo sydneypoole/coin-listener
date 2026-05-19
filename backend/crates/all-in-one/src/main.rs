@@ -2,7 +2,7 @@ use all_in_one::{
     build_all_in_one_router, frontend_dist_path_from_env, service_task_result,
     ALL_IN_ONE_SERVICE_NAMES,
 };
-use api_server::{auth, build_router, ApiState};
+use api_server::{auth, build_router, realtime::RealtimeHub, ApiState};
 use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
@@ -44,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         notify_queue_key: config.notify.queue_key.clone(),
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
+        realtime: RealtimeHub::new(256),
     });
     let api_router = build_router(api_state)
         .layer(CorsLayer::permissive())
