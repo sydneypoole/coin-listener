@@ -31,11 +31,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set('Content-Type', 'application/json');
 
-  if (!isLoginRequest) {
-    const token = getAuthToken();
-    if (token) {
-      headers.set('Authorization', `Bearer ${token}`);
-    }
+  const token = isLoginRequest ? null : getAuthToken();
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
   }
 
   const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -45,7 +43,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!response.ok) {
     if (!isLoginRequest && response.status === 401) {
-      handleUnauthorized();
+      handleUnauthorized(token);
     }
     const body = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(body.error ?? response.statusText);

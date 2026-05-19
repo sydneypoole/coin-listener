@@ -107,7 +107,9 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
 }
 
-export function handleUnauthorized(): void {
+export function handleUnauthorized(requestToken: string | null): void {
+  if (requestToken !== getAuthToken()) return;
+
   clearSession();
   try {
     unauthorizedHandler?.();
