@@ -196,7 +196,14 @@ pub fn ensure_provider_page_limit(
 }
 
 pub fn is_provider_availability_error(error: &AppError) -> bool {
-    matches!(error, AppError::Config(_))
+    let AppError::Config(message) = error else {
+        return false;
+    };
+
+    message.contains("request failed")
+        || message.contains("response body failed")
+        || message.contains("returned http")
+        || message.starts_with("no active rpc provider capacity for chain ")
 }
 
 pub fn provider_capacity_error(chain_id: uuid::Uuid) -> AppError {
@@ -793,7 +800,7 @@ mod tests {
         }
 
         #[test]
-        fn validation_database_and_redis_errors_do_not_fallback() {
+        fn validation_database_redis_and_worker_config_errors_do_not_fallback() {
             assert!(!is_provider_availability_error(&AppError::Validation(
                 "bad decoded data".to_string()
             )));
@@ -802,6 +809,9 @@ mod tests {
             )));
             assert!(!is_provider_availability_error(&AppError::Redis(
                 "redis unavailable".to_string()
+            )));
+            assert!(!is_provider_availability_error(&AppError::Config(
+                "TRON account transactions pagination exceeded max page limit 10".to_string()
             )));
         }
 
@@ -812,6 +822,13 @@ mod tests {
             assert!(
                 matches!(error, AppError::Config(message) if message.contains("no active rpc provider capacity for chain 00000000-0000-0000-0000-000000000007"))
             );
+        }
+
+        #[test]
+        fn provider_capacity_errors_are_availability_errors() {
+            let error = provider_capacity_error(Uuid::from_u128(7));
+
+            assert!(is_provider_availability_error(&error));
         }
 
         #[test]
