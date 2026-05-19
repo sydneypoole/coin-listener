@@ -474,17 +474,14 @@ pub async fn scan_evm_address(
     ))
 }
 
-pub async fn scan_tron_address(
+pub async fn scan_tron_address_with_provider(
     pool: &PgPool,
-    redis: &mut MultiplexedConnection,
-    task: &ScanAddressTask,
-    _now: DateTime<Utc>,
+    context: &ScanAddressContext,
+    provider: &Provider,
 ) -> AppResult<Vec<AddressEvent>> {
-    let _ = redis;
-    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
-    let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
+    ensure_provider_matches_context(provider, context)?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
-    let timeout = provider_timeout_duration(&provider)?;
+    let timeout = provider_timeout_duration(provider)?;
 
     let client = TronClient::new(provider.base_url.clone(), timeout);
 
@@ -641,17 +638,59 @@ pub async fn scan_tron_address(
     Ok(events)
 }
 
-pub async fn scan_btc_address(
+pub async fn scan_tron_address(
     pool: &PgPool,
     redis: &mut MultiplexedConnection,
     task: &ScanAddressTask,
-    _now: DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> AppResult<Vec<AddressEvent>> {
-    let _ = redis;
     let context = repositories::get_scan_address_context(pool, task.address_id).await?;
-    let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
+    let candidates = active_rpc_provider_candidates(pool, context.chain_id, now).await?;
+    if candidates.is_empty() {
+        return Err(provider_capacity_error(context.chain_id));
+    }
+
+    let mut last_provider_error = None;
+    for candidate in candidates {
+        let provider = candidate.provider;
+        if !try_acquire_provider_qps(redis, provider.id, provider.qps_limit, now).await? {
+            info!(provider_id = %provider.id, chain_id = %context.chain_id, "provider qps limit reached");
+            continue;
+        }
+
+        match scan_tron_address_with_provider(pool, &context, &provider).await {
+            Ok(events) => {
+                if let Err(error) = record_provider_success(pool, provider.id, now).await {
+                    warn!(provider_id = %provider.id, error = %error, "failed to record provider success");
+                }
+                return Ok(events);
+            }
+            Err(error) if is_provider_availability_error(&error) => {
+                if let Err(write_error) =
+                    record_provider_failure(pool, provider.id, now, &error).await
+                {
+                    warn!(provider_id = %provider.id, error = %write_error, "failed to record provider failure");
+                }
+                last_provider_error = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(provider_attempts_exhausted_error(
+        context.chain_id,
+        last_provider_error,
+    ))
+}
+
+pub async fn scan_btc_address_with_provider(
+    pool: &PgPool,
+    context: &ScanAddressContext,
+    provider: &Provider,
+) -> AppResult<Vec<AddressEvent>> {
+    ensure_provider_matches_context(provider, context)?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
-    let timeout = provider_timeout_duration(&provider)?;
+    let timeout = provider_timeout_duration(provider)?;
 
     let client = BtcClient::new(provider.base_url.clone(), timeout);
     let balance = client.address_balance(&context.address).await?;
@@ -726,6 +765,51 @@ pub async fn scan_btc_address(
     }
 
     Ok(events)
+}
+
+pub async fn scan_btc_address(
+    pool: &PgPool,
+    redis: &mut MultiplexedConnection,
+    task: &ScanAddressTask,
+    now: DateTime<Utc>,
+) -> AppResult<Vec<AddressEvent>> {
+    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
+    let candidates = active_rpc_provider_candidates(pool, context.chain_id, now).await?;
+    if candidates.is_empty() {
+        return Err(provider_capacity_error(context.chain_id));
+    }
+
+    let mut last_provider_error = None;
+    for candidate in candidates {
+        let provider = candidate.provider;
+        if !try_acquire_provider_qps(redis, provider.id, provider.qps_limit, now).await? {
+            info!(provider_id = %provider.id, chain_id = %context.chain_id, "provider qps limit reached");
+            continue;
+        }
+
+        match scan_btc_address_with_provider(pool, &context, &provider).await {
+            Ok(events) => {
+                if let Err(error) = record_provider_success(pool, provider.id, now).await {
+                    warn!(provider_id = %provider.id, error = %error, "failed to record provider success");
+                }
+                return Ok(events);
+            }
+            Err(error) if is_provider_availability_error(&error) => {
+                if let Err(write_error) =
+                    record_provider_failure(pool, provider.id, now, &error).await
+                {
+                    warn!(provider_id = %provider.id, error = %write_error, "failed to record provider failure");
+                }
+                last_provider_error = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(provider_attempts_exhausted_error(
+        context.chain_id,
+        last_provider_error,
+    ))
 }
 
 pub async fn process_scan_task(
@@ -1564,6 +1648,72 @@ mod tests {
         let evm_loop = &source[start..end];
 
         assert!(evm_loop.contains("provider_attempts_exhausted_error"));
+    }
+
+    #[test]
+    fn tron_and_btc_scans_have_with_provider_functions() {
+        let source = include_str!("lib.rs");
+        let end = source.find("#[cfg(test)]").expect("test module");
+        let source = &source[..end];
+
+        assert!(source.contains("pub async fn scan_tron_address_with_provider("));
+        assert!(source.contains("pub async fn scan_btc_address_with_provider("));
+    }
+
+    #[test]
+    fn tron_and_btc_scan_entrypoints_record_provider_health() {
+        let source = include_str!("lib.rs");
+        let tron_start = source
+            .find("pub async fn scan_tron_address(")
+            .expect("TRON scan function");
+        let tron_end = source
+            .find("pub async fn scan_btc_address(")
+            .expect("BTC scan function");
+        let btc_start = tron_end;
+        let btc_end = source
+            .find("pub async fn process_scan_task(")
+            .expect("process scan function");
+        let scan_bodies = [&source[tron_start..tron_end], &source[btc_start..btc_end]];
+
+        for scan_body in scan_bodies {
+            assert!(scan_body
+                .contains("active_rpc_provider_candidates(pool, context.chain_id, now).await?"));
+            assert!(scan_body.contains(
+                "try_acquire_provider_qps(redis, provider.id, provider.qps_limit, now).await?"
+            ));
+            assert!(scan_body.contains("record_provider_success(pool, provider.id, now).await"));
+            assert!(
+                scan_body.contains("record_provider_failure(pool, provider.id, now, &error).await")
+            );
+        }
+    }
+
+    #[test]
+    fn tron_and_btc_scan_reuse_candidate_context_for_provider_attempts() {
+        let source = include_str!("lib.rs");
+        let end = source.find("#[cfg(test)]").expect("test module");
+        let source = &source[..end];
+        let tron_start = source
+            .find("pub async fn scan_tron_address_with_provider(")
+            .expect("TRON provider attempt function");
+        let tron_end = source
+            .find("pub async fn scan_tron_address(")
+            .expect("TRON candidate loop function");
+        let btc_start = source
+            .find("pub async fn scan_btc_address_with_provider(")
+            .expect("BTC provider attempt function");
+        let btc_end = source
+            .find("pub async fn scan_btc_address(")
+            .expect("BTC candidate loop function");
+        let provider_attempts = [&source[tron_start..tron_end], &source[btc_start..btc_end]];
+
+        for provider_attempt in provider_attempts {
+            assert!(provider_attempt.contains("context: &ScanAddressContext"));
+            assert!(
+                provider_attempt.contains("ensure_provider_matches_context(provider, context)?")
+            );
+            assert!(!provider_attempt.contains("get_scan_address_context"));
+        }
     }
 
     #[test]
