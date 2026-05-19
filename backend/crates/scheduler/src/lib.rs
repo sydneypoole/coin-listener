@@ -6,6 +6,15 @@ use coin_listener_core::{
 use coin_listener_storage::{repositories, scan_queue::ScanQueue};
 use redis::aio::MultiplexedConnection;
 use sqlx::PgPool;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use tokio::time;
+use tracing::{error, info};
 use uuid::Uuid;
 
 pub fn build_scan_task(candidate: &ScanAddressCandidate, now: DateTime<Utc>) -> ScanAddressTask {
@@ -17,6 +26,48 @@ pub fn build_scan_task(candidate: &ScanAddressCandidate, now: DateTime<Utc>) -> 
         attempt: 1,
         enqueued_at: now,
     }
+}
+
+pub fn scheduler_shutdown_requested(shutdown: &AtomicBool) -> bool {
+    shutdown.load(Ordering::Relaxed)
+}
+
+async fn wait_for_scheduler_shutdown(shutdown: Arc<AtomicBool>) {
+    while !scheduler_shutdown_requested(&shutdown) {
+        time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+pub async fn run_scheduler(
+    pool: PgPool,
+    mut redis: MultiplexedConnection,
+    queue: ScanQueue,
+    batch_size: i64,
+    tick_seconds: u64,
+    shutdown: Arc<AtomicBool>,
+) -> AppResult<()> {
+    let mut ticker = time::interval(Duration::from_secs(tick_seconds));
+
+    while !scheduler_shutdown_requested(&shutdown) {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if scheduler_shutdown_requested(&shutdown) {
+                    break;
+                }
+
+                match enqueue_due_addresses(&pool, &mut redis, &queue, batch_size, Utc::now()).await {
+                    Ok(enqueued) => info!(service = "scheduler", enqueued, "scheduler tick completed"),
+                    Err(error) => {
+                        error!(service = "scheduler", error = %error, "scheduler tick failed");
+                        return Err(error);
+                    }
+                }
+            }
+            _ = wait_for_scheduler_shutdown(Arc::clone(&shutdown)) => break,
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn enqueue_due_addresses(
@@ -85,5 +136,23 @@ mod tests {
         assert_eq!(task.chain_id, candidate.chain_id);
         assert_eq!(task.attempt, 1);
         assert_eq!(task.enqueued_at, now);
+    }
+
+    #[test]
+    fn scheduler_shutdown_flag_reads_atomic_state() {
+        let shutdown = std::sync::atomic::AtomicBool::new(false);
+        assert!(!super::scheduler_shutdown_requested(&shutdown));
+
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(super::scheduler_shutdown_requested(&shutdown));
+    }
+
+    #[test]
+    fn scheduler_exports_reusable_runtime_loop() {
+        let source = include_str!("lib.rs");
+
+        assert!(source.contains("pub async fn run_scheduler("));
+        assert!(source.contains("while !scheduler_shutdown_requested(&shutdown)"));
+        assert!(source.contains("enqueue_due_addresses("));
     }
 }

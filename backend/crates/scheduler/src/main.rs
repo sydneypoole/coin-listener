@@ -5,16 +5,13 @@ use coin_listener_storage::{
     scan_queue::{connect_scan_queue, ScanQueue},
     service_heartbeats::{run_service_heartbeat, service_heartbeat_instance_id},
 };
-use scheduler::enqueue_due_addresses;
-use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
+use scheduler::run_scheduler;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
-use tokio::{signal, time};
-use tracing::{error, info};
+use tokio::signal;
+use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -28,9 +25,8 @@ async fn main() -> anyhow::Result<()> {
     let postgres = connect_postgres(&config.postgres).await?;
     run_migrations(&postgres).await?;
     let redis_client = connect_redis(&config.redis)?;
-    let mut redis = connect_scan_queue(&redis_client).await?;
+    let redis = connect_scan_queue(&redis_client).await?;
     let queue = ScanQueue::new(config.scan.queue_key.clone(), config.scan.lock_ttl_seconds);
-    let mut ticker = time::interval(Duration::from_secs(config.scan.scheduler_tick_seconds));
     let shutdown = Arc::new(AtomicBool::new(false));
     let heartbeat_shutdown = Arc::clone(&shutdown);
     tokio::spawn(run_service_heartbeat(
@@ -49,30 +45,22 @@ async fn main() -> anyhow::Result<()> {
         "service started"
     );
 
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                match enqueue_due_addresses(
-                    &postgres,
-                    &mut redis,
-                    &queue,
-                    config.scan.scheduler_batch_size,
-                    Utc::now(),
-                ).await {
-                    Ok(enqueued) => info!(service = "scheduler", enqueued, "scheduler tick completed"),
-                    Err(error) => {
-                        error!(service = "scheduler", error = %error, "scheduler tick failed");
-                        return Err(error.into());
-                    }
-                }
-            }
-            result = signal::ctrl_c() => {
-                result?;
-                shutdown.store(true, Ordering::Relaxed);
-                break;
-            }
+    let shutdown_signal = Arc::clone(&shutdown);
+    tokio::spawn(async move {
+        if signal::ctrl_c().await.is_ok() {
+            shutdown_signal.store(true, Ordering::Relaxed);
         }
-    }
+    });
+
+    run_scheduler(
+        postgres,
+        redis,
+        queue,
+        config.scan.scheduler_batch_size,
+        config.scan.scheduler_tick_seconds,
+        shutdown,
+    )
+    .await?;
 
     info!(service = "scheduler", "service stopped");
     Ok(())
