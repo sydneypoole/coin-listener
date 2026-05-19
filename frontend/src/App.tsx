@@ -45,6 +45,11 @@ export function App() {
     setRealtimeUnreadCount(0);
   }, [queryClient]);
 
+  const handleRealtimeUnauthorized = useCallback(() => {
+    clearSession();
+    resetAuthenticatedState();
+  }, [resetAuthenticatedState]);
+
   useEffect(() => {
     setUnauthorizedHandler(resetAuthenticatedState);
     return () => setUnauthorizedHandler(null);
@@ -67,11 +72,11 @@ export function App() {
           queryClient.invalidateQueries({ queryKey: ['events'] });
           queryClient.invalidateQueries({ queryKey: ['system-status'] });
         },
-        onUnauthorized: resetAuthenticatedState,
+        onUnauthorized: handleRealtimeUnauthorized,
       },
       { generation, getGeneration: getSessionGeneration },
     );
-  }, [queryClient, resetAuthenticatedState, session]);
+  }, [handleRealtimeUnauthorized, queryClient, session]);
 
   const healthQuery = useQuery({
     queryKey: ['health'],
