@@ -1,8 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use coin_listener_core::{
     models::{
-        EventStatus, NotificationStatus, ProviderChainStatus, ProviderStatus, ProviderStatusItem,
-        ScanStatus,
+        EventStatus, NotificationStatus, ProviderChainStatus, ProviderHealthStatus,
+        ProviderStatus, ProviderStatusItem, ScanStatus,
     },
     AppError, AppResult,
 };
@@ -220,6 +220,14 @@ pub async fn system_provider_status(pool: &PgPool) -> AppResult<ProviderStatus> 
             qps_limit: row.qps_limit,
             timeout_ms: row.timeout_ms,
             status: row.status,
+            health: ProviderHealthStatus {
+                consecutive_failures: 0,
+                last_success_at: None,
+                last_failure_at: None,
+                disabled_until: None,
+                last_error: None,
+                is_circuit_open: false,
+            },
         })
         .collect();
 
