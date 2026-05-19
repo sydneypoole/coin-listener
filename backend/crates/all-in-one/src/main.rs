@@ -2,7 +2,7 @@ use all_in_one::{
     build_all_in_one_router, frontend_dist_path_from_env, service_task_result,
     ALL_IN_ONE_SERVICE_NAMES,
 };
-use api_server::{auth, build_router, realtime::RealtimeHub, ApiState};
+use api_server::{auth, build_router, realtime, ApiState};
 use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
@@ -37,6 +37,13 @@ async fn main() -> anyhow::Result<()> {
     let redis_client = connect_redis(&config.redis)?;
     let shutdown = Arc::new(AtomicBool::new(false));
 
+    let realtime_hub = realtime::RealtimeHub::new(256);
+    let mut realtime_handle = tokio::spawn(realtime::run_realtime_notification_listener(
+        config.postgres.database_url.clone(),
+        realtime_hub.clone(),
+        Arc::clone(&shutdown),
+    ));
+
     let api_state = Arc::new(ApiState {
         postgres: postgres.clone(),
         redis: Some(redis_client.clone()),
@@ -44,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         notify_queue_key: config.notify.queue_key.clone(),
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
-        realtime: RealtimeHub::new(256),
+        realtime: realtime_hub,
     });
     let api_router = build_router(api_state)
         .layer(CorsLayer::permissive())
@@ -114,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         result = &mut scheduler_handle => RuntimeEvent::Scheduler(log_service_result("scheduler", service_task_result("scheduler", result))),
         result = &mut worker_handle => RuntimeEvent::Worker(log_service_result("worker", service_task_result("worker", result))),
         result = &mut notifier_handle => RuntimeEvent::Notifier(log_service_result("notifier", service_task_result("notifier", result))),
+        result = &mut realtime_handle => RuntimeEvent::Realtime(log_realtime_result("realtime", realtime_task_result("realtime", result))),
     };
 
     shutdown.store(true, Ordering::Relaxed);
@@ -124,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_service_shutdown("scheduler", scheduler_handle).await,
                 wait_for_service_shutdown("worker", worker_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
+                wait_for_realtime_shutdown("realtime", realtime_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             secondary
@@ -133,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_service_shutdown("scheduler", scheduler_handle).await,
                 wait_for_service_shutdown("worker", worker_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
+                wait_for_realtime_shutdown("realtime", realtime_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -142,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_server_shutdown(server_handle).await,
                 wait_for_service_shutdown("worker", worker_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
+                wait_for_realtime_shutdown("realtime", realtime_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -151,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_server_shutdown(server_handle).await,
                 wait_for_service_shutdown("scheduler", scheduler_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
+                wait_for_realtime_shutdown("realtime", realtime_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -160,6 +172,17 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_server_shutdown(server_handle).await,
                 wait_for_service_shutdown("scheduler", scheduler_handle).await,
                 wait_for_service_shutdown("worker", worker_handle).await,
+                wait_for_realtime_shutdown("realtime", realtime_handle).await,
+            ]);
+            wait_for_heartbeat_shutdown(heartbeat_handles).await;
+            preserve_primary_result(result, secondary)
+        }
+        RuntimeEvent::Realtime(result) => {
+            let secondary = collect_shutdown_errors(vec![
+                wait_for_server_shutdown(server_handle).await,
+                wait_for_service_shutdown("scheduler", scheduler_handle).await,
+                wait_for_service_shutdown("worker", worker_handle).await,
+                wait_for_service_shutdown("notifier", notifier_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -173,6 +196,7 @@ enum RuntimeEvent {
     Scheduler(anyhow::Result<()>),
     Worker(anyhow::Result<()>),
     Notifier(anyhow::Result<()>),
+    Realtime(anyhow::Result<()>),
 }
 
 fn init_tracing() {
@@ -213,6 +237,16 @@ fn server_task_result(
     }
 }
 
+fn realtime_task_result(
+    service: &'static str,
+    result: Result<(), tokio::task::JoinError>,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!("{service} task failed: {error}")),
+    }
+}
+
 async fn wait_for_server_shutdown(handle: JoinHandle<anyhow::Result<()>>) -> anyhow::Result<()> {
     match handle.await {
         Ok(result) => result,
@@ -227,6 +261,13 @@ async fn wait_for_service_shutdown(
     handle: JoinHandle<coin_listener_core::AppResult<()>>,
 ) -> anyhow::Result<()> {
     log_service_result(service, service_task_result(service, handle.await))
+}
+
+async fn wait_for_realtime_shutdown(
+    service: &'static str,
+    handle: JoinHandle<()>,
+) -> anyhow::Result<()> {
+    log_realtime_result(service, realtime_task_result(service, handle.await))
 }
 
 async fn wait_for_heartbeat_shutdown(handles: Vec<JoinHandle<()>>) {
@@ -276,8 +317,24 @@ fn log_service_result(service: &'static str, result: anyhow::Result<()>) -> anyh
     result
 }
 
+fn log_realtime_result(service: &'static str, result: anyhow::Result<()>) -> anyhow::Result<()> {
+    if let Err(error) = &result {
+        error!(service, error = %error, "all-in-one service stopped with error");
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn all_in_one_wires_realtime_listener() {
+        let source = include_str!("main.rs");
+
+        assert!(source.contains("run_realtime_notification_listener"));
+        assert!(source.contains("realtime_handle"));
+        assert!(source.contains("RealtimeHub::new"));
+    }
+
     #[test]
     fn main_wires_all_runtime_services() {
         let source = include_str!("main.rs");

@@ -1,4 +1,4 @@
-use api_server::{auth, build_router, realtime::RealtimeHub, ApiState};
+use api_server::{auth, build_router, realtime, ApiState};
 use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
@@ -40,6 +40,14 @@ async fn main() -> anyhow::Result<()> {
         heartbeat_shutdown,
     ));
 
+    let realtime_hub = realtime::RealtimeHub::new(256);
+    let realtime_shutdown = Arc::clone(&shutdown);
+    tokio::spawn(realtime::run_realtime_notification_listener(
+        config.postgres.database_url.clone(),
+        realtime_hub.clone(),
+        realtime_shutdown,
+    ));
+
     let state = Arc::new(ApiState {
         postgres,
         redis: Some(redis),
@@ -47,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
         notify_queue_key: config.notify.queue_key.clone(),
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
-        realtime: RealtimeHub::new(256),
+        realtime: realtime_hub,
     });
     let app = build_router(state)
         .layer(CorsLayer::permissive())

@@ -2,11 +2,20 @@ use axum::extract::ws::{Message, WebSocket};
 use chrono::{DateTime, Utc};
 use coin_listener_core::{models::InAppNotification, AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use sqlx::postgres::PgListener;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{
     sync::{broadcast, RwLock},
     time,
 };
+use tracing::warn;
 use uuid::Uuid;
 
 pub const REALTIME_NOTIFICATION_CHANNEL: &str = "coin_listener_in_app_notifications";
@@ -74,6 +83,54 @@ impl RealtimeHub {
 
 pub fn notification_message(notification: InAppNotification) -> RealtimeServerMessage {
     RealtimeServerMessage::InAppNotificationCreated(notification)
+}
+
+pub fn message_from_notify_payload(payload: &str) -> AppResult<RealtimeServerMessage> {
+    let notification = serde_json::from_str::<InAppNotification>(payload)
+        .map_err(|error| AppError::Validation(error.to_string()))?;
+    Ok(notification_message(notification))
+}
+
+pub async fn run_realtime_notification_listener(
+    database_url: String,
+    hub: RealtimeHub,
+    shutdown: Arc<AtomicBool>,
+) {
+    while !shutdown.load(Ordering::Relaxed) {
+        match PgListener::connect(&database_url).await {
+            Ok(mut listener) => {
+                if let Err(error) = listener.listen(REALTIME_NOTIFICATION_CHANNEL).await {
+                    warn!(%error, "realtime notification listen failed");
+                    time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+
+                while !shutdown.load(Ordering::Relaxed) {
+                    match listener.recv().await {
+                        Ok(notification) => {
+                            match message_from_notify_payload(notification.payload()) {
+                                Ok(message) => {
+                                    hub.broadcast_async(message).await;
+                                }
+                                Err(error) => {
+                                    warn!(%error, "invalid realtime notification payload")
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(%error, "realtime notification listener disconnected");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => warn!(%error, "realtime notification listener connect failed"),
+        }
+
+        if !shutdown.load(Ordering::Relaxed) {
+            time::sleep(Duration::from_secs(1)).await;
+        }
+    }
 }
 
 pub fn realtime_token_from_query(query: &str) -> AppResult<&str> {
@@ -177,6 +234,16 @@ mod tests {
             message,
             RealtimeServerMessage::InAppNotificationCreated(_)
         ));
+        assert_eq!(message.message_type(), "in_app_notification.created");
+        assert_eq!(message.tenant_id(), notification.tenant_id);
+    }
+
+    #[test]
+    fn realtime_notify_payload_deserializes_to_broadcast_message() {
+        let notification = notification_for_tenant(Uuid::from_u128(1));
+        let payload = serde_json::to_string(&notification).expect("notification serializes");
+        let message = super::message_from_notify_payload(&payload).expect("payload parses");
+
         assert_eq!(message.message_type(), "in_app_notification.created");
         assert_eq!(message.tenant_id(), notification.tenant_id);
     }
