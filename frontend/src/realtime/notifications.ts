@@ -100,11 +100,15 @@ export function connectRealtimeNotifications(
     socket = new WebSocket(realtimeWebSocketUrl(apiBaseUrl, session.token));
 
     socket.onopen = () => {
+      if (stopped || isStale()) {
+        socket?.close();
+        return;
+      }
       attempt = 0;
     };
 
     socket.onmessage = event => {
-      if (typeof event.data !== 'string') return;
+      if (stopped || isStale() || typeof event.data !== 'string') return;
       const message = parseRealtimeMessage(event.data);
       if (message?.type === 'in_app_notification.created') {
         handlers.onNotification(message.payload);
