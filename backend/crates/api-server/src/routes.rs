@@ -228,8 +228,11 @@ async fn create_provider(
     Ok((StatusCode::CREATED, Json(provider)).into_response())
 }
 
-async fn list_addresses(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
-    let addresses = repositories::list_watched_addresses(&state.postgres).await?;
+async fn list_addresses(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
+    let addresses = repositories::list_watched_addresses(&state.postgres, auth.tenant_id).await?;
     Ok(Json(addresses).into_response())
 }
 
@@ -245,95 +248,118 @@ async fn create_address(
 
 async fn update_address(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(request): Json<CreateWatchedAddressRequest>,
 ) -> Result<Response, ApiError> {
-    let address = repositories::update_watched_address(&state.postgres, id, request).await?;
+    let address =
+        repositories::update_watched_address(&state.postgres, auth.tenant_id, id, request).await?;
     Ok(Json(address).into_response())
 }
 
 async fn delete_address(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    repositories::delete_watched_address(&state.postgres, id).await?;
+    repositories::delete_watched_address(&state.postgres, auth.tenant_id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_events(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Query(query): Query<EventQuery>,
 ) -> Result<Response, ApiError> {
-    let events = repositories::list_events(&state.postgres, query).await?;
+    let events = repositories::list_events(&state.postgres, auth.tenant_id, query).await?;
     Ok(Json(events).into_response())
 }
 
 async fn scan_address(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let event = repositories::create_mock_evm_event(&state.postgres, id).await?;
+    let event = repositories::create_mock_evm_event(&state.postgres, auth.tenant_id, id).await?;
     Ok((StatusCode::CREATED, Json(event)).into_response())
 }
 
 async fn list_notification_channels(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Response, ApiError> {
-    let channels = notifications::list_notification_channels(&state.postgres).await?;
+    let channels =
+        notifications::list_notification_channels(&state.postgres, auth.tenant_id).await?;
     Ok(Json(channels).into_response())
 }
 
 async fn create_notification_channel(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Json(request): Json<CreateNotificationChannelRequest>,
 ) -> Result<Response, ApiError> {
-    let channel = notifications::create_notification_channel(&state.postgres, request).await?;
+    let channel =
+        notifications::create_notification_channel(&state.postgres, auth.tenant_id, request)
+            .await?;
     Ok((StatusCode::CREATED, Json(channel)).into_response())
 }
 
-async fn list_notification_rules(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
-    let rules = notifications::list_notification_rules(&state.postgres).await?;
+async fn list_notification_rules(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
+    let rules = notifications::list_notification_rules(&state.postgres, auth.tenant_id).await?;
     Ok(Json(rules).into_response())
 }
 
 async fn create_notification_rule(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Json(request): Json<CreateNotificationRuleRequest>,
 ) -> Result<Response, ApiError> {
-    let rule = notifications::create_notification_rule(&state.postgres, request).await?;
+    let rule =
+        notifications::create_notification_rule(&state.postgres, auth.tenant_id, request).await?;
     Ok((StatusCode::CREATED, Json(rule)).into_response())
 }
 
 async fn update_notification_rule(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(request): Json<CreateNotificationRuleRequest>,
 ) -> Result<Response, ApiError> {
-    let rule = notifications::update_notification_rule(&state.postgres, id, request).await?;
+    let rule =
+        notifications::update_notification_rule(&state.postgres, auth.tenant_id, id, request)
+            .await?;
     Ok(Json(rule).into_response())
 }
 
 async fn delete_notification_rule(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    notifications::delete_notification_rule(&state.postgres, id).await?;
+    notifications::delete_notification_rule(&state.postgres, auth.tenant_id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_in_app_notifications(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Query(query): Query<InAppNotificationQuery>,
 ) -> Result<Response, ApiError> {
-    let notifications = notifications::list_in_app_notifications(&state.postgres, query).await?;
+    let notifications =
+        notifications::list_in_app_notifications(&state.postgres, auth.tenant_id, query).await?;
     Ok(Json(notifications).into_response())
 }
 
 async fn mark_in_app_notification_read(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let notification = notifications::mark_in_app_notification_read(&state.postgres, id).await?;
+    let notification =
+        notifications::mark_in_app_notification_read(&state.postgres, auth.tenant_id, id).await?;
     Ok(Json(notification).into_response())
 }
 
@@ -343,12 +369,14 @@ fn notification_ops_stale_before() -> chrono::DateTime<Utc> {
 
 async fn list_notification_outbox(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Query(query): Query<NotificationOutboxQuery>,
 ) -> Result<Response, ApiError> {
     let limit = repositories::notification_ops_limit(query.limit);
     let offset = repositories::notification_ops_offset(query.offset);
     let items = repositories::list_notification_outbox(
         &state.postgres,
+        auth.tenant_id,
         query,
         notification_ops_stale_before(),
     )
@@ -364,10 +392,12 @@ async fn list_notification_outbox(
 
 async fn get_notification_outbox(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let detail = repositories::get_notification_outbox_detail(
         &state.postgres,
+        auth.tenant_id,
         id,
         notification_ops_stale_before(),
     )
@@ -377,19 +407,24 @@ async fn get_notification_outbox(
 
 async fn retry_notification_outbox(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let outbox = repositories::retry_notification_outbox(&state.postgres, id, Utc::now()).await?;
+    let outbox =
+        repositories::retry_notification_outbox(&state.postgres, auth.tenant_id, id, Utc::now())
+            .await?;
     Ok(Json(RetryNotificationOutboxResponse { outbox }).into_response())
 }
 
 async fn list_notification_deliveries(
     State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
     Query(query): Query<NotificationDeliveryQuery>,
 ) -> Result<Response, ApiError> {
     let limit = notifications::notification_delivery_ops_limit(query.limit);
     let offset = notifications::notification_delivery_ops_offset(query.offset);
-    let items = notifications::list_notification_deliveries(&state.postgres, query).await?;
+    let items =
+        notifications::list_notification_deliveries(&state.postgres, auth.tenant_id, query).await?;
 
     Ok(Json(NotificationDeliveryListResponse {
         items,

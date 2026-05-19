@@ -23,6 +23,61 @@ const DELIVERY_STATUS_PROCESSING: &str = "processing";
 const DELIVERY_STATUS_SENT: &str = "sent";
 const DELIVERY_STATUS_SKIPPED: &str = "skipped";
 const DELIVERY_STATUS_FAILED: &str = "failed";
+
+pub const LIST_NOTIFICATION_CHANNELS_QUERY: &str = r#"
+        SELECT id, tenant_id, channel_type, name, config, status, created_at, updated_at
+        FROM notification_channels
+        WHERE tenant_id = $1
+        ORDER BY created_at DESC
+        "#;
+
+pub const LIST_NOTIFICATION_RULES_QUERY: &str = r#"
+        SELECT id, tenant_id, name, chain_id, address_id, asset_id, event_type, is_transfer,
+               min_amount_raw, direction, channel_ids, enabled, created_at, updated_at
+        FROM notification_rules
+        WHERE tenant_id = $1
+        ORDER BY created_at DESC
+        "#;
+
+pub const UPDATE_NOTIFICATION_RULE_QUERY: &str = r#"
+        UPDATE notification_rules
+        SET name = $2,
+            chain_id = $3,
+            address_id = $4,
+            asset_id = $5,
+            event_type = $6,
+            is_transfer = $7,
+            min_amount_raw = $8,
+            direction = $9,
+            channel_ids = $10,
+            enabled = $11,
+            updated_at = NOW()
+        WHERE id = $1
+          AND tenant_id = $12
+        RETURNING id, tenant_id, name, chain_id, address_id, asset_id, event_type, is_transfer,
+                  min_amount_raw, direction, channel_ids, enabled, created_at, updated_at
+        "#;
+
+pub const DELETE_NOTIFICATION_RULE_QUERY: &str =
+    "DELETE FROM notification_rules WHERE id = $1 AND tenant_id = $2";
+
+pub const LIST_IN_APP_NOTIFICATIONS_QUERY: &str = r#"
+        SELECT id, tenant_id, event_id, delivery_id, title, body, read_at, created_at
+        FROM in_app_notifications
+        WHERE tenant_id = $1
+          AND ($2::boolean IS NULL OR read_at IS NULL)
+        ORDER BY created_at DESC
+        LIMIT 200
+        "#;
+
+pub const MARK_IN_APP_NOTIFICATION_READ_QUERY: &str = r#"
+        UPDATE in_app_notifications
+        SET read_at = COALESCE(read_at, NOW())
+        WHERE id = $1
+          AND tenant_id = $2
+        RETURNING id, tenant_id, event_id, delivery_id, title, body, read_at, created_at
+        "#;
+
 const CREATE_IN_APP_NOTIFICATION_QUERY: &str = r#"
         INSERT INTO in_app_notifications (tenant_id, event_id, delivery_id, title, body)
         SELECT $1, $2, $3, $4, $5
@@ -363,23 +418,20 @@ pub fn validate_notification_rule_reference_consistency(
     Ok(())
 }
 
-pub async fn list_notification_channels(pool: &PgPool) -> AppResult<Vec<NotificationChannel>> {
-    sqlx::query_as::<_, NotificationChannel>(
-        r#"
-        SELECT id, tenant_id, channel_type, name, config, status, created_at, updated_at
-        FROM notification_channels
-        WHERE tenant_id = $1
-        ORDER BY created_at DESC
-        "#,
-    )
-    .bind(DEFAULT_TENANT_ID)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))
+pub async fn list_notification_channels(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> AppResult<Vec<NotificationChannel>> {
+    sqlx::query_as::<_, NotificationChannel>(LIST_NOTIFICATION_CHANNELS_QUERY)
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
 }
 
 pub async fn create_notification_channel(
     pool: &PgPool,
+    tenant_id: Uuid,
     request: CreateNotificationChannelRequest,
 ) -> AppResult<NotificationChannel> {
     validate_notification_channel_request(&request)?;
@@ -393,7 +445,7 @@ pub async fn create_notification_channel(
         RETURNING id, tenant_id, channel_type, name, config, status, created_at, updated_at
         "#,
     )
-    .bind(DEFAULT_TENANT_ID)
+    .bind(tenant_id)
     .bind(request.channel_type)
     .bind(request.name)
     .bind(config)
@@ -403,20 +455,15 @@ pub async fn create_notification_channel(
     .map_err(|error| AppError::Database(error.to_string()))
 }
 
-pub async fn list_notification_rules(pool: &PgPool) -> AppResult<Vec<NotificationRule>> {
-    sqlx::query_as::<_, NotificationRule>(
-        r#"
-        SELECT id, tenant_id, name, chain_id, address_id, asset_id, event_type, is_transfer,
-               min_amount_raw, direction, channel_ids, enabled, created_at, updated_at
-        FROM notification_rules
-        WHERE tenant_id = $1
-        ORDER BY created_at DESC
-        "#,
-    )
-    .bind(DEFAULT_TENANT_ID)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))
+pub async fn list_notification_rules(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> AppResult<Vec<NotificationRule>> {
+    sqlx::query_as::<_, NotificationRule>(LIST_NOTIFICATION_RULES_QUERY)
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
 }
 
 pub async fn list_enabled_notification_rules(
@@ -441,10 +488,11 @@ pub async fn list_enabled_notification_rules(
 
 pub async fn create_notification_rule(
     pool: &PgPool,
+    tenant_id: Uuid,
     request: CreateNotificationRuleRequest,
 ) -> AppResult<NotificationRule> {
     validate_notification_rule_request(&request)?;
-    validate_notification_rule_references(pool, &request).await?;
+    validate_notification_rule_references(pool, tenant_id, &request).await?;
     let channel_ids = request.channel_ids.unwrap_or_default();
     let enabled = request.enabled.unwrap_or(true);
 
@@ -459,7 +507,7 @@ pub async fn create_notification_rule(
                   min_amount_raw, direction, channel_ids, enabled, created_at, updated_at
         "#,
     )
-    .bind(DEFAULT_TENANT_ID)
+    .bind(tenant_id)
     .bind(request.name)
     .bind(request.chain_id)
     .bind(request.address_id)
@@ -477,56 +525,38 @@ pub async fn create_notification_rule(
 
 pub async fn update_notification_rule(
     pool: &PgPool,
+    tenant_id: Uuid,
     id: Uuid,
     request: CreateNotificationRuleRequest,
 ) -> AppResult<NotificationRule> {
     validate_notification_rule_request(&request)?;
-    validate_notification_rule_references(pool, &request).await?;
+    validate_notification_rule_references(pool, tenant_id, &request).await?;
     let channel_ids = request.channel_ids.unwrap_or_default();
     let enabled = request.enabled.unwrap_or(true);
 
-    sqlx::query_as::<_, NotificationRule>(
-        r#"
-        UPDATE notification_rules
-        SET name = $2,
-            chain_id = $3,
-            address_id = $4,
-            asset_id = $5,
-            event_type = $6,
-            is_transfer = $7,
-            min_amount_raw = $8,
-            direction = $9,
-            channel_ids = $10,
-            enabled = $11,
-            updated_at = NOW()
-        WHERE id = $1
-          AND tenant_id = $12
-        RETURNING id, tenant_id, name, chain_id, address_id, asset_id, event_type, is_transfer,
-                  min_amount_raw, direction, channel_ids, enabled, created_at, updated_at
-        "#,
-    )
-    .bind(id)
-    .bind(request.name)
-    .bind(request.chain_id)
-    .bind(request.address_id)
-    .bind(request.asset_id)
-    .bind(request.event_type)
-    .bind(request.is_transfer)
-    .bind(request.min_amount_raw)
-    .bind(request.direction)
-    .bind(channel_ids)
-    .bind(enabled)
-    .bind(DEFAULT_TENANT_ID)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))?
-    .ok_or_else(|| AppError::NotFound("notification rule".to_string()))
+    sqlx::query_as::<_, NotificationRule>(UPDATE_NOTIFICATION_RULE_QUERY)
+        .bind(id)
+        .bind(request.name)
+        .bind(request.chain_id)
+        .bind(request.address_id)
+        .bind(request.asset_id)
+        .bind(request.event_type)
+        .bind(request.is_transfer)
+        .bind(request.min_amount_raw)
+        .bind(request.direction)
+        .bind(channel_ids)
+        .bind(enabled)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("notification rule".to_string()))
 }
 
-pub async fn delete_notification_rule(pool: &PgPool, id: Uuid) -> AppResult<()> {
-    let result = sqlx::query("DELETE FROM notification_rules WHERE id = $1 AND tenant_id = $2")
+pub async fn delete_notification_rule(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> AppResult<()> {
+    let result = sqlx::query(DELETE_NOTIFICATION_RULE_QUERY)
         .bind(id)
-        .bind(DEFAULT_TENANT_ID)
+        .bind(tenant_id)
         .execute(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
@@ -540,44 +570,29 @@ pub async fn delete_notification_rule(pool: &PgPool, id: Uuid) -> AppResult<()> 
 
 pub async fn list_in_app_notifications(
     pool: &PgPool,
+    tenant_id: Uuid,
     query: InAppNotificationQuery,
 ) -> AppResult<Vec<InAppNotification>> {
-    sqlx::query_as::<_, InAppNotification>(
-        r#"
-        SELECT id, tenant_id, event_id, delivery_id, title, body, read_at, created_at
-        FROM in_app_notifications
-        WHERE tenant_id = $1
-          AND ($2::boolean IS NULL OR read_at IS NULL)
-        ORDER BY created_at DESC
-        LIMIT 200
-        "#,
-    )
-    .bind(DEFAULT_TENANT_ID)
-    .bind(query.unread_only.filter(|value| *value))
-    .fetch_all(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))
+    sqlx::query_as::<_, InAppNotification>(LIST_IN_APP_NOTIFICATIONS_QUERY)
+        .bind(tenant_id)
+        .bind(query.unread_only.filter(|value| *value))
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
 }
 
 pub async fn mark_in_app_notification_read(
     pool: &PgPool,
+    tenant_id: Uuid,
     id: Uuid,
 ) -> AppResult<InAppNotification> {
-    sqlx::query_as::<_, InAppNotification>(
-        r#"
-        UPDATE in_app_notifications
-        SET read_at = COALESCE(read_at, NOW())
-        WHERE id = $1
-          AND tenant_id = $2
-        RETURNING id, tenant_id, event_id, delivery_id, title, body, read_at, created_at
-        "#,
-    )
-    .bind(id)
-    .bind(DEFAULT_TENANT_ID)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))?
-    .ok_or_else(|| AppError::NotFound("in-app notification".to_string()))
+    sqlx::query_as::<_, InAppNotification>(MARK_IN_APP_NOTIFICATION_READ_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("in-app notification".to_string()))
 }
 
 pub async fn get_address_event(
@@ -891,6 +906,7 @@ pub async fn mark_external_notification_delivery_failed(
 
 pub async fn list_notification_deliveries(
     pool: &PgPool,
+    tenant_id: Uuid,
     query: NotificationDeliveryQuery,
 ) -> AppResult<Vec<NotificationDeliveryListItem>> {
     if let Some(status) = query.status.as_deref() {
@@ -901,7 +917,7 @@ pub async fn list_notification_deliveries(
     }
 
     sqlx::query_as::<_, NotificationDeliveryListItem>(LIST_NOTIFICATION_DELIVERIES_QUERY)
-        .bind(DEFAULT_TENANT_ID)
+        .bind(tenant_id)
         .bind(query.event_id)
         .bind(query.status)
         .bind(query.channel_type)
@@ -916,10 +932,11 @@ pub async fn list_notification_deliveries(
 
 pub async fn list_notification_deliveries_for_event(
     pool: &PgPool,
+    tenant_id: Uuid,
     event_id: Uuid,
 ) -> AppResult<Vec<NotificationDeliveryListItem>> {
     sqlx::query_as::<_, NotificationDeliveryListItem>(LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY)
-        .bind(DEFAULT_TENANT_ID)
+        .bind(tenant_id)
         .bind(event_id)
         .fetch_all(pool)
         .await
@@ -1058,6 +1075,7 @@ pub async fn create_sent_in_app_delivery(
 
 async fn validate_notification_rule_references(
     pool: &PgPool,
+    tenant_id: Uuid,
     request: &CreateNotificationRuleRequest,
 ) -> AppResult<()> {
     if let Some(chain_id) = request.chain_id {
@@ -1082,7 +1100,7 @@ async fn validate_notification_rule_references(
             "#,
         )
         .bind(address_id)
-        .bind(DEFAULT_TENANT_ID)
+        .bind(tenant_id)
         .fetch_optional(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
@@ -1123,7 +1141,7 @@ async fn validate_notification_rule_references(
     )?;
 
     if let Some(channel_ids) = request.channel_ids.as_deref() {
-        validate_notification_rule_channel_ids(pool, channel_ids).await?;
+        validate_notification_rule_channel_ids(pool, tenant_id, channel_ids).await?;
     }
 
     Ok(())
@@ -1131,6 +1149,7 @@ async fn validate_notification_rule_references(
 
 async fn validate_notification_rule_channel_ids(
     pool: &PgPool,
+    tenant_id: Uuid,
     channel_ids: &[Uuid],
 ) -> AppResult<()> {
     if channel_ids.is_empty() {
@@ -1147,7 +1166,7 @@ async fn validate_notification_rule_channel_ids(
           AND id = ANY($2)
         "#,
     )
-    .bind(DEFAULT_TENANT_ID)
+    .bind(tenant_id)
     .bind(&unique_channel_ids)
     .fetch_one(pool)
     .await
@@ -1170,11 +1189,13 @@ mod tests {
         validate_notification_rule_reference_consistency, validate_notification_rule_request,
         ExternalDeliveryStart, CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY,
         CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
-        INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY, LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY,
-        LIST_NOTIFICATION_DELIVERIES_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
-        MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY,
+        DELETE_NOTIFICATION_RULE_QUERY, INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
+        LIST_IN_APP_NOTIFICATIONS_QUERY, LIST_NOTIFICATION_CHANNELS_QUERY,
+        LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY, LIST_NOTIFICATION_DELIVERIES_QUERY,
+        LIST_NOTIFICATION_RULES_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
+        MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY, MARK_IN_APP_NOTIFICATION_READ_QUERY,
         SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY,
-        UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY,
+        UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY, UPDATE_NOTIFICATION_RULE_QUERY,
     };
     use coin_listener_core::{
         models::{
@@ -1393,6 +1414,22 @@ mod tests {
     }
 
     #[test]
+    fn notification_config_queries_filter_by_tenant_parameter() {
+        assert!(LIST_NOTIFICATION_CHANNELS_QUERY.contains("WHERE tenant_id = $1"));
+        assert!(LIST_NOTIFICATION_RULES_QUERY.contains("WHERE tenant_id = $1"));
+        assert!(UPDATE_NOTIFICATION_RULE_QUERY.contains("WHERE id = $1"));
+        assert!(UPDATE_NOTIFICATION_RULE_QUERY.contains("AND tenant_id = $12"));
+        assert!(DELETE_NOTIFICATION_RULE_QUERY.contains("WHERE id = $1 AND tenant_id = $2"));
+    }
+
+    #[test]
+    fn in_app_notification_queries_filter_by_tenant_parameter() {
+        assert!(LIST_IN_APP_NOTIFICATIONS_QUERY.contains("WHERE tenant_id = $1"));
+        assert!(MARK_IN_APP_NOTIFICATION_READ_QUERY.contains("WHERE id = $1"));
+        assert!(MARK_IN_APP_NOTIFICATION_READ_QUERY.contains("AND tenant_id = $2"));
+    }
+
+    #[test]
     fn delivery_ops_list_query_filters_metadata_and_orders_newest_first() {
         assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("FROM notification_deliveries"));
         assert!(LIST_NOTIFICATION_DELIVERIES_QUERY.contains("tenant_id = $1"));
@@ -1420,17 +1457,19 @@ mod tests {
     #[allow(dead_code)]
     async fn assert_list_notification_deliveries_signature(
         pool: &PgPool,
+        tenant_id: uuid::Uuid,
         query: NotificationDeliveryQuery,
     ) -> AppResult<Vec<NotificationDeliveryListItem>> {
-        super::list_notification_deliveries(pool, query).await
+        super::list_notification_deliveries(pool, tenant_id, query).await
     }
 
     #[allow(dead_code)]
     async fn assert_list_notification_deliveries_for_event_signature(
         pool: &PgPool,
+        tenant_id: uuid::Uuid,
         event_id: uuid::Uuid,
     ) -> AppResult<Vec<NotificationDeliveryListItem>> {
-        super::list_notification_deliveries_for_event(pool, event_id).await
+        super::list_notification_deliveries_for_event(pool, tenant_id, event_id).await
     }
 
     #[test]

@@ -79,6 +79,68 @@ WHERE chain_id = $1
 ORDER BY symbol, name
 "#;
 
+pub const LIST_WATCHED_ADDRESSES_QUERY: &str = r#"
+SELECT id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
+       transfer_filter_enabled, balance_change_filter_enabled, status
+FROM watched_addresses
+WHERE tenant_id = $1
+ORDER BY created_at DESC
+"#;
+
+pub const UPDATE_WATCHED_ADDRESS_QUERY: &str = r#"
+UPDATE watched_addresses
+SET chain_id = $2,
+    address = $3,
+    label = $4,
+    priority = $5,
+    scan_interval_seconds = $6,
+    transfer_filter_enabled = $7,
+    balance_change_filter_enabled = $8,
+    status = $9,
+    updated_at = NOW()
+WHERE id = $1
+  AND tenant_id = $10
+RETURNING id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
+          transfer_filter_enabled, balance_change_filter_enabled, status
+"#;
+
+pub const DELETE_WATCHED_ADDRESS_QUERY: &str =
+    "DELETE FROM watched_addresses WHERE id = $1 AND tenant_id = $2";
+
+pub const LIST_EVENTS_QUERY: &str = r#"
+SELECT id, tenant_id, chain_id, address_id, asset_id, event_type, direction, is_transfer,
+       tx_hash, log_index, block_number, block_hash, confirmations, from_address, to_address,
+       amount_raw, amount_decimal, balance_before_raw, balance_after_raw, balance_delta_raw,
+       metadata, detected_at, created_at
+FROM address_events
+WHERE tenant_id = $1
+  AND ($2::uuid IS NULL OR chain_id = $2)
+  AND ($3::uuid IS NULL OR address_id = $3)
+  AND ($4::uuid IS NULL OR asset_id = $4)
+  AND ($5::text IS NULL OR event_type = $5)
+  AND ($6::text IS NULL OR direction = $6)
+  AND ($7::boolean IS NULL OR is_transfer = $7)
+ORDER BY created_at DESC
+LIMIT 200
+"#;
+
+pub const GET_WATCHED_ADDRESS_QUERY: &str = r#"
+SELECT id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
+       transfer_filter_enabled, balance_change_filter_enabled, status
+FROM watched_addresses
+WHERE id = $1
+  AND tenant_id = $2
+"#;
+
+const NEXT_MOCK_EVENT_SEQUENCE_QUERY: &str = r#"
+SELECT COUNT(*) + 1
+FROM address_events
+WHERE tenant_id = $1
+  AND address_id = $2
+  AND asset_id = $3
+  AND metadata->>'source' = 'mock_evm_transfer'
+"#;
+
 pub const SCAN_CURSOR_QUERY: &str = r#"
 SELECT id, tenant_id, chain_id, address_id, cursor_type, last_scanned_block, updated_at
 FROM scan_cursors
@@ -303,7 +365,6 @@ SELECT COUNT(*) FILTER (WHERE status = 'pending') AS pending,
              AND next_attempt_at <= $1
        ) AS next_due_at
 FROM notification_outbox
-WHERE tenant_id = $3
 "#;
 
 pub fn validate_notification_outbox_status(status: &str) -> AppResult<()> {
@@ -557,18 +618,15 @@ pub async fn create_provider(pool: &PgPool, request: CreateProviderRequest) -> A
     .map_err(|error| AppError::Database(error.to_string()))
 }
 
-pub async fn list_watched_addresses(pool: &PgPool) -> AppResult<Vec<WatchedAddress>> {
-    sqlx::query_as::<_, WatchedAddress>(
-        r#"
-        SELECT id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
-               transfer_filter_enabled, balance_change_filter_enabled, status
-        FROM watched_addresses
-        ORDER BY created_at DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))
+pub async fn list_watched_addresses(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> AppResult<Vec<WatchedAddress>> {
+    sqlx::query_as::<_, WatchedAddress>(LIST_WATCHED_ADDRESSES_QUERY)
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
 }
 
 pub async fn create_watched_address(
@@ -606,6 +664,7 @@ pub async fn create_watched_address(
 
 pub async fn update_watched_address(
     pool: &PgPool,
+    tenant_id: Uuid,
     id: Uuid,
     request: CreateWatchedAddressRequest,
 ) -> AppResult<WatchedAddress> {
@@ -613,41 +672,27 @@ pub async fn update_watched_address(
     validate_address_for_chain(&chain, &request.address)?;
     validate_watched_address(&request)?;
 
-    sqlx::query_as::<_, WatchedAddress>(
-        r#"
-        UPDATE watched_addresses
-        SET chain_id = $2,
-            address = $3,
-            label = $4,
-            priority = $5,
-            scan_interval_seconds = $6,
-            transfer_filter_enabled = $7,
-            balance_change_filter_enabled = $8,
-            status = $9,
-            updated_at = NOW()
-        WHERE id = $1
-        RETURNING id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
-                  transfer_filter_enabled, balance_change_filter_enabled, status
-        "#,
-    )
-    .bind(id)
-    .bind(request.chain_id)
-    .bind(request.address)
-    .bind(request.label)
-    .bind(request.priority)
-    .bind(request.scan_interval_seconds)
-    .bind(request.transfer_filter_enabled)
-    .bind(request.balance_change_filter_enabled)
-    .bind(request.status)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))?
-    .ok_or_else(|| AppError::NotFound("watched address".to_string()))
+    sqlx::query_as::<_, WatchedAddress>(UPDATE_WATCHED_ADDRESS_QUERY)
+        .bind(id)
+        .bind(request.chain_id)
+        .bind(request.address)
+        .bind(request.label)
+        .bind(request.priority)
+        .bind(request.scan_interval_seconds)
+        .bind(request.transfer_filter_enabled)
+        .bind(request.balance_change_filter_enabled)
+        .bind(request.status)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("watched address".to_string()))
 }
 
-pub async fn delete_watched_address(pool: &PgPool, id: Uuid) -> AppResult<()> {
-    let result = sqlx::query("DELETE FROM watched_addresses WHERE id = $1")
+pub async fn delete_watched_address(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> AppResult<()> {
+    let result = sqlx::query(DELETE_WATCHED_ADDRESS_QUERY)
         .bind(id)
+        .bind(tenant_id)
         .execute(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
@@ -659,35 +704,22 @@ pub async fn delete_watched_address(pool: &PgPool, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn list_events(pool: &PgPool, query: EventQuery) -> AppResult<Vec<AddressEvent>> {
-    sqlx::query_as::<_, AddressEvent>(
-        r#"
-        SELECT id, tenant_id, chain_id, address_id, asset_id, event_type, direction, is_transfer,
-               tx_hash, log_index, block_number, block_hash, confirmations, from_address, to_address,
-               amount_raw, amount_decimal, balance_before_raw, balance_after_raw, balance_delta_raw,
-               metadata, detected_at, created_at
-        FROM address_events
-        WHERE tenant_id = $1
-          AND ($2::uuid IS NULL OR chain_id = $2)
-          AND ($3::uuid IS NULL OR address_id = $3)
-          AND ($4::uuid IS NULL OR asset_id = $4)
-          AND ($5::text IS NULL OR event_type = $5)
-          AND ($6::text IS NULL OR direction = $6)
-          AND ($7::boolean IS NULL OR is_transfer = $7)
-        ORDER BY created_at DESC
-        LIMIT 200
-        "#,
-    )
-    .bind(DEFAULT_TENANT_ID)
-    .bind(query.chain_id)
-    .bind(query.address_id)
-    .bind(query.asset_id)
-    .bind(query.event_type)
-    .bind(query.direction)
-    .bind(query.is_transfer)
-    .fetch_all(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))
+pub async fn list_events(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    query: EventQuery,
+) -> AppResult<Vec<AddressEvent>> {
+    sqlx::query_as::<_, AddressEvent>(LIST_EVENTS_QUERY)
+        .bind(tenant_id)
+        .bind(query.chain_id)
+        .bind(query.address_id)
+        .bind(query.asset_id)
+        .bind(query.event_type)
+        .bind(query.direction)
+        .bind(query.is_transfer)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
 }
 
 pub async fn insert_event(pool: &PgPool, draft: AddressEventDraft) -> AppResult<AddressEvent> {
@@ -897,6 +929,7 @@ pub async fn release_stale_notification_outbox(
 
 pub async fn list_notification_outbox(
     pool: &PgPool,
+    tenant_id: Uuid,
     query: NotificationOutboxQuery,
     stale_before: DateTime<Utc>,
 ) -> AppResult<Vec<NotificationOutboxListItem>> {
@@ -905,7 +938,7 @@ pub async fn list_notification_outbox(
     }
 
     sqlx::query_as::<_, NotificationOutboxListItem>(LIST_NOTIFICATION_OUTBOX_QUERY)
-        .bind(DEFAULT_TENANT_ID)
+        .bind(tenant_id)
         .bind(query.status)
         .bind(notification_ops_limit(query.limit))
         .bind(notification_ops_offset(query.offset))
@@ -918,12 +951,13 @@ pub async fn list_notification_outbox(
 
 pub async fn get_notification_outbox_detail(
     pool: &PgPool,
+    tenant_id: Uuid,
     id: Uuid,
     stale_before: DateTime<Utc>,
 ) -> AppResult<NotificationOutboxDetail> {
     let outbox =
         sqlx::query_as::<_, NotificationOutboxListItem>(GET_NOTIFICATION_OUTBOX_ITEM_QUERY)
-            .bind(DEFAULT_TENANT_ID)
+            .bind(tenant_id)
             .bind(id)
             .bind(stale_before)
             .fetch_optional(pool)
@@ -931,10 +965,13 @@ pub async fn get_notification_outbox_detail(
             .map_err(|error| AppError::Database(error.to_string()))?
             .ok_or_else(|| AppError::NotFound("notification outbox".to_string()))?;
 
-    let event =
-        crate::notifications::get_address_event(pool, outbox.event_id, outbox.tenant_id).await?;
-    let deliveries =
-        crate::notifications::list_notification_deliveries_for_event(pool, outbox.event_id).await?;
+    let event = crate::notifications::get_address_event(pool, outbox.event_id, tenant_id).await?;
+    let deliveries = crate::notifications::list_notification_deliveries_for_event(
+        pool,
+        tenant_id,
+        outbox.event_id,
+    )
+    .await?;
 
     Ok(NotificationOutboxDetail {
         outbox,
@@ -945,12 +982,13 @@ pub async fn get_notification_outbox_detail(
 
 pub async fn retry_notification_outbox(
     pool: &PgPool,
+    tenant_id: Uuid,
     id: Uuid,
     now: DateTime<Utc>,
 ) -> AppResult<NotificationOutboxItem> {
     let status = sqlx::query_scalar::<_, String>(SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY)
         .bind(id)
-        .bind(DEFAULT_TENANT_ID)
+        .bind(tenant_id)
         .fetch_optional(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
@@ -964,7 +1002,7 @@ pub async fn retry_notification_outbox(
         sqlx::query_as::<_, NotificationOutboxItem>(MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY)
             .bind(id)
             .bind(now)
-            .bind(DEFAULT_TENANT_ID)
+            .bind(tenant_id)
             .fetch_optional(pool)
             .await
             .map_err(|error| AppError::Database(error.to_string()))?
@@ -974,7 +1012,7 @@ pub async fn retry_notification_outbox(
 
     let current_status = sqlx::query_scalar::<_, String>(SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY)
         .bind(id)
-        .bind(DEFAULT_TENANT_ID)
+        .bind(tenant_id)
         .fetch_optional(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
@@ -990,14 +1028,17 @@ pub async fn notification_outbox_status_counts(
     sqlx::query_as::<_, OutboxStatusCounts>(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY)
         .bind(now)
         .bind(stale_before)
-        .bind(DEFAULT_TENANT_ID)
         .fetch_one(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
-pub async fn create_mock_evm_event(pool: &PgPool, address_id: Uuid) -> AppResult<AddressEvent> {
-    let address = get_watched_address(pool, address_id).await?;
+pub async fn create_mock_evm_event(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    address_id: Uuid,
+) -> AppResult<AddressEvent> {
+    let address = get_watched_address(pool, tenant_id, address_id).await?;
     let chain = get_chain(pool, address.chain_id).await?;
     if chain.chain_type != "evm" {
         return Err(AppError::Validation(
@@ -1005,7 +1046,7 @@ pub async fn create_mock_evm_event(pool: &PgPool, address_id: Uuid) -> AppResult
         ));
     }
     let asset = get_native_asset(pool, chain.id).await?;
-    let sequence = next_mock_event_sequence(pool, address.id, asset.id).await?;
+    let sequence = next_mock_event_sequence(pool, tenant_id, address.id, asset.id).await?;
     let draft = evm::mock_evm_transfer(&address, &asset, sequence);
     insert_event(pool, draft).await
 }
@@ -1134,39 +1175,31 @@ fn ensure_notification_outbox_updated(rows_affected: u64) -> AppResult<()> {
 
 async fn next_mock_event_sequence(
     pool: &PgPool,
+    tenant_id: Uuid,
     address_id: Uuid,
     asset_id: Uuid,
 ) -> AppResult<i64> {
-    sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*) + 1
-        FROM address_events
-        WHERE address_id = $1
-          AND asset_id = $2
-          AND metadata->>'source' = 'mock_evm_transfer'
-        "#,
-    )
-    .bind(address_id)
-    .bind(asset_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))
+    sqlx::query_scalar::<_, i64>(NEXT_MOCK_EVENT_SEQUENCE_QUERY)
+        .bind(tenant_id)
+        .bind(address_id)
+        .bind(asset_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
 }
 
-async fn get_watched_address(pool: &PgPool, id: Uuid) -> AppResult<WatchedAddress> {
-    sqlx::query_as::<_, WatchedAddress>(
-        r#"
-        SELECT id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
-               transfer_filter_enabled, balance_change_filter_enabled, status
-        FROM watched_addresses
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))?
-    .ok_or_else(|| AppError::NotFound("watched address".to_string()))
+async fn get_watched_address(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> AppResult<WatchedAddress> {
+    sqlx::query_as::<_, WatchedAddress>(GET_WATCHED_ADDRESS_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("watched address".to_string()))
 }
 
 async fn get_native_asset(pool: &PgPool, chain_id: Uuid) -> AppResult<Asset> {
@@ -1272,14 +1305,16 @@ mod tests {
         next_scan_at_from, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
         ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY,
         CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY, CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY,
-        GET_NOTIFICATION_OUTBOX_ITEM_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY,
-        INSERT_EVENT_IF_NOT_EXISTS_QUERY, INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY,
-        LATEST_BALANCE_SNAPSHOT_QUERY, LIST_NOTIFICATION_OUTBOX_QUERY,
+        DELETE_WATCHED_ADDRESS_QUERY, GET_NOTIFICATION_OUTBOX_ITEM_QUERY,
+        GET_WATCHED_ADDRESS_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
+        INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY, LATEST_BALANCE_SNAPSHOT_QUERY,
+        LIST_EVENTS_QUERY, LIST_NOTIFICATION_OUTBOX_QUERY, LIST_WATCHED_ADDRESSES_QUERY,
         MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY, MARK_CLAIMED_SCAN_ENQUEUED_QUERY,
         MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY, MARK_NOTIFICATION_OUTBOX_FAILED_QUERY,
         MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY, NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY,
         RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY, SCAN_CURSOR_QUERY,
-        SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY, UPSERT_SCAN_CURSOR_QUERY,
+        SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY, UPDATE_WATCHED_ADDRESS_QUERY,
+        UPSERT_SCAN_CURSOR_QUERY,
     };
     use chrono::{TimeZone, Utc};
     use coin_listener_core::{
@@ -1641,6 +1676,23 @@ mod tests {
     }
 
     #[test]
+    fn watched_address_queries_filter_by_tenant_parameter() {
+        assert!(LIST_WATCHED_ADDRESSES_QUERY.contains("WHERE tenant_id = $1"));
+        assert!(UPDATE_WATCHED_ADDRESS_QUERY.contains("WHERE id = $1"));
+        assert!(UPDATE_WATCHED_ADDRESS_QUERY.contains("AND tenant_id = $10"));
+        assert!(DELETE_WATCHED_ADDRESS_QUERY.contains("WHERE id = $1"));
+        assert!(DELETE_WATCHED_ADDRESS_QUERY.contains("AND tenant_id = $2"));
+        assert!(GET_WATCHED_ADDRESS_QUERY.contains("WHERE id = $1"));
+        assert!(GET_WATCHED_ADDRESS_QUERY.contains("AND tenant_id = $2"));
+    }
+
+    #[test]
+    fn list_events_query_filters_by_tenant_parameter() {
+        assert!(LIST_EVENTS_QUERY.contains("WHERE tenant_id = $1"));
+        assert!(LIST_EVENTS_QUERY.contains("$2::uuid IS NULL OR chain_id = $2"));
+    }
+
+    #[test]
     fn notification_outbox_list_query_joins_events_and_delivery_counts() {
         assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("FROM notification_outbox o"));
         assert!(LIST_NOTIFICATION_OUTBOX_QUERY.contains("LEFT JOIN address_events ae"));
@@ -1672,6 +1724,12 @@ mod tests {
     }
 
     #[test]
+    fn notification_outbox_status_counts_query_is_global_for_system_status() {
+        assert!(!NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("tenant_id"));
+        assert!(!NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("$3"));
+    }
+
+    #[test]
     fn notification_outbox_status_counts_query_counts_backlog_and_next_due() {
         assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("status = 'pending'"));
         assert!(NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY.contains("status = 'retryable'"));
@@ -1685,28 +1743,31 @@ mod tests {
     #[allow(dead_code)]
     async fn assert_list_notification_outbox_signature(
         pool: &PgPool,
+        tenant_id: uuid::Uuid,
         query: NotificationOutboxQuery,
         stale_before: chrono::DateTime<Utc>,
     ) -> AppResult<Vec<NotificationOutboxListItem>> {
-        super::list_notification_outbox(pool, query, stale_before).await
+        super::list_notification_outbox(pool, tenant_id, query, stale_before).await
     }
 
     #[allow(dead_code)]
     async fn assert_get_notification_outbox_detail_signature(
         pool: &PgPool,
+        tenant_id: uuid::Uuid,
         id: uuid::Uuid,
         stale_before: chrono::DateTime<Utc>,
     ) -> AppResult<NotificationOutboxDetail> {
-        super::get_notification_outbox_detail(pool, id, stale_before).await
+        super::get_notification_outbox_detail(pool, tenant_id, id, stale_before).await
     }
 
     #[allow(dead_code)]
     async fn assert_retry_notification_outbox_signature(
         pool: &PgPool,
+        tenant_id: uuid::Uuid,
         id: uuid::Uuid,
         now: chrono::DateTime<Utc>,
     ) -> AppResult<NotificationOutboxItem> {
-        super::retry_notification_outbox(pool, id, now).await
+        super::retry_notification_outbox(pool, tenant_id, id, now).await
     }
 
     #[allow(dead_code)]

@@ -50,12 +50,18 @@ impl AuthClaims {
 }
 
 const MIN_TOKEN_SECRET_BYTES: usize = 32;
+const PLACEHOLDER_TOKEN_SECRETS: &[&str] = &["change-me-to-a-long-random-secret"];
 
 pub fn token_settings(secret: String, ttl_seconds: i64) -> AppResult<TokenSettings> {
     let secret = secret.trim().to_string();
     if secret.is_empty() {
         return Err(AppError::Config(
             "AUTH_TOKEN_SECRET is required".to_string(),
+        ));
+    }
+    if PLACEHOLDER_TOKEN_SECRETS.contains(&secret.as_str()) {
+        return Err(AppError::Config(
+            "AUTH_TOKEN_SECRET must not use an example placeholder".to_string(),
         ));
     }
     if secret.len() < MIN_TOKEN_SECRET_BYTES {
@@ -185,6 +191,14 @@ mod tests {
     fn rejects_short_token_secret() {
         let error = super::token_settings("short-secret".to_string(), 3600)
             .expect_err("short token secret is rejected");
+
+        assert!(matches!(error, coin_listener_core::AppError::Config(_)));
+    }
+
+    #[test]
+    fn rejects_example_token_secret_placeholder() {
+        let error = super::token_settings("change-me-to-a-long-random-secret".to_string(), 3600)
+            .expect_err("example token secret placeholder is rejected");
 
         assert!(matches!(error, coin_listener_core::AppError::Config(_)));
     }
