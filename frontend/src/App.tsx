@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Layout, Nav, Space, Tag, Typography } from '@douyinfe/semi-ui';
+import { Banner, Button, Card, Layout, Nav, Notification, Space, Tag, Typography } from '@douyinfe/semi-ui';
 import { IconBell, IconPulse, IconServer, IconSetting, IconUser } from '@douyinfe/semi-icons';
 import { fetchHealth, type HealthResponse } from './api/health';
 import type { LoginResponse } from './api/types';
-import { clearSession, loadStoredSession, saveSession, setUnauthorizedHandler } from './auth/session';
+import { clearSession, getSessionGeneration, loadStoredSession, saveSession, setUnauthorizedHandler } from './auth/session';
 import { AddressesPage } from './pages/AddressesPage';
 import { AssetsPage } from './pages/AssetsPage';
 import { ChainsPage } from './pages/ChainsPage';
@@ -15,6 +15,7 @@ import { NotificationOperationsPage } from './pages/NotificationOperationsPage';
 import { NotificationRulesPage } from './pages/NotificationRulesPage';
 import { ProvidersPage } from './pages/ProvidersPage';
 import { SystemStatusPage } from './pages/SystemStatusPage';
+import { connectRealtimeNotifications } from './realtime/notifications';
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -35,17 +36,42 @@ export function App() {
   const queryClient = useQueryClient();
   const [session, setSession] = useState<LoginResponse | null>(() => loadStoredSession());
   const [page, setPage] = useState<PageKey>('dashboard');
+  const [realtimeUnreadCount, setRealtimeUnreadCount] = useState(0);
 
   const resetAuthenticatedState = useCallback(() => {
     queryClient.clear();
     setPage('dashboard');
     setSession(null);
+    setRealtimeUnreadCount(0);
   }, [queryClient]);
 
   useEffect(() => {
     setUnauthorizedHandler(resetAuthenticatedState);
     return () => setUnauthorizedHandler(null);
   }, [resetAuthenticatedState]);
+
+  useEffect(() => {
+    if (!session) return undefined;
+
+    const generation = getSessionGeneration();
+    return connectRealtimeNotifications(
+      session,
+      {
+        onNotification: notification => {
+          setRealtimeUnreadCount(count => count + 1);
+          Notification.info({
+            title: notification.title,
+            content: notification.body,
+          });
+          queryClient.invalidateQueries({ queryKey: ['in-app-notifications'] });
+          queryClient.invalidateQueries({ queryKey: ['events'] });
+          queryClient.invalidateQueries({ queryKey: ['system-status'] });
+        },
+        onUnauthorized: resetAuthenticatedState,
+      },
+      { generation, getGeneration: getSessionGeneration },
+    );
+  }, [queryClient, resetAuthenticatedState, session]);
 
   const healthQuery = useQuery({
     queryKey: ['health'],
@@ -84,7 +110,11 @@ export function App() {
             { itemKey: 'events', text: '事件中心', icon: <IconBell /> },
             { itemKey: 'notification-rules', text: '通知规则', icon: <IconBell /> },
             { itemKey: 'notification-operations', text: '通知运维', icon: <IconBell /> },
-            { itemKey: 'in-app-notifications', text: '站内通知', icon: <IconBell /> },
+            {
+              itemKey: 'in-app-notifications',
+              text: realtimeUnreadCount > 0 ? `站内通知 (${realtimeUnreadCount})` : '站内通知',
+              icon: <IconBell />,
+            },
           ]}
         />
       </Sider>
@@ -96,13 +126,17 @@ export function App() {
             <Button onClick={handleLogout}>退出登录</Button>
           </Space>
         </Header>
-        <Content className="app-content">{renderPage(page, healthQuery)}</Content>
+        <Content className="app-content">{renderPage(page, healthQuery, setRealtimeUnreadCount)}</Content>
       </Layout>
     </Layout>
   );
 }
 
-function renderPage(page: PageKey, healthQuery: ReturnType<typeof useQuery<HealthResponse>>) {
+function renderPage(
+  page: PageKey,
+  healthQuery: ReturnType<typeof useQuery<HealthResponse>>,
+  setRealtimeUnreadCount: (count: number) => void,
+) {
   if (page === 'system-status') return <SystemStatusPage />;
   if (page === 'chains') return <ChainsPage />;
   if (page === 'assets') return <AssetsPage />;
@@ -111,7 +145,9 @@ function renderPage(page: PageKey, healthQuery: ReturnType<typeof useQuery<Healt
   if (page === 'events') return <EventsPage />;
   if (page === 'notification-rules') return <NotificationRulesPage />;
   if (page === 'notification-operations') return <NotificationOperationsPage />;
-  if (page === 'in-app-notifications') return <InAppNotificationsPage />;
+  if (page === 'in-app-notifications') {
+    return <InAppNotificationsPage onUnreadSettled={setRealtimeUnreadCount} />;
+  }
 
   return (
     <Space vertical align="start" spacing={24} className="content-stack">

@@ -1,10 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Banner, Button, Card, Space, Switch, Table, Tag, Toast } from '@douyinfe/semi-ui';
 import { listInAppNotifications, markInAppNotificationRead } from '../api/client';
 import type { InAppNotification } from '../api/types';
 
-export function InAppNotificationsPage() {
+type InAppNotificationsPageProps = {
+  onUnreadSettled?: (count: number) => void;
+};
+
+export function InAppNotificationsPage({ onUnreadSettled }: InAppNotificationsPageProps) {
   const [unreadOnly, setUnreadOnly] = useState(false);
   const queryClient = useQueryClient();
 
@@ -12,6 +16,11 @@ export function InAppNotificationsPage() {
     queryKey: ['in-app-notifications', unreadOnly],
     queryFn: () => listInAppNotifications({ unread_only: unreadOnly || undefined }),
   });
+
+  useEffect(() => {
+    if (!notificationsQuery.data) return;
+    onUnreadSettled?.(notificationsQuery.data.filter(notification => !notification.read_at).length);
+  }, [notificationsQuery.data, onUnreadSettled]);
 
   const markReadMutation = useMutation({
     mutationFn: markInAppNotificationRead,

@@ -117,6 +117,10 @@ export function getAuthRequestContext(): AuthRequestContext {
   return { token, generation: sessionGeneration };
 }
 
+export function getSessionGeneration(): number {
+  return sessionGeneration;
+}
+
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
 }
