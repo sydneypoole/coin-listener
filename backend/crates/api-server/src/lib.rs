@@ -1,4 +1,4 @@
-pub mod routes;
+mod routes;
 
 pub use routes::{build_router, ApiState, HealthResponse};
 
@@ -8,7 +8,6 @@ mod tests {
 
     #[test]
     fn exposes_api_router_for_reuse() {
-        let _router_builder: fn(Arc<crate::routes::ApiState>) -> axum::Router =
-            crate::routes::build_router;
+        let _router_builder: fn(Arc<crate::ApiState>) -> axum::Router = crate::build_router;
     }
 }
