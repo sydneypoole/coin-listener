@@ -189,6 +189,7 @@ pub struct SystemStatus {
     pub events: EventStatus,
     pub notifications: NotificationStatus,
     pub providers: ProviderStatus,
+    pub services: ServiceHealthStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +233,25 @@ pub struct OutboxStatusCounts {
     pub failed: i64,
     pub stale_processing: i64,
     pub next_due_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceHeartbeatStatusItem {
+    pub service_name: String,
+    pub instance_id: String,
+    pub status: String,
+    pub started_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub stale_after_seconds: i64,
+    pub is_stale: bool,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceHealthStatus {
+    pub online: i64,
+    pub stale: i64,
+    pub items: Vec<ServiceHeartbeatStatusItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,10 +557,36 @@ mod tests {
         NotificationOutboxListResponse, NotificationOutboxQuery, NotificationStatus,
         NotifyEventTask, OutboxStatusCounts, ProviderChainStatus, ProviderStatus,
         ProviderStatusItem, QueueStatus, RetryNotificationOutboxResponse, ScanAddressTask,
-        ScanCursor, ScanStatus, SystemStatus,
+        ScanCursor, ScanStatus, ServiceHeartbeatStatusItem, ServiceHealthStatus, SystemStatus,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
+
+    #[test]
+    fn service_health_status_round_trips_as_json() {
+        let status = ServiceHealthStatus {
+            online: 1,
+            stale: 1,
+            items: vec![ServiceHeartbeatStatusItem {
+                service_name: "worker".to_string(),
+                instance_id: "instance-1".to_string(),
+                status: "online".to_string(),
+                started_at: Utc.with_ymd_and_hms(2026, 5, 19, 10, 0, 0).unwrap(),
+                last_seen_at: Utc.with_ymd_and_hms(2026, 5, 19, 10, 1, 0).unwrap(),
+                stale_after_seconds: 90,
+                is_stale: false,
+                metadata: serde_json::json!({ "pid": 1234, "version": "0.1.0" }),
+            }],
+        };
+
+        let payload = serde_json::to_string(&status).expect("serialize service health");
+        let decoded: ServiceHealthStatus =
+            serde_json::from_str(&payload).expect("deserialize service health");
+
+        assert_eq!(decoded, status);
+        assert!(payload.contains("\"service_name\":\"worker\""));
+        assert!(payload.contains("\"stale_after_seconds\":90"));
+    }
 
     #[test]
     fn system_status_round_trips_as_json() {
@@ -600,6 +646,20 @@ mod tests {
                     status: "active".to_string(),
                 }],
             },
+            services: ServiceHealthStatus {
+                online: 1,
+                stale: 0,
+                items: vec![ServiceHeartbeatStatusItem {
+                    service_name: "api-server".to_string(),
+                    instance_id: "api-1".to_string(),
+                    status: "online".to_string(),
+                    started_at: Utc.with_ymd_and_hms(2026, 5, 17, 10, 0, 0).unwrap(),
+                    last_seen_at: Utc.with_ymd_and_hms(2026, 5, 17, 10, 0, 30).unwrap(),
+                    stale_after_seconds: 90,
+                    is_stale: false,
+                    metadata: serde_json::json!({ "pid": 100, "version": "0.1.0" }),
+                }],
+            },
         };
 
         let payload = serde_json::to_string(&status).expect("serialize system status");
@@ -609,6 +669,7 @@ mod tests {
         assert_eq!(decoded, status);
         assert!(payload.contains("\"scan_queue_depth\":3"));
         assert!(payload.contains("\"unread_in_app\":4"));
+        assert!(payload.contains("\"services\""));
     }
 
     #[test]
