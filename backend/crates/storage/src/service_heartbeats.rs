@@ -51,7 +51,10 @@ pub struct ServiceHeartbeatRow {
 }
 
 pub fn validate_service_heartbeat(service_name: &str, instance_id: &str) -> AppResult<()> {
-    if !matches!(service_name, "api-server" | "scheduler" | "worker" | "notifier") {
+    if !matches!(
+        service_name,
+        "api-server" | "scheduler" | "worker" | "notifier"
+    ) {
         return Err(AppError::Validation("unknown service_name".to_string()));
     }
     if instance_id.trim().is_empty() {
@@ -129,8 +132,12 @@ pub async fn run_service_heartbeat(
 ) {
     loop {
         match write_service_heartbeat_tick(&pool, service_name, &instance_id, started_at).await {
-            Ok(_) => info!(service = service_name, instance_id = %instance_id, "service heartbeat written"),
-            Err(error) => error!(service = service_name, instance_id = %instance_id, error = %error, "service heartbeat write failed"),
+            Ok(_) => {
+                info!(service = service_name, instance_id = %instance_id, "service heartbeat written")
+            }
+            Err(error) => {
+                error!(service = service_name, instance_id = %instance_id, error = %error, "service heartbeat write failed")
+            }
         }
 
         if shutdown.load(Ordering::Relaxed) {
@@ -144,7 +151,10 @@ pub async fn run_service_heartbeat(
     }
 }
 
-pub async fn system_service_health(pool: &PgPool, now: DateTime<Utc>) -> AppResult<ServiceHealthStatus> {
+pub async fn system_service_health(
+    pool: &PgPool,
+    now: DateTime<Utc>,
+) -> AppResult<ServiceHealthStatus> {
     let rows = list_service_heartbeats(pool).await?;
     let mut online = 0;
     let mut stale = 0;
@@ -170,7 +180,11 @@ pub async fn system_service_health(pool: &PgPool, now: DateTime<Utc>) -> AppResu
         })
         .collect();
 
-    Ok(ServiceHealthStatus { online, stale, items })
+    Ok(ServiceHealthStatus {
+        online,
+        stale,
+        items,
+    })
 }
 
 #[cfg(test)]
@@ -240,7 +254,10 @@ mod tests {
         let metadata = heartbeat_metadata();
 
         assert!(metadata.get("pid").is_some());
-        assert_eq!(metadata.get("version").and_then(|value| value.as_str()), Some("0.1.0"));
+        assert_eq!(
+            metadata.get("version").and_then(|value| value.as_str()),
+            Some("0.1.0")
+        );
         assert!(metadata.get("database_url").is_none());
         assert!(metadata.get("token").is_none());
     }

@@ -557,7 +557,7 @@ mod tests {
         NotificationOutboxListResponse, NotificationOutboxQuery, NotificationStatus,
         NotifyEventTask, OutboxStatusCounts, ProviderChainStatus, ProviderStatus,
         ProviderStatusItem, QueueStatus, RetryNotificationOutboxResponse, ScanAddressTask,
-        ScanCursor, ScanStatus, ServiceHeartbeatStatusItem, ServiceHealthStatus, SystemStatus,
+        ScanCursor, ScanStatus, ServiceHealthStatus, ServiceHeartbeatStatusItem, SystemStatus,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;

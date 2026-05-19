@@ -112,7 +112,9 @@ async fn system_status_handler(State(state): State<Arc<ApiState>>) -> Result<Res
     let notifications = system_status::system_notification_status(&state.postgres).await?;
     let providers = system_status::system_provider_status(&state.postgres).await?;
     let now = Utc::now();
-    let services = coin_listener_storage::service_heartbeats::system_service_health(&state.postgres, now).await?;
+    let services =
+        coin_listener_storage::service_heartbeats::system_service_health(&state.postgres, now)
+            .await?;
 
     Ok(Json(SystemStatus {
         generated_at: now,
