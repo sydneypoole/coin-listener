@@ -26,7 +26,14 @@ import type {
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '';
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+export class ApiRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+  }
+}
+
+export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const isLoginRequest = path === '/api/auth/login';
   const headers = new Headers(options.headers);
   headers.set('Content-Type', 'application/json');
@@ -46,7 +53,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       handleUnauthorized(authContext);
     }
     const body = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(body.error ?? response.statusText);
+    throw new ApiRequestError(body.error ?? response.statusText, response.status);
   }
 
   if (response.status === 204) {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Banner, Button, Card, Layout, Nav, Notification, Space, Tag, Typography } from '@douyinfe/semi-ui';
 import { IconBell, IconPulse, IconServer, IconSetting, IconUser } from '@douyinfe/semi-icons';
+import { request } from './api/client';
 import { fetchHealth, type HealthResponse } from './api/health';
 import type { LoginResponse } from './api/types';
 import { clearSession, getSessionGeneration, loadStoredSession, saveSession, setUnauthorizedHandler } from './auth/session';
@@ -74,7 +75,11 @@ export function App() {
         },
         onUnauthorized: handleRealtimeUnauthorized,
       },
-      { generation, getGeneration: getSessionGeneration },
+      {
+        generation,
+        getGeneration: getSessionGeneration,
+        verifyAuth: () => request('/api/system/status'),
+      },
     );
   }, [handleRealtimeUnauthorized, queryClient, session]);
 

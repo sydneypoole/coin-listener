@@ -1,4 +1,4 @@
-use api_server::{auth, build_router, realtime, ApiState};
+use api_server::{auth, build_router, make_http_trace_layer, realtime, ApiState};
 use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
@@ -10,7 +10,7 @@ use std::sync::{
     Arc,
 };
 use tokio::{net::TcpListener, signal};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     });
     let app = build_router(state)
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
+        .layer(make_http_trace_layer());
 
     let listener = TcpListener::bind(config.server_addr()).await?;
     info!(address = %listener.local_addr()?, "api server listening");

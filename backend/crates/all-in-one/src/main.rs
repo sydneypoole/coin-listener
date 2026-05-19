@@ -2,7 +2,7 @@ use all_in_one::{
     build_all_in_one_router, frontend_dist_path_from_env, service_task_result,
     ALL_IN_ONE_SERVICE_NAMES,
 };
-use api_server::{auth, build_router, realtime, ApiState};
+use api_server::{auth, build_router, make_http_trace_layer, realtime, ApiState};
 use chrono::Utc;
 use coin_listener_core::AppConfig;
 use coin_listener_storage::{
@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 use tokio::{net::TcpListener, signal, task::JoinHandle, time};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     });
     let api_router = build_router(api_state)
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
+        .layer(make_http_trace_layer());
     let app = build_all_in_one_router(api_router, frontend_dist_path_from_env());
 
     let scheduler_redis = connect_scan_queue(&redis_client).await?;

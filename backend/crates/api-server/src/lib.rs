@@ -1,8 +1,10 @@
 pub mod auth;
 pub mod realtime;
 mod routes;
+mod trace;
 
 pub use routes::{build_router, ApiError, ApiState, HealthResponse};
+pub use trace::make_http_trace_layer;
 
 #[cfg(test)]
 mod tests {

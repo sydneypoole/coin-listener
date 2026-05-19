@@ -1,3 +1,4 @@
+import { ApiRequestError } from '../api/client';
 import type { InAppNotification, LoginResponse, RealtimeServerMessage } from '../api/types';
 
 const REALTIME_PATH = '/api/realtime/notifications';
@@ -60,15 +61,22 @@ export function reconnectDelayMs(attempt: number): number {
   return Math.min(1000 * 2 ** Math.max(0, attempt), MAX_RECONNECT_DELAY_MS);
 }
 
+export function isHttpUnauthorized(error: unknown): boolean {
+  return error instanceof ApiRequestError && (error.status === 401 || error.status === 403);
+}
+
 export type RealtimeNotificationHandlers = {
   onNotification: (notification: InAppNotification) => void;
   onUnauthorized?: () => void;
 };
 
+type AuthProbe = () => Promise<unknown>;
+
 export type RealtimeConnectOptions = {
   apiBaseUrl?: string;
   getGeneration?: () => number;
   generation?: number;
+  verifyAuth?: AuthProbe;
 };
 
 export function connectRealtimeNotifications(
@@ -78,6 +86,7 @@ export function connectRealtimeNotifications(
 ): () => void {
   let stopped = false;
   let attempt = 0;
+  let opened = false;
   let socket: WebSocket | null = null;
   let reconnectTimer: number | null = null;
   const apiBaseUrl = options.apiBaseUrl ?? import.meta.env.VITE_API_BASE_URL ?? '';
@@ -95,6 +104,35 @@ export function connectRealtimeNotifications(
     }
   };
 
+  const scheduleReconnect = () => {
+    opened = false;
+    const delay = reconnectDelayMs(attempt);
+    attempt += 1;
+    cleanupTimer();
+    reconnectTimer = window.setTimeout(connect, delay);
+  };
+
+  const probeUnauthorized = () => {
+    if (!options.verifyAuth) return false;
+    if (stopped || isStale()) return true;
+
+    options.verifyAuth().then(
+      () => {
+        if (!stopped && !isStale()) scheduleReconnect();
+      },
+      error => {
+        if (stopped || isStale()) return;
+        if (isHttpUnauthorized(error)) {
+          handlers.onUnauthorized?.();
+          return;
+        }
+        scheduleReconnect();
+      },
+    );
+
+    return true;
+  };
+
   const connect = () => {
     if (stopped || isStale()) return;
     socket = new WebSocket(realtimeWebSocketUrl(apiBaseUrl, session.token));
@@ -104,6 +142,7 @@ export function connectRealtimeNotifications(
         socket?.close();
         return;
       }
+      opened = true;
       attempt = 0;
     };
 
@@ -121,10 +160,8 @@ export function connectRealtimeNotifications(
         handlers.onUnauthorized?.();
         return;
       }
-      const delay = reconnectDelayMs(attempt);
-      attempt += 1;
-      cleanupTimer();
-      reconnectTimer = window.setTimeout(connect, delay);
+      if (!opened && probeUnauthorized()) return;
+      scheduleReconnect();
     };
 
     socket.onerror = () => {
