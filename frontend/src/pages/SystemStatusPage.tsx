@@ -17,6 +17,21 @@ function statusColor(status: string): 'green' | 'grey' {
   return status === 'active' ? 'green' : 'grey';
 }
 
+function circuitStatusColor(isOpen: boolean): 'red' | 'green' {
+  return isOpen ? 'red' : 'green';
+}
+
+function circuitStatusText(isOpen: boolean) {
+  return isOpen ? 'circuit-open' : 'healthy';
+}
+
+function truncateError(value?: string | null) {
+  if (!value) {
+    return '-';
+  }
+  return value.length > 80 ? `${value.slice(0, 80)}…` : value;
+}
+
 function serviceStatusColor(item: ServiceHeartbeatStatusItem): 'green' | 'red' {
   return item.is_stale ? 'red' : 'green';
 }
@@ -157,12 +172,57 @@ export function SystemStatusPage() {
           dataSource={status?.providers.items ?? []}
           rowKey="id"
           pagination={{ pageSize: 10 }}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1500 }}
           columns={[
             { title: '链', dataIndex: 'chain_name', width: 140 },
             { title: '名称', dataIndex: 'name', width: 160 },
             { title: '类型', dataIndex: 'provider_type', width: 120 },
-            { title: '状态', dataIndex: 'status', width: 100, render: value => <Tag color={statusColor(String(value))}>{String(value)}</Tag> },
+            {
+              title: '配置状态',
+              dataIndex: 'status',
+              width: 110,
+              render: value => <Tag color={statusColor(String(value))}>{String(value)}</Tag>,
+            },
+            {
+              title: '运行状态',
+              dataIndex: 'health',
+              width: 130,
+              render: (_value, record) => {
+                const item = record as ProviderStatusItem;
+                return <Tag color={circuitStatusColor(item.health.is_circuit_open)}>{circuitStatusText(item.health.is_circuit_open)}</Tag>;
+              },
+            },
+            {
+              title: '连续失败',
+              dataIndex: 'health',
+              width: 110,
+              render: (_value, record) => String((record as ProviderStatusItem).health.consecutive_failures),
+            },
+            {
+              title: '最后成功',
+              dataIndex: 'health',
+              width: 190,
+              render: (_value, record) => formatTime((record as ProviderStatusItem).health.last_success_at),
+            },
+            {
+              title: '最后失败',
+              dataIndex: 'health',
+              width: 190,
+              render: (_value, record) => formatTime((record as ProviderStatusItem).health.last_failure_at),
+            },
+            {
+              title: '禁用至',
+              dataIndex: 'health',
+              width: 190,
+              render: (_value, record) => formatTime((record as ProviderStatusItem).health.disabled_until),
+            },
+            {
+              title: '最后错误',
+              dataIndex: 'health',
+              width: 260,
+              ellipsis: { showTitle: true },
+              render: (_value, record) => truncateError((record as ProviderStatusItem).health.last_error),
+            },
             { title: '优先级', dataIndex: 'priority', width: 100 },
             { title: 'QPS', dataIndex: 'qps_limit', width: 100 },
             { title: '超时(ms)', dataIndex: 'timeout_ms', width: 120 },

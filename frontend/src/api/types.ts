@@ -295,6 +295,15 @@ export type ProviderChainStatus = {
   inactive: number;
 };
 
+export type ProviderHealthStatus = {
+  consecutive_failures: number;
+  last_success_at?: string | null;
+  last_failure_at?: string | null;
+  disabled_until?: string | null;
+  last_error?: string | null;
+  is_circuit_open: boolean;
+};
+
 export type ProviderStatusItem = {
   id: string;
   chain_id: string;
@@ -306,6 +315,7 @@ export type ProviderStatusItem = {
   qps_limit: number;
   timeout_ms: number;
   status: string;
+  health: ProviderHealthStatus;
 };
 
 export type ProviderStatus = {
