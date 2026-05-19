@@ -255,6 +255,16 @@ pub struct ServiceHealthStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderHealthStatus {
+    pub consecutive_failures: i32,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_failure_at: Option<DateTime<Utc>>,
+    pub disabled_until: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub is_circuit_open: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderStatus {
     pub active: i64,
     pub inactive: i64,
@@ -282,6 +292,7 @@ pub struct ProviderStatusItem {
     pub qps_limit: i32,
     pub timeout_ms: i32,
     pub status: String,
+    pub health: ProviderHealthStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,12 +566,33 @@ mod tests {
         NotificationDeliveryListItem, NotificationDeliveryListResponse, NotificationDeliveryQuery,
         NotificationOutboxDetail, NotificationOutboxItem, NotificationOutboxListItem,
         NotificationOutboxListResponse, NotificationOutboxQuery, NotificationStatus,
-        NotifyEventTask, OutboxStatusCounts, ProviderChainStatus, ProviderStatus,
-        ProviderStatusItem, QueueStatus, RetryNotificationOutboxResponse, ScanAddressTask,
-        ScanCursor, ScanStatus, ServiceHealthStatus, ServiceHeartbeatStatusItem, SystemStatus,
+        NotifyEventTask, OutboxStatusCounts, ProviderChainStatus, ProviderHealthStatus,
+        ProviderStatus, ProviderStatusItem, QueueStatus, RetryNotificationOutboxResponse,
+        ScanAddressTask, ScanCursor, ScanStatus, ServiceHealthStatus, ServiceHeartbeatStatusItem,
+        SystemStatus,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
+
+    #[test]
+    fn provider_health_status_round_trips_as_json() {
+        let health = ProviderHealthStatus {
+            consecutive_failures: 3,
+            last_success_at: Some(Utc.with_ymd_and_hms(2026, 5, 19, 10, 0, 0).unwrap()),
+            last_failure_at: Some(Utc.with_ymd_and_hms(2026, 5, 19, 10, 4, 0).unwrap()),
+            disabled_until: Some(Utc.with_ymd_and_hms(2026, 5, 19, 10, 9, 0).unwrap()),
+            last_error: Some("provider request failed: timeout".to_string()),
+            is_circuit_open: true,
+        };
+
+        let payload = serde_json::to_string(&health).expect("serialize provider health");
+        let decoded: ProviderHealthStatus =
+            serde_json::from_str(&payload).expect("deserialize provider health");
+
+        assert_eq!(decoded, health);
+        assert!(payload.contains("\"consecutive_failures\":3"));
+        assert!(payload.contains("\"is_circuit_open\":true"));
+    }
 
     #[test]
     fn service_health_status_round_trips_as_json() {
@@ -644,6 +676,14 @@ mod tests {
                     qps_limit: 10,
                     timeout_ms: 5000,
                     status: "active".to_string(),
+                    health: ProviderHealthStatus {
+                        consecutive_failures: 0,
+                        last_success_at: None,
+                        last_failure_at: None,
+                        disabled_until: None,
+                        last_error: None,
+                        is_circuit_open: false,
+                    },
                 }],
             },
             services: ServiceHealthStatus {
@@ -670,6 +710,7 @@ mod tests {
         assert!(payload.contains("\"scan_queue_depth\":3"));
         assert!(payload.contains("\"unread_in_app\":4"));
         assert!(payload.contains("\"services\""));
+        assert!(payload.contains("\"health\""));
     }
 
     #[test]
