@@ -517,15 +517,13 @@ mod tests {
                     .method(Method::POST)
                     .uri("/api/auth/login")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"email":"missing@example.com","password":"wrong"}"#,
-                    ))
+                    .body(Body::from(r#"{"email":"missing@example.com"}"#))
                     .expect("valid request"),
             )
             .await
             .expect("router response");
 
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
