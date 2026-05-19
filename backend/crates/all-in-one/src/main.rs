@@ -18,7 +18,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{net::TcpListener, signal, time};
+use tokio::{net::TcpListener, signal, task::JoinHandle, time};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -33,14 +33,15 @@ async fn main() -> anyhow::Result<()> {
     let redis_client = connect_redis(&config.redis)?;
     let shutdown = Arc::new(AtomicBool::new(false));
 
+    let mut heartbeat_handles = Vec::new();
     for service_name in ALL_IN_ONE_SERVICE_NAMES {
-        tokio::spawn(run_service_heartbeat(
+        heartbeat_handles.push(tokio::spawn(run_service_heartbeat(
             postgres.clone(),
             service_name,
             service_heartbeat_instance_id(),
             Utc::now(),
             Arc::clone(&shutdown),
-        ));
+        )));
     }
 
     let api_state = Arc::new(ApiState {
@@ -58,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let scheduler_redis = connect_scan_queue(&redis_client).await?;
     let scheduler_queue =
         ScanQueue::new(config.scan.queue_key.clone(), config.scan.lock_ttl_seconds);
-    let scheduler_handle = tokio::spawn(scheduler::run_scheduler(
+    let mut scheduler_handle = tokio::spawn(scheduler::run_scheduler(
         postgres.clone(),
         scheduler_redis,
         scheduler_queue,
@@ -69,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
 
     let worker_redis = connect_scan_queue(&redis_client).await?;
     let worker_queue = ScanQueue::new(config.scan.queue_key.clone(), config.scan.lock_ttl_seconds);
-    let worker_handle = tokio::spawn(worker::run_worker(
+    let mut worker_handle = tokio::spawn(worker::run_worker(
         postgres.clone(),
         worker_redis,
         worker_queue,
@@ -78,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     let dispatcher_config = NotificationOutboxDispatcherConfig::from_notify_config(&config.notify);
     let external_sender = ExternalNotificationSender::new(reqwest::Client::new());
-    let notifier_handle = tokio::spawn(notifier::run_notifier(
+    let mut notifier_handle = tokio::spawn(notifier::run_notifier(
         postgres.clone(),
         dispatcher_config,
         external_sender,
@@ -92,32 +93,70 @@ async fn main() -> anyhow::Result<()> {
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         wait_for_shutdown(server_shutdown).await;
     });
+    let mut server_handle = tokio::spawn(async move {
+        server.await?;
+        Ok::<(), anyhow::Error>(())
+    });
 
-    tokio::select! {
+    let event = tokio::select! {
         result = signal::ctrl_c() => {
             result?;
-            shutdown.store(true, Ordering::Relaxed);
             info!("all-in-one shutdown requested");
+            RuntimeEvent::Shutdown
+        }
+        result = &mut server_handle => RuntimeEvent::Server(server_task_result(result)),
+        result = &mut scheduler_handle => RuntimeEvent::Scheduler(log_service_result("scheduler", service_task_result("scheduler", result))),
+        result = &mut worker_handle => RuntimeEvent::Worker(log_service_result("worker", service_task_result("worker", result))),
+        result = &mut notifier_handle => RuntimeEvent::Notifier(log_service_result("notifier", service_task_result("notifier", result))),
+    };
+
+    shutdown.store(true, Ordering::Relaxed);
+    match event {
+        RuntimeEvent::Shutdown => {
+            wait_for_server_shutdown(server_handle).await?;
+            wait_for_service_shutdown("scheduler", scheduler_handle).await?;
+            wait_for_service_shutdown("worker", worker_handle).await?;
+            wait_for_service_shutdown("notifier", notifier_handle).await?;
+            wait_for_heartbeat_shutdown(heartbeat_handles).await;
             Ok(())
         }
-        result = server => {
-            shutdown.store(true, Ordering::Relaxed);
-            result?;
-            Ok(())
+        RuntimeEvent::Server(result) => {
+            wait_for_service_shutdown("scheduler", scheduler_handle).await?;
+            wait_for_service_shutdown("worker", worker_handle).await?;
+            wait_for_service_shutdown("notifier", notifier_handle).await?;
+            wait_for_heartbeat_shutdown(heartbeat_handles).await;
+            result
         }
-        result = scheduler_handle => {
-            shutdown.store(true, Ordering::Relaxed);
-            log_service_result("scheduler", service_task_result("scheduler", result))
+        RuntimeEvent::Scheduler(result) => {
+            wait_for_server_shutdown(server_handle).await?;
+            wait_for_service_shutdown("worker", worker_handle).await?;
+            wait_for_service_shutdown("notifier", notifier_handle).await?;
+            wait_for_heartbeat_shutdown(heartbeat_handles).await;
+            result
         }
-        result = worker_handle => {
-            shutdown.store(true, Ordering::Relaxed);
-            log_service_result("worker", service_task_result("worker", result))
+        RuntimeEvent::Worker(result) => {
+            wait_for_server_shutdown(server_handle).await?;
+            wait_for_service_shutdown("scheduler", scheduler_handle).await?;
+            wait_for_service_shutdown("notifier", notifier_handle).await?;
+            wait_for_heartbeat_shutdown(heartbeat_handles).await;
+            result
         }
-        result = notifier_handle => {
-            shutdown.store(true, Ordering::Relaxed);
-            log_service_result("notifier", service_task_result("notifier", result))
+        RuntimeEvent::Notifier(result) => {
+            wait_for_server_shutdown(server_handle).await?;
+            wait_for_service_shutdown("scheduler", scheduler_handle).await?;
+            wait_for_service_shutdown("worker", worker_handle).await?;
+            wait_for_heartbeat_shutdown(heartbeat_handles).await;
+            result
         }
     }
+}
+
+enum RuntimeEvent {
+    Shutdown,
+    Server(anyhow::Result<()>),
+    Scheduler(anyhow::Result<()>),
+    Worker(anyhow::Result<()>),
+    Notifier(anyhow::Result<()>),
 }
 
 fn init_tracing() {
@@ -130,6 +169,40 @@ fn init_tracing() {
 async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
     while !shutdown.load(Ordering::Relaxed) {
         time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn server_task_result(
+    result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(anyhow::anyhow!("server failed: {error}")),
+        Err(error) => Err(anyhow::anyhow!("server task failed: {error}")),
+    }
+}
+
+async fn wait_for_server_shutdown(handle: JoinHandle<anyhow::Result<()>>) -> anyhow::Result<()> {
+    match handle.await {
+        Ok(result) => result,
+        Err(error) => Err(anyhow::anyhow!(
+            "server task failed during shutdown: {error}"
+        )),
+    }
+}
+
+async fn wait_for_service_shutdown(
+    service: &'static str,
+    handle: JoinHandle<coin_listener_core::AppResult<()>>,
+) -> anyhow::Result<()> {
+    log_service_result(service, service_task_result(service, handle.await))
+}
+
+async fn wait_for_heartbeat_shutdown(handles: Vec<JoinHandle<()>>) {
+    for handle in handles {
+        if let Err(error) = handle.await {
+            error!(error = %error, "service heartbeat task failed during shutdown");
+        }
     }
 }
 
@@ -154,5 +227,8 @@ mod tests {
         assert!(source.contains("service_task_result(\"scheduler\""));
         assert!(source.contains("service_task_result(\"worker\""));
         assert!(source.contains("service_task_result(\"notifier\""));
+        assert!(source.contains("wait_for_server_shutdown("));
+        assert!(source.contains("wait_for_service_shutdown(\"scheduler\""));
+        assert!(source.contains("wait_for_heartbeat_shutdown("));
     }
 }
