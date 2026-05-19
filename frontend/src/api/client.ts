@@ -1,3 +1,4 @@
+import { getAuthToken, handleUnauthorized } from '../auth/session';
 import type {
   AddressEvent,
   Asset,
@@ -26,15 +27,26 @@ import type {
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '';
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const isLoginRequest = path === '/api/auth/login';
+  const headers = new Headers(options.headers);
+  headers.set('Content-Type', 'application/json');
+
+  if (!isLoginRequest) {
+    const token = getAuthToken();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+  }
+
   const response = await fetch(`${apiBaseUrl}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
     ...options,
+    headers,
   });
 
   if (!response.ok) {
+    if (!isLoginRequest && response.status === 401) {
+      handleUnauthorized();
+    }
     const body = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(body.error ?? response.statusText);
   }
