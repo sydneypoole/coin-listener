@@ -7,6 +7,7 @@ members = [
     "crates/worker",
     "crates/notifier",
     "crates/chain-providers",
+    "crates/all-in-one",
 ]
 resolver = "2"
 
@@ -28,7 +29,7 @@ serde_json = "1"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
