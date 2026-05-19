@@ -230,6 +230,25 @@ pub fn provider_timeout_duration(provider: &Provider) -> AppResult<Duration> {
     Ok(Duration::from_millis(timeout_ms))
 }
 
+pub fn ensure_provider_matches_context(
+    provider: &Provider,
+    context: &ScanAddressContext,
+) -> AppResult<()> {
+    if provider.chain_id != context.chain_id {
+        return Err(AppError::Validation(
+            "provider chain_id does not match scan context".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn provider_attempts_exhausted_error(
+    chain_id: uuid::Uuid,
+    last_provider_error: Option<AppError>,
+) -> AppError {
+    last_provider_error.unwrap_or_else(|| provider_capacity_error(chain_id))
+}
+
 fn should_process_btc_transaction_page(
     pages_processed: usize,
     transaction_count: usize,
@@ -374,10 +393,10 @@ pub async fn scan_evm_erc20_transfers(
 
 pub async fn scan_evm_address_with_provider(
     pool: &PgPool,
-    task: &ScanAddressTask,
+    context: &ScanAddressContext,
     provider: &Provider,
 ) -> AppResult<Vec<AddressEvent>> {
-    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
+    ensure_provider_matches_context(provider, context)?;
     let chain = repositories::chain_by_id(pool, context.chain_id).await?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
     let timeout = provider_timeout_duration(provider)?;
@@ -388,7 +407,7 @@ pub async fn scan_evm_address_with_provider(
     if let Some(event) = scan_evm_native_balance_with_context(
         pool,
         &rpc,
-        &context,
+        context,
         &native_asset,
         provider,
         latest_block,
@@ -401,7 +420,7 @@ pub async fn scan_evm_address_with_provider(
         scan_evm_erc20_transfers(
             pool,
             &rpc,
-            &context,
+            context,
             latest_block,
             chain.default_confirmations,
         )
@@ -430,7 +449,7 @@ pub async fn scan_evm_address(
             continue;
         }
 
-        match scan_evm_address_with_provider(pool, task, &provider).await {
+        match scan_evm_address_with_provider(pool, &context, &provider).await {
             Ok(events) => {
                 if let Err(error) = record_provider_success(pool, provider.id, now).await {
                     warn!(provider_id = %provider.id, error = %error, "failed to record provider success");
@@ -449,7 +468,10 @@ pub async fn scan_evm_address(
         }
     }
 
-    Err(last_provider_error.unwrap_or_else(|| provider_capacity_error(context.chain_id)))
+    Err(provider_attempts_exhausted_error(
+        context.chain_id,
+        last_provider_error,
+    ))
 }
 
 pub async fn scan_tron_address(
@@ -838,11 +860,15 @@ mod tests {
     }
 
     mod provider_failover_helpers {
-        use coin_listener_core::{models::Provider, AppError};
+        use coin_listener_core::{
+            models::{Provider, ScanAddressContext},
+            AppError,
+        };
         use uuid::Uuid;
 
         use crate::{
-            is_provider_availability_error, provider_capacity_error, provider_timeout_duration,
+            ensure_provider_matches_context, is_provider_availability_error,
+            provider_attempts_exhausted_error, provider_capacity_error, provider_timeout_duration,
         };
 
         #[test]
@@ -885,6 +911,49 @@ mod tests {
         }
 
         #[test]
+        fn provider_attempts_exhausted_prefers_last_provider_error() {
+            let error = provider_attempts_exhausted_error(
+                Uuid::from_u128(7),
+                Some(AppError::Config(
+                    "provider request failed: timeout".to_string(),
+                )),
+            );
+
+            assert!(
+                matches!(error, AppError::Config(message) if message == "provider request failed: timeout")
+            );
+        }
+
+        #[test]
+        fn provider_attempts_exhausted_returns_capacity_without_provider_error() {
+            let error = provider_attempts_exhausted_error(Uuid::from_u128(7), None);
+
+            assert!(
+                matches!(error, AppError::Config(message) if message.contains("no active rpc provider capacity for chain 00000000-0000-0000-0000-000000000007"))
+            );
+        }
+
+        #[test]
+        fn provider_context_validation_rejects_mismatched_chains() {
+            let provider = provider_with_timeout(1500);
+            let context = scan_context(Uuid::from_u128(3));
+
+            let error = ensure_provider_matches_context(&provider, &context).unwrap_err();
+
+            assert!(
+                matches!(error, AppError::Validation(message) if message == "provider chain_id does not match scan context")
+            );
+        }
+
+        #[test]
+        fn provider_context_validation_accepts_matching_chains() {
+            let provider = provider_with_timeout(1500);
+            let context = scan_context(provider.chain_id);
+
+            assert!(ensure_provider_matches_context(&provider, &context).is_ok());
+        }
+
+        #[test]
         fn provider_timeout_duration_rejects_zero_or_negative_values() {
             let provider = provider_with_timeout(0);
             let error = provider_timeout_duration(&provider).unwrap_err();
@@ -921,6 +990,17 @@ mod tests {
                 qps_limit: 10,
                 timeout_ms,
                 status: "active".to_string(),
+            }
+        }
+
+        fn scan_context(chain_id: Uuid) -> ScanAddressContext {
+            ScanAddressContext {
+                id: Uuid::from_u128(10),
+                tenant_id: Uuid::from_u128(11),
+                chain_id,
+                address: "0x0000000000000000000000000000000000000000".to_string(),
+                scan_interval_seconds: 60,
+                chain_type: "evm".to_string(),
             }
         }
     }
@@ -1454,6 +1534,36 @@ mod tests {
 
         assert!(source.contains("scan_evm_address_with_provider"));
         assert!(source.contains("provider_capacity_error(context.chain_id)"));
+    }
+
+    #[test]
+    fn evm_scan_reuses_candidate_context_for_provider_attempts() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub async fn scan_evm_address_with_provider(")
+            .expect("EVM provider attempt function");
+        let end = source
+            .find("pub async fn scan_evm_address(")
+            .expect("EVM candidate loop function");
+        let provider_attempt = &source[start..end];
+
+        assert!(provider_attempt.contains("context: &ScanAddressContext"));
+        assert!(provider_attempt.contains("ensure_provider_matches_context(provider, context)?"));
+        assert!(!provider_attempt.contains("get_scan_address_context"));
+    }
+
+    #[test]
+    fn evm_scan_attempt_exhaustion_is_explicitly_tested() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub async fn scan_evm_address(")
+            .expect("EVM candidate loop function");
+        let end = source
+            .find("pub async fn scan_tron_address(")
+            .expect("TRON scan function");
+        let evm_loop = &source[start..end];
+
+        assert!(evm_loop.contains("provider_attempts_exhausted_error"));
     }
 
     #[test]
