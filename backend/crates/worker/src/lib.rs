@@ -262,22 +262,6 @@ fn should_process_btc_transaction_page(
     Ok(true)
 }
 
-pub async fn scan_evm_native_balance(
-    pool: &PgPool,
-    task: &ScanAddressTask,
-    _now: DateTime<Utc>,
-) -> AppResult<Option<AddressEvent>> {
-    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
-    let asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
-    let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
-    let timeout = provider_timeout_duration(&provider)?;
-
-    let rpc = EvmRpcClient::new(provider.base_url.clone(), timeout);
-    let block_number = rpc.eth_block_number().await?;
-    scan_evm_native_balance_with_context(pool, &rpc, &context, &asset, &provider, block_number)
-        .await
-}
-
 async fn scan_evm_native_balance_with_context(
     pool: &PgPool,
     rpc: &EvmRpcClient,
@@ -1587,6 +1571,21 @@ mod tests {
         assert!(source.contains(
             "scan_btc_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"
         ));
+    }
+
+    #[test]
+    fn worker_scan_entrypoints_do_not_call_single_active_provider_lookup() {
+        let source = include_str!("lib.rs");
+        let end = source.find("#[cfg(test)]").expect("test module");
+        let source = &source[..end];
+
+        assert!(!source.contains("active_rpc_provider_for_chain(pool, context.chain_id).await?"));
+        assert!(
+            source
+                .matches("active_rpc_provider_candidates(pool, context.chain_id, now).await?")
+                .count()
+                >= 3
+        );
     }
 
     #[test]
