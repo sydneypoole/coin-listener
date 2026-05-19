@@ -10,6 +10,7 @@ use coin_listener_core::{
     AppError, AppResult,
 };
 use sqlx::PgPool;
+use tracing::warn;
 use uuid::Uuid;
 
 pub const DEFAULT_TENANT_ID: Uuid = Uuid::from_u128(1);
@@ -77,6 +78,10 @@ pub const MARK_IN_APP_NOTIFICATION_READ_QUERY: &str = r#"
           AND tenant_id = $2
         RETURNING id, tenant_id, event_id, delivery_id, title, body, read_at, created_at
         "#;
+
+pub const IN_APP_NOTIFICATION_NOTIFY_CHANNEL: &str = "coin_listener_in_app_notifications";
+pub const IN_APP_NOTIFICATION_NOTIFY_QUERY: &str =
+    "SELECT pg_notify('coin_listener_in_app_notifications', $1)";
 
 const CREATE_IN_APP_NOTIFICATION_QUERY: &str = r#"
         INSERT INTO in_app_notifications (tenant_id, event_id, delivery_id, title, body)
@@ -1025,6 +1030,22 @@ pub async fn create_in_app_notification(
         .ok_or_else(|| AppError::NotFound("in-app notification target".to_string()))
 }
 
+pub async fn publish_in_app_notification_created(
+    pool: &PgPool,
+    notification: &InAppNotification,
+) -> AppResult<()> {
+    let payload = serde_json::to_string(notification)
+        .map_err(|error| AppError::Validation(error.to_string()))?;
+
+    sqlx::query(IN_APP_NOTIFICATION_NOTIFY_QUERY)
+        .bind(payload)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(())
+}
+
 pub async fn create_sent_in_app_delivery(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -1069,6 +1090,10 @@ pub async fn create_sent_in_app_delivery(
         .commit()
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
+
+    if let Err(error) = publish_in_app_notification_created(pool, &notification).await {
+        warn!(%error, notification_id = %notification.id, "in-app notification realtime publish failed");
+    }
 
     Ok((delivery, notification))
 }
@@ -1189,7 +1214,8 @@ mod tests {
         validate_notification_rule_reference_consistency, validate_notification_rule_request,
         ExternalDeliveryStart, CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY,
         CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
-        DELETE_NOTIFICATION_RULE_QUERY, INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
+        DELETE_NOTIFICATION_RULE_QUERY, IN_APP_NOTIFICATION_NOTIFY_CHANNEL,
+        IN_APP_NOTIFICATION_NOTIFY_QUERY, INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
         LIST_IN_APP_NOTIFICATIONS_QUERY, LIST_NOTIFICATION_CHANNELS_QUERY,
         LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY, LIST_NOTIFICATION_DELIVERIES_QUERY,
         LIST_NOTIFICATION_RULES_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
@@ -1427,6 +1453,33 @@ mod tests {
         assert!(LIST_IN_APP_NOTIFICATIONS_QUERY.contains("WHERE tenant_id = $1"));
         assert!(MARK_IN_APP_NOTIFICATION_READ_QUERY.contains("WHERE id = $1"));
         assert!(MARK_IN_APP_NOTIFICATION_READ_QUERY.contains("AND tenant_id = $2"));
+    }
+
+    #[test]
+    fn in_app_notification_notify_channel_is_stable() {
+        assert_eq!(
+            IN_APP_NOTIFICATION_NOTIFY_CHANNEL,
+            "coin_listener_in_app_notifications"
+        );
+        assert!(IN_APP_NOTIFICATION_NOTIFY_QUERY.contains("pg_notify"));
+        assert!(IN_APP_NOTIFICATION_NOTIFY_QUERY.contains(IN_APP_NOTIFICATION_NOTIFY_CHANNEL));
+    }
+
+    #[test]
+    fn create_sent_in_app_delivery_publishes_after_commit() {
+        let source = include_str!("notifications.rs");
+        let function_start = source
+            .find("pub async fn create_sent_in_app_delivery")
+            .expect("create_sent_in_app_delivery is present");
+        let function_source = &source[function_start..];
+        let commit_index = function_source
+            .find(".commit()")
+            .expect("in-app transaction commit is present");
+        let notify_index = function_source
+            .find("publish_in_app_notification_created(pool, &notification)")
+            .expect("publish helper is called after commit");
+
+        assert!(notify_index > commit_index);
     }
 
     #[test]
