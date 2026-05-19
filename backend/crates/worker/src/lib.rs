@@ -367,9 +367,11 @@ pub async fn scan_evm_erc20_transfers(
 
 pub async fn scan_evm_address(
     pool: &PgPool,
+    redis: &mut MultiplexedConnection,
     task: &ScanAddressTask,
     _now: DateTime<Utc>,
 ) -> AppResult<Vec<AddressEvent>> {
+    let _ = redis;
     let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
     let chain = repositories::chain_by_id(pool, context.chain_id).await?;
@@ -406,9 +408,11 @@ pub async fn scan_evm_address(
 
 pub async fn scan_tron_address(
     pool: &PgPool,
+    redis: &mut MultiplexedConnection,
     task: &ScanAddressTask,
     _now: DateTime<Utc>,
 ) -> AppResult<Vec<AddressEvent>> {
+    let _ = redis;
     let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
@@ -571,9 +575,11 @@ pub async fn scan_tron_address(
 
 pub async fn scan_btc_address(
     pool: &PgPool,
+    redis: &mut MultiplexedConnection,
     task: &ScanAddressTask,
     _now: DateTime<Utc>,
 ) -> AppResult<Vec<AddressEvent>> {
+    let _ = redis;
     let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let provider = repositories::active_rpc_provider_for_chain(pool, context.chain_id).await?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
@@ -668,7 +674,7 @@ pub async fn process_scan_task(
         return Ok(ScanTaskOutcome::Locked);
     }
 
-    let outcome = process_locked_scan_task(pool, &task, now).await;
+    let outcome = process_locked_scan_task(pool, redis, &task, now).await;
     if let Err(error) = scan_queue
         .release_lock(redis, task.address_id, task.task_id)
         .await
@@ -686,6 +692,7 @@ pub async fn process_scan_task(
 
 async fn process_locked_scan_task(
     pool: &PgPool,
+    redis: &mut MultiplexedConnection,
     task: &ScanAddressTask,
     now: DateTime<Utc>,
 ) -> AppResult<ScanTaskOutcome> {
@@ -694,17 +701,17 @@ async fn process_locked_scan_task(
 
     match scan_plan_for_chain(&context.chain_type) {
         ScanPlan::EvmNativeBalance => {
-            let _events = scan_evm_address(pool, task, now).await?;
+            let _events = scan_evm_address(pool, redis, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned)
         }
         ScanPlan::Tron => {
-            let _events = scan_tron_address(pool, task, now).await?;
+            let _events = scan_tron_address(pool, redis, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned)
         }
         ScanPlan::Btc => {
-            let _events = scan_btc_address(pool, task, now).await?;
+            let _events = scan_btc_address(pool, redis, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned)
         }
@@ -1347,6 +1354,23 @@ mod tests {
                 updated_at: Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap(),
             }
         }
+    }
+
+    #[test]
+    fn process_locked_scan_task_receives_redis_for_provider_qps() {
+        let source = include_str!("lib.rs");
+
+        assert!(source.contains("process_locked_scan_task(pool, redis, &task, now).await"));
+        assert!(source.contains("redis: &mut MultiplexedConnection"));
+    }
+
+    #[test]
+    fn scan_entrypoints_receive_redis_for_provider_qps() {
+        let source = include_str!("lib.rs");
+
+        assert!(source.contains("scan_evm_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"));
+        assert!(source.contains("scan_tron_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"));
+        assert!(source.contains("scan_btc_address(\n    pool: &PgPool,\n    redis: &mut MultiplexedConnection,"));
     }
 
     #[test]
