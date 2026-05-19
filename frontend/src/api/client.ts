@@ -1,4 +1,4 @@
-import { getAuthToken, handleUnauthorized } from '../auth/session';
+import { getAuthRequestContext, handleUnauthorized } from '../auth/session';
 import type {
   AddressEvent,
   Asset,
@@ -31,9 +31,9 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   headers.set('Content-Type', 'application/json');
 
-  const token = isLoginRequest ? null : getAuthToken();
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
+  const authContext = isLoginRequest ? null : getAuthRequestContext();
+  if (authContext?.token) {
+    headers.set('Authorization', `Bearer ${authContext.token}`);
   }
 
   const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -42,8 +42,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   });
 
   if (!response.ok) {
-    if (!isLoginRequest && response.status === 401) {
-      handleUnauthorized(token);
+    if (authContext && response.status === 401) {
+      handleUnauthorized(authContext);
     }
     const body = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(body.error ?? response.statusText);

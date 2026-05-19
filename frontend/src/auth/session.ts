@@ -2,7 +2,13 @@ import type { LoginResponse } from '../api/types';
 
 const SESSION_STORAGE_KEY = 'coin-listener.session.v1';
 let currentSession: LoginResponse | null = null;
+let sessionGeneration = 0;
 let unauthorizedHandler: (() => void) | null = null;
+
+type AuthRequestContext = {
+  token: string | null;
+  generation: number;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -62,6 +68,7 @@ function removeStoredSession(): void {
 
 function clearStoredSession(): null {
   currentSession = null;
+  sessionGeneration += 1;
   removeStoredSession();
   return null;
 }
@@ -90,11 +97,13 @@ export function loadStoredSession(): LoginResponse | null {
 
 export function saveSession(session: LoginResponse): void {
   currentSession = session;
+  sessionGeneration += 1;
   writeStoredSession(session);
 }
 
 export function clearSession(): void {
   currentSession = null;
+  sessionGeneration += 1;
   removeStoredSession();
 }
 
@@ -103,12 +112,22 @@ export function getAuthToken(): string | null {
   return loadStoredSession()?.token ?? null;
 }
 
+export function getAuthRequestContext(): AuthRequestContext {
+  const token = getAuthToken();
+  return { token, generation: sessionGeneration };
+}
+
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
   unauthorizedHandler = handler;
 }
 
-export function handleUnauthorized(requestToken: string | null): void {
-  if (requestToken !== getAuthToken()) return;
+export function handleUnauthorized(requestContext: AuthRequestContext): void {
+  if (
+    requestContext.generation !== sessionGeneration ||
+    requestContext.token !== getAuthToken()
+  ) {
+    return;
+  }
 
   clearSession();
   try {
