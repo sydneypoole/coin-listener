@@ -49,17 +49,20 @@ export function AddressesPage() {
         dataSource={addressesQuery.data ?? []}
         rowKey="id"
         pagination={{ pageSize: 10 }}
+        scroll={{ x: 1280 }}
         columns={[
-          { title: '链', dataIndex: 'chain_id', render: value => chainMap.get(String(value)) ?? String(value) },
-          { title: '标签', dataIndex: 'label', render: value => value ? String(value) : '-' },
-          { title: '地址', dataIndex: 'address' },
-          { title: '优先级', dataIndex: 'priority', render: value => <Tag>{String(value)}</Tag> },
-          { title: '扫描间隔', dataIndex: 'scan_interval_seconds' },
-          { title: '转账', dataIndex: 'transfer_filter_enabled', render: value => value ? '开启' : '关闭' },
-          { title: '余额变化', dataIndex: 'balance_change_filter_enabled', render: value => value ? '开启' : '关闭' },
-          { title: '状态', dataIndex: 'status' },
+          { title: '链', dataIndex: 'chain_id', width: 150, render: value => chainMap.get(String(value)) ?? String(value) },
+          { title: '标签', dataIndex: 'label', width: 150, ellipsis: { showTitle: true }, render: value => value ? String(value) : '-' },
+          { title: '地址', dataIndex: 'address', width: 340, ellipsis: { showTitle: true }, className: 'table-cell-mono' },
+          { title: '优先级', dataIndex: 'priority', width: 100, render: value => <Tag>{String(value)}</Tag> },
+          { title: '扫描间隔', dataIndex: 'scan_interval_seconds', width: 110 },
+          { title: '转账', dataIndex: 'transfer_filter_enabled', width: 90, render: value => value ? '开启' : '关闭' },
+          { title: '余额变化', dataIndex: 'balance_change_filter_enabled', width: 110, render: value => value ? '开启' : '关闭' },
+          { title: '状态', dataIndex: 'status', width: 100 },
           {
             title: '操作',
+            width: 110,
+            fixed: 'right',
             render: (_, record) => (
               <Popconfirm title="确认删除该地址？" onConfirm={() => deleteMutation.mutate(record.id)}>
                 <Button type="danger" theme="borderless">删除</Button>

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Banner, Button, Card, Form, Select, Space, Table, Tag, Toast, Typography } from '@douyinfe/semi-ui';
-import { listAssets, listChains, listEvents, listWatchedAddresses, scanAddress } from '../api/client';
+import { ApiRequestError, listAssets, listChains, listEvents, listWatchedAddresses, scanAddress } from '../api/client';
 import type { AddressEvent, EventQuery } from '../api/types';
 
 const { Text } = Typography;
@@ -54,14 +54,34 @@ export function EventsPage() {
   );
   const assetMap = useMemo(() => new Map((assetsQuery.data ?? []).map(asset => [asset.id, asset.symbol])), [assetsQuery.data]);
   const addressMap = useMemo(() => new Map((addressesQuery.data ?? []).map(address => [address.id, address])), [addressesQuery.data]);
+  const [devRouteUnavailable, setDevRouteUnavailable] = useState(false);
+  const hasLoadedSimulationInputs = !chainsQuery.isLoading && !addressesQuery.isLoading;
+  const hasAnyAddress = (addressesQuery.data ?? []).length > 0;
+  const simulateDisabledReason = !hasLoadedSimulationInputs
+    ? '正在加载地址'
+    : !hasAnyAddress
+      ? '请先创建监听地址'
+      : evmAddresses.length === 0
+        ? '未找到 EVM/Base 地址，开发模拟扫描仅支持 EVM/Base'
+        : !scanAddressId
+          ? '请选择一个 EVM/Base 监听地址'
+          : undefined;
 
   const scanMutation = useMutation({
     mutationFn: scanAddress,
     onSuccess: () => {
+      setDevRouteUnavailable(false);
       Toast.success('已生成模拟事件');
       queryClient.invalidateQueries({ queryKey: ['events'] });
     },
-    onError: error => Toast.error(error instanceof Error ? error.message : '模拟扫描失败'),
+    onError: error => {
+      if (error instanceof ApiRequestError && error.status === 404) {
+        setDevRouteUnavailable(true);
+        Toast.error('开发模拟扫描未启用，请设置 ENABLE_DEV_ROUTES=true 后重启服务');
+        return;
+      }
+      Toast.error(error instanceof Error ? error.message : '模拟扫描失败');
+    },
   });
 
   function handleFilterSubmit(values: Record<string, unknown>) {
@@ -130,30 +150,42 @@ export function EventsPage() {
       </Card>
 
       <Card title="开发模拟扫描" className="filter-card">
-        <Space>
-          <Select
-            value={scanAddressId}
-            onChange={value => setScanAddressId(value as string)}
-            showClear
-            filter
-            placeholder="选择监听地址"
-            style={{ width: 360 }}
-          >
-            {evmAddresses.map(address => (
-              <Select.Option key={address.id} value={address.id}>
-                {address.label ? `${address.label} / ${address.address}` : address.address}
-              </Select.Option>
-            ))}
-          </Select>
-          <Button
-            type="primary"
-            loading={scanMutation.isPending}
-            disabled={!scanAddressId}
-            onClick={() => scanAddressId && scanMutation.mutate(scanAddressId)}
-          >
-            生成模拟事件
-          </Button>
-          <Text type="tertiary">仅支持 EVM / Base 地址，用于无 RPC 凭据时打通事件链路。</Text>
+        <Space vertical align="start">
+          {devRouteUnavailable ? (
+            <Banner
+              type="warning"
+              title="开发模拟扫描未启用"
+              description="后端仅在 ENABLE_DEV_ROUTES=true 时开放 /api/dev/scan-address，用于本地调试。"
+            />
+          ) : null}
+          <Space>
+            <Select
+              value={scanAddressId}
+              onChange={value => setScanAddressId(value as string | undefined)}
+              showClear
+              filter
+              placeholder="选择 EVM/Base 监听地址"
+              style={{ width: 360 }}
+              disabled={evmAddresses.length === 0}
+            >
+              {evmAddresses.map(address => (
+                <Select.Option key={address.id} value={address.id}>
+                  {address.label ? `${address.label} / ${address.address}` : address.address}
+                </Select.Option>
+              ))}
+            </Select>
+            <Button
+              type="primary"
+              loading={scanMutation.isPending}
+              disabled={Boolean(simulateDisabledReason)}
+              onClick={() => scanAddressId && scanMutation.mutate(scanAddressId)}
+            >
+              生成模拟事件
+            </Button>
+          </Space>
+          <Text type={simulateDisabledReason ? 'warning' : 'tertiary'}>
+            {simulateDisabledReason ?? '仅支持 EVM / Base 地址；如接口返回 404，请设置 ENABLE_DEV_ROUTES=true 后重启后端。'}
+          </Text>
         </Space>
       </Card>
 

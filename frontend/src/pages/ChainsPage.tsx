@@ -13,13 +13,14 @@ export function ChainsPage() {
         dataSource={query.data ?? []}
         rowKey="id"
         pagination={false}
+        scroll={{ x: 820 }}
         columns={[
-          { title: '名称', dataIndex: 'name' },
-          { title: 'Key', dataIndex: 'key' },
-          { title: '类型', dataIndex: 'chain_type' },
-          { title: '原生资产', dataIndex: 'native_asset_symbol' },
-          { title: '确认数', dataIndex: 'default_confirmations' },
-          { title: '状态', dataIndex: 'status', render: value => <Tag color="green">{String(value)}</Tag> },
+          { title: '名称', dataIndex: 'name', width: 180, ellipsis: { showTitle: true } },
+          { title: 'Key', dataIndex: 'key', width: 160, ellipsis: { showTitle: true }, className: 'table-cell-mono' },
+          { title: '类型', dataIndex: 'chain_type', width: 120 },
+          { title: '原生资产', dataIndex: 'native_asset_symbol', width: 120 },
+          { title: '确认数', dataIndex: 'default_confirmations', width: 100 },
+          { title: '状态', dataIndex: 'status', width: 120, render: value => <Tag color="green">{String(value)}</Tag> },
         ]}
       />
     </Card>

@@ -100,6 +100,13 @@ export type EventQuery = {
 };
 
 export type CreateProviderRequest = Omit<Provider, 'id'>;
+
+export type ProviderTestResponse = {
+  ok: boolean;
+  message: string;
+  latest_block?: number | null;
+};
+
 export type CreateWatchedAddressRequest = Omit<WatchedAddress, 'id' | 'tenant_id'> & {
   tenant_id?: string;
 };

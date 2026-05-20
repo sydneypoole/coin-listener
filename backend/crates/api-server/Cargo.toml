@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 argon2.workspace = true
+coin-listener-chain-providers = { path = "../chain-providers" }
 coin-listener-core = { path = "../core" }
 coin-listener-storage = { path = "../storage" }
 axum.workspace = true

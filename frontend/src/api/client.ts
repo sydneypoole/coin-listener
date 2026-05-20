@@ -19,6 +19,7 @@ import type {
   NotificationOutboxQuery,
   NotificationRule,
   Provider,
+  ProviderTestResponse,
   RetryNotificationOutboxResponse,
   SystemStatus,
   WatchedAddress,
@@ -97,6 +98,19 @@ export function createProvider(payload: CreateProviderRequest): Promise<Provider
   return request<Provider>('/api/providers', {
     method: 'POST',
     body: JSON.stringify(payload),
+  });
+}
+
+export function updateProvider(id: string, payload: CreateProviderRequest): Promise<Provider> {
+  return request<Provider>(`/api/providers/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function testProvider(id: string): Promise<ProviderTestResponse> {
+  return request<ProviderTestResponse>(`/api/providers/${id}/test`, {
+    method: 'POST',
   });
 }
 

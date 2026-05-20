@@ -15,14 +15,15 @@ export function AssetsPage() {
         dataSource={assetsQuery.data ?? []}
         rowKey="id"
         pagination={{ pageSize: 10 }}
+        scroll={{ x: 980 }}
         columns={[
-          { title: '链', dataIndex: 'chain_id', render: value => chainMap.get(String(value)) ?? String(value) },
-          { title: '符号', dataIndex: 'symbol' },
-          { title: '名称', dataIndex: 'name' },
-          { title: '类型', dataIndex: 'asset_type' },
-          { title: '合约地址', dataIndex: 'contract_address', render: value => value ? String(value) : '-' },
-          { title: '精度', dataIndex: 'decimals' },
-          { title: '内置', dataIndex: 'is_builtin', render: value => <Tag color={value ? 'blue' : 'grey'}>{value ? '是' : '否'}</Tag> },
+          { title: '链', dataIndex: 'chain_id', width: 160, render: value => chainMap.get(String(value)) ?? String(value) },
+          { title: '符号', dataIndex: 'symbol', width: 120, ellipsis: { showTitle: true } },
+          { title: '名称', dataIndex: 'name', width: 180, ellipsis: { showTitle: true } },
+          { title: '类型', dataIndex: 'asset_type', width: 120 },
+          { title: '合约地址', dataIndex: 'contract_address', width: 320, ellipsis: { showTitle: true }, className: 'table-cell-mono', render: value => value ? String(value) : '-' },
+          { title: '精度', dataIndex: 'decimals', width: 90 },
+          { title: '内置', dataIndex: 'is_builtin', width: 90, render: value => <Tag color={value ? 'blue' : 'grey'}>{value ? '是' : '否'}</Tag> },
         ]}
       />
     </Card>

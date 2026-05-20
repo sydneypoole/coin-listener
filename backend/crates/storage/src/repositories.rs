@@ -505,6 +505,17 @@ pub async fn list_providers(pool: &PgPool) -> AppResult<Vec<Provider>> {
     .map_err(|error| AppError::Database(error.to_string()))
 }
 
+pub async fn get_provider(pool: &PgPool, id: Uuid) -> AppResult<Provider> {
+    sqlx::query_as::<_, Provider>(
+        "SELECT id, chain_id, provider_type, name, base_url, api_key_ref, priority, qps_limit, timeout_ms, status FROM providers WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| AppError::Database(error.to_string()))?
+    .ok_or_else(|| AppError::NotFound("provider".to_string()))
+}
+
 pub async fn active_rpc_provider_for_chain(pool: &PgPool, chain_id: Uuid) -> AppResult<Provider> {
     sqlx::query_as::<_, Provider>(ACTIVE_RPC_PROVIDER_QUERY)
         .bind(chain_id)
@@ -631,6 +642,46 @@ pub async fn create_provider(pool: &PgPool, request: CreateProviderRequest) -> A
     .fetch_one(pool)
     .await
     .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn update_provider(
+    pool: &PgPool,
+    id: Uuid,
+    request: CreateProviderRequest,
+) -> AppResult<Provider> {
+    validate_provider(&request)?;
+
+    sqlx::query_as::<_, Provider>(
+        r#"
+        UPDATE providers
+        SET chain_id = $2,
+            provider_type = $3,
+            name = $4,
+            base_url = $5,
+            api_key_ref = $6,
+            priority = $7,
+            qps_limit = $8,
+            timeout_ms = $9,
+            status = $10,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, chain_id, provider_type, name, base_url, api_key_ref, priority, qps_limit, timeout_ms, status
+        "#,
+    )
+    .bind(id)
+    .bind(request.chain_id)
+    .bind(request.provider_type)
+    .bind(request.name)
+    .bind(request.base_url)
+    .bind(request.api_key_ref)
+    .bind(request.priority)
+    .bind(request.qps_limit)
+    .bind(request.timeout_ms)
+    .bind(request.status)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| AppError::Database(error.to_string()))?
+    .ok_or_else(|| AppError::NotFound("provider".to_string()))
 }
 
 pub async fn list_watched_addresses(

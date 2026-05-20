@@ -11,6 +11,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{Duration, Utc};
+use coin_listener_chain_providers::evm::EvmRpcClient;
 use coin_listener_core::{
     models::{
         CreateNotificationChannelRequest, CreateNotificationRuleRequest, CreateProviderRequest,
@@ -30,7 +31,7 @@ use coin_listener_storage::{
 };
 use serde::Serialize;
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration as StdDuration};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -55,12 +56,21 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ProviderTestResponse {
+    pub ok: bool,
+    pub message: String,
+    pub latest_block: Option<i64>,
+}
+
 pub fn build_router(state: Arc<ApiState>) -> Router {
     let protected = Router::new()
         .route("/api/system/status", get(system_status_handler))
         .route("/api/chains", get(list_chains))
         .route("/api/assets", get(list_assets))
         .route("/api/providers", get(list_providers).post(create_provider))
+        .route("/api/providers/:id", put(update_provider))
+        .route("/api/providers/:id/test", post(test_provider))
         .route("/api/addresses", get(list_addresses).post(create_address))
         .route(
             "/api/addresses/:id",
@@ -255,6 +265,48 @@ async fn create_provider(
 ) -> Result<Response, ApiError> {
     let provider = repositories::create_provider(&state.postgres, request).await?;
     Ok((StatusCode::CREATED, Json(provider)).into_response())
+}
+
+async fn update_provider(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<CreateProviderRequest>,
+) -> Result<Response, ApiError> {
+    let provider = repositories::update_provider(&state.postgres, id, request).await?;
+    Ok(Json(provider).into_response())
+}
+
+async fn test_provider(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let provider = repositories::get_provider(&state.postgres, id).await?;
+    if provider.provider_type != "rpc" {
+        return Err(AppError::Validation("only rpc providers can be tested".to_string()).into());
+    }
+
+    let timeout_ms = u64::try_from(provider.timeout_ms)
+        .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
+    if timeout_ms == 0 {
+        return Err(AppError::Validation("timeout_ms must be positive".to_string()).into());
+    }
+
+    let chain = repositories::chain_by_id(&state.postgres, provider.chain_id).await?;
+    if chain.chain_type != "evm" {
+        return Err(AppError::Validation(
+            "provider connectivity test currently supports EVM RPC only".to_string(),
+        )
+        .into());
+    }
+
+    let client = EvmRpcClient::new(provider.base_url, StdDuration::from_millis(timeout_ms));
+    let latest_block = client.eth_block_number().await?;
+    Ok(Json(ProviderTestResponse {
+        ok: true,
+        message: "provider rpc reachable".to_string(),
+        latest_block: Some(latest_block),
+    })
+    .into_response())
 }
 
 async fn list_addresses(
@@ -633,6 +685,30 @@ mod tests {
             .expect("router response");
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn router_exposes_provider_edit_and_test_routes() {
+        let app = build_router(test_state());
+
+        for (method, uri) in [
+            (Method::PUT, "/api/providers/not-a-uuid"),
+            (Method::POST, "/api/providers/not-a-uuid/test"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("valid request"),
+                )
+                .await
+                .expect("router response");
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
     }
 
     #[tokio::test]

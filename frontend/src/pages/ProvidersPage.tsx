@@ -1,25 +1,57 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Card, Form, Modal, Table, Toast } from '@douyinfe/semi-ui';
-import { createProvider, listChains, listProviders } from '../api/client';
+import { Button, Card, Form, Modal, Space, Table, Tag, Toast } from '@douyinfe/semi-ui';
+import { createProvider, listChains, listProviders, testProvider, updateProvider } from '../api/client';
 import type { CreateProviderRequest, Provider } from '../api/types';
 
 export function ProvidersPage() {
   const [visible, setVisible] = useState(false);
+  const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
+  const [testingProviderId, setTestingProviderId] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const providersQuery = useQuery({ queryKey: ['providers'], queryFn: listProviders });
   const chainsQuery = useQuery({ queryKey: ['chains'], queryFn: listChains });
   const chainMap = new Map((chainsQuery.data ?? []).map(chain => [chain.id, chain.name]));
+  const chainTypeMap = new Map((chainsQuery.data ?? []).map(chain => [chain.id, chain.chain_type]));
 
   const mutation = useMutation({
-    mutationFn: createProvider,
+    mutationFn: (payload: CreateProviderRequest) => (
+      editingProvider ? updateProvider(editingProvider.id, payload) : createProvider(payload)
+    ),
     onSuccess: () => {
-      Toast.success('Provider 已创建');
+      Toast.success(editingProvider ? 'Provider 已更新' : 'Provider 已创建');
       setVisible(false);
+      setEditingProvider(null);
       queryClient.invalidateQueries({ queryKey: ['providers'] });
     },
-    onError: error => Toast.error(error instanceof Error ? error.message : '创建失败'),
+    onError: error => Toast.error(error instanceof Error ? error.message : '保存失败'),
   });
+
+  const testMutation = useMutation({
+    mutationFn: testProvider,
+    onSuccess: result => {
+      Toast.success(result.latest_block === null || result.latest_block === undefined
+        ? 'Provider 测试成功'
+        : `Provider 测试成功，最新区块 ${result.latest_block}`);
+    },
+    onError: error => Toast.error(error instanceof Error ? error.message : 'Provider 测试失败'),
+    onSettled: () => setTestingProviderId(null),
+  });
+
+  function openCreateModal() {
+    setEditingProvider(null);
+    setVisible(true);
+  }
+
+  function openEditModal(provider: Provider) {
+    setEditingProvider(provider);
+    setVisible(true);
+  }
+
+  function closeModal() {
+    setVisible(false);
+    setEditingProvider(null);
+  }
 
   function handleSubmit(values: Record<string, unknown>) {
     mutation.mutate({
@@ -35,30 +67,72 @@ export function ProvidersPage() {
     } satisfies CreateProviderRequest);
   }
 
+  function initialValues(): Partial<CreateProviderRequest> {
+    return editingProvider ?? {
+      provider_type: 'rpc',
+      priority: 100,
+      qps_limit: 10,
+      timeout_ms: 10000,
+      status: 'active',
+    };
+  }
+
+  function canTestProvider(provider: Provider) {
+    return provider.provider_type === 'rpc' && chainTypeMap.get(provider.chain_id) === 'evm';
+  }
+
+  function handleTestProvider(provider: Provider) {
+    setTestingProviderId(provider.id);
+    testMutation.mutate(provider.id);
+  }
+
   return (
-    <Card title="Provider 配置" headerExtraContent={<Button onClick={() => setVisible(true)}>新增 Provider</Button>}>
+    <Card title="Provider 配置" headerExtraContent={<Button onClick={openCreateModal}>新增 Provider</Button>}>
       <Table<Provider>
         loading={providersQuery.isLoading}
         dataSource={providersQuery.data ?? []}
         rowKey="id"
         pagination={{ pageSize: 10 }}
+        scroll={{ x: 1200 }}
         columns={[
-          { title: '链', dataIndex: 'chain_id', render: value => chainMap.get(String(value)) ?? String(value) },
-          { title: '名称', dataIndex: 'name' },
-          { title: '类型', dataIndex: 'provider_type' },
-          { title: 'URL', dataIndex: 'base_url' },
-          { title: '优先级', dataIndex: 'priority' },
-          { title: 'QPS', dataIndex: 'qps_limit' },
-          { title: '超时', dataIndex: 'timeout_ms' },
-          { title: '状态', dataIndex: 'status' },
+          { title: '链', dataIndex: 'chain_id', width: 140, render: value => chainMap.get(String(value)) ?? String(value) },
+          { title: '名称', dataIndex: 'name', width: 160, ellipsis: { showTitle: true } },
+          { title: '类型', dataIndex: 'provider_type', width: 120 },
+          { title: 'URL', dataIndex: 'base_url', width: 300, ellipsis: { showTitle: true }, className: 'table-cell-mono' },
+          { title: '优先级', dataIndex: 'priority', width: 100 },
+          { title: 'QPS', dataIndex: 'qps_limit', width: 100 },
+          { title: '超时', dataIndex: 'timeout_ms', width: 110 },
+          { title: '状态', dataIndex: 'status', width: 100, render: value => <Tag color={String(value) === 'active' ? 'green' : 'grey'}>{String(value)}</Tag> },
+          {
+            title: '操作',
+            width: 150,
+            fixed: 'right',
+            render: (_, provider) => {
+              const testDisabled = !canTestProvider(provider);
+              return (
+                <Space>
+                  <Button size="small" onClick={() => openEditModal(provider)}>编辑</Button>
+                  <Button
+                    size="small"
+                    disabled={testDisabled}
+                    loading={testingProviderId === provider.id}
+                    onClick={() => handleTestProvider(provider)}
+                  >
+                    {testDisabled ? '仅 EVM RPC 可测' : '测试'}
+                  </Button>
+                </Space>
+              );
+            },
+          },
         ]}
       />
-      <Modal title="新增 Provider" visible={visible} onCancel={() => setVisible(false)} footer={null}>
-        <Form onSubmit={handleSubmit}>
+      <Modal title={editingProvider ? '编辑 Provider' : '新增 Provider'} visible={visible} onCancel={closeModal} footer={null}>
+        <p className="form-help-text">当前仅支持 EVM/Base RPC 测试；WebSocket 与 REST API Provider 可保存，但暂不提供连通性测试。</p>
+        <Form initValues={initialValues()} onSubmit={handleSubmit} labelPosition="left" labelWidth={110}>
           <Form.Select field="chain_id" label="链" rules={[{ required: true, message: '请选择链' }]}>
             {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}
           </Form.Select>
-          <Form.Select field="provider_type" label="类型" initValue="rpc">
+          <Form.Select field="provider_type" label="类型" rules={[{ required: true, message: '请选择类型' }]}>
             <Form.Select.Option value="rpc">RPC</Form.Select.Option>
             <Form.Select.Option value="websocket">WebSocket</Form.Select.Option>
             <Form.Select.Option value="rest_api">REST API</Form.Select.Option>
@@ -66,14 +140,17 @@ export function ProvidersPage() {
           <Form.Input field="name" label="名称" rules={[{ required: true, message: '请输入名称' }]} />
           <Form.Input field="base_url" label="Base URL" rules={[{ required: true, message: '请输入 URL' }]} />
           <Form.Input field="api_key_ref" label="API Key 引用" />
-          <Form.InputNumber field="priority" label="优先级" initValue={100} />
-          <Form.InputNumber field="qps_limit" label="QPS 限制" initValue={10} />
-          <Form.InputNumber field="timeout_ms" label="超时毫秒" initValue={10000} />
-          <Form.Select field="status" label="状态" initValue="active">
+          <Form.InputNumber field="priority" label="优先级" min={1} rules={[{ required: true, message: '请输入优先级' }]} />
+          <Form.InputNumber field="qps_limit" label="QPS 限制" min={1} rules={[{ required: true, message: '请输入 QPS 限制' }]} />
+          <Form.InputNumber field="timeout_ms" label="超时毫秒" min={1} rules={[{ required: true, message: '请输入超时毫秒' }]} />
+          <Form.Select field="status" label="状态" rules={[{ required: true, message: '请选择状态' }]}>
             <Form.Select.Option value="active">active</Form.Select.Option>
             <Form.Select.Option value="disabled">disabled</Form.Select.Option>
           </Form.Select>
-          <Button htmlType="submit" type="primary" loading={mutation.isPending}>保存</Button>
+          <Space>
+            <Button htmlType="submit" type="primary" loading={mutation.isPending}>保存</Button>
+            <Button onClick={closeModal}>取消</Button>
+          </Space>
         </Form>
       </Modal>
     </Card>
