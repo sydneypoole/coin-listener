@@ -70,6 +70,21 @@ pub struct WatchedAddress {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchedAddressResponse {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub chain_id: Uuid,
+    pub address: String,
+    pub label: Option<String>,
+    pub priority: String,
+    pub scan_interval_seconds: i32,
+    pub transfer_filter_enabled: bool,
+    pub balance_change_filter_enabled: bool,
+    pub status: String,
+    pub asset_ids: Vec<Uuid>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginRequest {
     pub email: String,
@@ -114,6 +129,7 @@ pub struct CreateWatchedAddressRequest {
     pub transfer_filter_enabled: bool,
     pub balance_change_filter_enabled: bool,
     pub status: String,
+    pub asset_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -562,14 +578,14 @@ pub struct AddressEventDraft {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddressEvent, CreateBalanceSnapshotRequest, EventStatus, NotificationDelivery,
-        NotificationDeliveryListItem, NotificationDeliveryListResponse, NotificationDeliveryQuery,
-        NotificationOutboxDetail, NotificationOutboxItem, NotificationOutboxListItem,
-        NotificationOutboxListResponse, NotificationOutboxQuery, NotificationStatus,
-        NotifyEventTask, OutboxStatusCounts, ProviderChainStatus, ProviderHealthStatus,
-        ProviderStatus, ProviderStatusItem, QueueStatus, RetryNotificationOutboxResponse,
-        ScanAddressTask, ScanCursor, ScanStatus, ServiceHealthStatus, ServiceHeartbeatStatusItem,
-        SystemStatus,
+        AddressEvent, CreateBalanceSnapshotRequest, CreateWatchedAddressRequest, EventStatus,
+        NotificationDelivery, NotificationDeliveryListItem, NotificationDeliveryListResponse,
+        NotificationDeliveryQuery, NotificationOutboxDetail, NotificationOutboxItem,
+        NotificationOutboxListItem, NotificationOutboxListResponse, NotificationOutboxQuery,
+        NotificationStatus, NotifyEventTask, OutboxStatusCounts, ProviderChainStatus,
+        ProviderHealthStatus, ProviderStatus, ProviderStatusItem, QueueStatus,
+        RetryNotificationOutboxResponse, ScanAddressTask, ScanCursor, ScanStatus,
+        ServiceHealthStatus, ServiceHeartbeatStatusItem, SystemStatus, WatchedAddressResponse,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
@@ -950,6 +966,56 @@ mod tests {
         assert!(payload.contains("\"delivery_failed\":1"));
         assert!(payload.contains("\"provider_status_code\":500"));
         assert!(payload.contains("\"outbox\""));
+    }
+
+    #[test]
+    fn watched_address_request_deserializes_asset_ids() {
+        let payload = r#"{
+            "chain_id":"00000000-0000-0000-0000-000000000002",
+            "address":"0x0000000000000000000000000000000000000001",
+            "label":"Main wallet",
+            "priority":"normal",
+            "scan_interval_seconds":300,
+            "transfer_filter_enabled":true,
+            "balance_change_filter_enabled":true,
+            "status":"active",
+            "asset_ids":[
+                "00000000-0000-0000-0000-000000000101",
+                "00000000-0000-0000-0000-000000000102"
+            ]
+        }"#;
+
+        let request: CreateWatchedAddressRequest =
+            serde_json::from_str(payload).expect("deserialize watched address request");
+
+        assert_eq!(request.chain_id, Uuid::from_u128(2));
+        assert_eq!(
+            request.asset_ids,
+            vec![Uuid::from_u128(0x101), Uuid::from_u128(0x102)]
+        );
+    }
+
+    #[test]
+    fn watched_address_response_serializes_asset_ids() {
+        let response = WatchedAddressResponse {
+            id: Uuid::from_u128(10),
+            tenant_id: Uuid::from_u128(1),
+            chain_id: Uuid::from_u128(2),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            label: Some("Main wallet".to_string()),
+            priority: "normal".to_string(),
+            scan_interval_seconds: 300,
+            transfer_filter_enabled: true,
+            balance_change_filter_enabled: true,
+            status: "active".to_string(),
+            asset_ids: vec![Uuid::from_u128(0x101), Uuid::from_u128(0x102)],
+        };
+
+        let payload = serde_json::to_string(&response).expect("serialize watched address response");
+
+        assert!(payload.contains("\"asset_ids\""));
+        assert!(payload.contains("00000000-0000-0000-0000-000000000101"));
+        assert!(payload.contains("00000000-0000-0000-0000-000000000102"));
     }
 
     #[test]
