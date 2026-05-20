@@ -62,6 +62,7 @@ export type WatchedAddress = {
   transfer_filter_enabled: boolean;
   balance_change_filter_enabled: boolean;
   status: string;
+  asset_ids: string[];
 };
 
 export type AddressEvent = {
