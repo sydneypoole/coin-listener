@@ -108,4 +108,82 @@ describe('frontend UI regressions', () => {
     expectContains(page, 'address-chain-row-');
     expectNotContains(page, 'crypto.randomUUID');
   });
+
+  test('tailwind and semi css layers are wired before app styles', () => {
+    const packageJson = readSource('../package.json');
+    const viteConfig = readSource('../vite.config.ts');
+    const main = readSource('main.tsx');
+    const semiLayer = readSource('semi-layer.css');
+    const tailwind = readSource('tailwind.css');
+
+    expectContains(packageJson, 'tailwindcss');
+    expectContains(packageJson, '@tailwindcss/vite');
+    expectContains(packageJson, '@douyinfe/semi-vite-plugin');
+    expectContains(viteConfig, 'tailwindcss()');
+    expectContains(viteConfig, 'semiTheming({ cssLayer: true })');
+    expectContains(semiLayer, '@layer theme, base, semi, utilities;');
+    expectContains(tailwind, '@import "tailwindcss";');
+    expectContains(main, "import './semi-layer.css';");
+    expectContains(main, "import './tailwind.css';");
+  });
+
+  test('theme mode persists and uses semi dark mode contract', () => {
+    const themeMode = readSource('themeMode.ts');
+    const app = readSource('App.tsx');
+    const toggle = readSource('components/ThemeToggle.tsx');
+
+    expectContains(themeMode, 'coin-listener:theme-mode');
+    expectContains(themeMode, "document.body.setAttribute('theme-mode', 'dark')");
+    expectContains(themeMode, "document.body.removeAttribute('theme-mode')");
+    expectContains(themeMode, "matchMedia('(prefers-color-scheme: dark)')");
+    expectContains(toggle, 'ThemeToggle');
+    expectContains(app, '<ThemeToggle');
+  });
+
+  test('frontend design system components exist', () => {
+    for (const componentPath of [
+      'components/AppShell.tsx',
+      'components/PageScaffold.tsx',
+      'components/FilterPanel.tsx',
+      'components/MetricGrid.tsx',
+      'components/DataSurface.tsx',
+      'components/DataTable.tsx',
+    ]) {
+      const source = readSource(componentPath);
+      expectContains(source, 'export');
+    }
+  });
+
+  test('data table wrapper persists resized widths and fixes action columns', () => {
+    const table = readSource('components/DataTable.tsx');
+
+    expectContains(table, 'coin-listener:data-table-widths:');
+    expectContains(table, 'localStorage');
+    expectContains(table, 'onResizeStop');
+    expectContains(table, "fixed: 'right'");
+    expectContains(table, 'resizable=');
+    expectContains(table, 'data-table-surface');
+  });
+
+  test('business pages use DataTable for table overflow control', () => {
+    const pagePaths = [
+      'pages/ChainsPage.tsx',
+      'pages/AssetsPage.tsx',
+      'pages/ProvidersPage.tsx',
+      'pages/AddressesPage.tsx',
+      'pages/EventsPage.tsx',
+      'pages/SystemStatusPage.tsx',
+      'pages/NotificationRulesPage.tsx',
+      'pages/NotificationOperationsPage.tsx',
+      'pages/InAppNotificationsPage.tsx',
+    ];
+
+    for (const pagePath of pagePaths) {
+      const page = readSource(pagePath);
+      expectContains(page, 'DataTable');
+      expectContains(page, 'tableId=');
+      expectNotContains(page, ' Table,');
+      expectNotContains(page, '<Table<');
+    }
+  });
 });
