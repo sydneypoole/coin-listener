@@ -1,6 +1,6 @@
 # Coin Listener Deployment
 
-This guide covers deploying Coin Listener as the all-in-one runtime: one application process that serves the API, serves the built React frontend, and runs scheduler, worker, notifier, realtime notification, and heartbeat loops. PostgreSQL and Redis remain external services.
+This guide covers deploying Coin Listener as the all-in-one runtime. The Docker image contains nginx, the built React frontend, and the Rust backend process in one image. nginx serves frontend static assets on port `8080` and reverse-proxies API, health, and realtime WebSocket traffic to the Rust backend running inside the same container. PostgreSQL and Redis remain external services.
 
 ## Deployment options
 
@@ -33,11 +33,11 @@ Important variables:
 |---|---:|---|---|
 | `DATABASE_URL` | Yes | `postgres://coin_listener:coin_listener_password@postgres:5432/coin_listener` | PostgreSQL connection used by API, migrations, scheduler, worker, notifier, realtime listener. |
 | `REDIS_URL` | Yes | `redis://redis:6379` | Redis queue and status backend. |
-| `API_SERVER_HOST` | Yes | `0.0.0.0` | Bind host inside container. |
-| `API_SERVER_PORT` | Yes | `8080` | HTTP port. Compose maps this to host `8080`. |
+| `API_SERVER_HOST` | No for Docker images | image sets `127.0.0.1` | Rust backend bind host inside the container; nginx is the public listener. |
+| `API_SERVER_PORT` | No for Docker images | image sets `18080` | Rust backend internal port; nginx listens on public port `8080`. |
 | `AUTH_TOKEN_SECRET` | Yes | `change-me-to-a-long-random-secret` | Replace with a production secret. |
 | `AUTH_TOKEN_TTL_SECONDS` | No | `43200` | Login token TTL. |
-| `COIN_LISTENER_FRONTEND_DIST` | No for Docker images | `/usr/local/share/coin-listener/frontend` | The all-in-one Docker image already sets this to its bundled frontend assets. Only set it for manual binary runs. |
+| `COIN_LISTENER_FRONTEND_DIST` | No for Docker images | `/usr/local/share/coin-listener/frontend` | The all-in-one Docker image already sets this to its bundled frontend assets for nginx/static serving. Only set it for manual binary runs. |
 | `ENABLE_DEV_ROUTES` | No | `false` | Keep disabled in production. |
 | `RUST_LOG` | No | `info` | Runtime log level. |
 | `SCAN_QUEUE_KEY` | No | `scan:address:queue` | Redis scan queue key. |
@@ -81,7 +81,7 @@ The application runs migrations at startup. The baseline seed creates `admin@exa
 
 ## Deploy with the GHCR Docker Compose file
 
-Use this when you want the server to pull and run the image published by GitHub Actions instead of building locally. The image already contains the compiled frontend and sets the frontend asset path internally, so you do not need to configure `COIN_LISTENER_FRONTEND_DIST` for Docker deployment.
+Use this when you want the server to pull and run the image published by GitHub Actions instead of building locally. The image already contains nginx, the compiled frontend, and the Rust backend. You do not need to configure `COIN_LISTENER_FRONTEND_DIST`, `API_SERVER_HOST`, or `API_SERVER_PORT` for Docker deployment.
 
 1. Optionally create `.env` to override defaults and set production secrets:
 
@@ -116,7 +116,7 @@ COIN_LISTENER_IMAGE=ghcr.io/<owner>/<repo>-all-in-one:latest docker compose -f d
 docker compose -f docker-compose.ghcr.yml down
 ```
 
-`docker-compose.ghcr.yml` still starts PostgreSQL and Redis locally. If you use external PostgreSQL or Redis, set `DATABASE_URL` and `REDIS_URL` in `.env` or in the shell before running `docker compose`. Do not set `COIN_LISTENER_FRONTEND_DIST` for the GHCR image unless you intentionally override the bundled frontend path.
+`docker-compose.ghcr.yml` still starts PostgreSQL and Redis locally. If you use external PostgreSQL or Redis, set `DATABASE_URL` and `REDIS_URL` in `.env` or in the shell before running `docker compose`. Do not set `COIN_LISTENER_FRONTEND_DIST`, `API_SERVER_HOST`, or `API_SERVER_PORT` for the GHCR image unless you intentionally override the image defaults.
 
 ## Deploy with the GHCR image manually
 
@@ -141,8 +141,6 @@ Example container run using external PostgreSQL and Redis:
 docker run --rm -p 8080:8080 \
   -e DATABASE_URL='postgres://coin_listener:coin_listener_password@db-host:5432/coin_listener' \
   -e REDIS_URL='redis://redis-host:6379' \
-  -e API_SERVER_HOST='0.0.0.0' \
-  -e API_SERVER_PORT='8080' \
   -e AUTH_TOKEN_SECRET='<long-random-secret>' \
   ghcr.io/<owner>/<repo>-all-in-one:latest
 ```
