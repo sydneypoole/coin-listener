@@ -43,7 +43,7 @@ pub struct Provider {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Asset {
     pub id: Uuid,
     pub chain_id: Uuid,

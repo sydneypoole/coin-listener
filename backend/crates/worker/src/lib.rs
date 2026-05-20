@@ -242,6 +242,32 @@ pub fn ensure_provider_matches_context(
     Ok(())
 }
 
+pub fn native_asset_selected(selected_assets: &[Asset], native_asset: &Asset) -> bool {
+    selected_assets
+        .iter()
+        .any(|asset| asset.id == native_asset.id)
+}
+
+pub fn selected_assets_by_type(selected_assets: &[Asset], asset_type: &str) -> Vec<Asset> {
+    let mut assets = selected_assets
+        .iter()
+        .filter(|asset| asset.asset_type == asset_type)
+        .cloned()
+        .collect::<Vec<_>>();
+    assets.sort_by(|left, right| {
+        left.symbol
+            .cmp(&right.symbol)
+            .then(left.name.cmp(&right.name))
+    });
+    assets
+}
+
+pub fn asset_type_selected(selected_assets: &[Asset], asset_type: &str) -> bool {
+    selected_assets
+        .iter()
+        .any(|asset| asset.asset_type == asset_type)
+}
+
 pub fn provider_attempts_exhausted_error(
     chain_id: uuid::Uuid,
     last_provider_error: Option<AppError>,
@@ -307,6 +333,7 @@ pub async fn scan_evm_erc20_transfers(
     context: &ScanAddressContext,
     latest_block: i64,
     default_confirmations: i32,
+    selected_assets: &[Asset],
 ) -> AppResult<Vec<AddressEvent>> {
     let cursor = repositories::scan_cursor(pool, context.id, EVM_ERC20_TRANSFER_CURSOR).await?;
     let Some((from_block, to_block)) =
@@ -315,7 +342,7 @@ pub async fn scan_evm_erc20_transfers(
         return Ok(Vec::new());
     };
 
-    let assets = repositories::active_erc20_assets_for_chain(pool, context.chain_id).await?;
+    let assets = selected_assets_by_type(selected_assets, "erc20");
     if assets.is_empty() {
         return Ok(Vec::new());
     }
@@ -383,22 +410,25 @@ pub async fn scan_evm_address_with_provider(
     ensure_provider_matches_context(provider, context)?;
     let chain = repositories::chain_by_id(pool, context.chain_id).await?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
+    let selected_assets = repositories::selected_assets_for_address(pool, context.id).await?;
     let timeout = provider_timeout_duration(provider)?;
     let rpc = EvmRpcClient::new(provider.base_url.clone(), timeout);
     let latest_block = rpc.eth_block_number().await?;
 
     let mut events = Vec::new();
-    if let Some(event) = scan_evm_native_balance_with_context(
-        pool,
-        &rpc,
-        context,
-        &native_asset,
-        provider,
-        latest_block,
-    )
-    .await?
-    {
-        events.push(event);
+    if native_asset_selected(&selected_assets, &native_asset) {
+        if let Some(event) = scan_evm_native_balance_with_context(
+            pool,
+            &rpc,
+            context,
+            &native_asset,
+            provider,
+            latest_block,
+        )
+        .await?
+        {
+            events.push(event);
+        }
     }
     events.extend(
         scan_evm_erc20_transfers(
@@ -407,6 +437,7 @@ pub async fn scan_evm_address_with_provider(
             context,
             latest_block,
             chain.default_confirmations,
+            &selected_assets,
         )
         .await?,
     );
@@ -465,6 +496,7 @@ pub async fn scan_tron_address_with_provider(
 ) -> AppResult<Vec<AddressEvent>> {
     ensure_provider_matches_context(provider, context)?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
+    let selected_assets = repositories::selected_assets_for_address(pool, context.id).await?;
     let timeout = provider_timeout_duration(provider)?;
 
     let client = TronClient::new(provider.base_url.clone(), timeout);
@@ -478,44 +510,45 @@ pub async fn scan_tron_address_with_provider(
     let mut trx_fingerprint: Option<String> = None;
     let mut trx_pages_processed = 0usize;
 
-    loop {
-        let page = client
-            .account_transactions_page(&context.address, trx_from, trx_fingerprint.as_deref())
-            .await?;
-        let page_index = trx_pages_processed;
-        trx_pages_processed += 1;
-        let tron::TronPage {
-            data,
-            next_fingerprint,
-        } = page;
-        let has_next_page = next_fingerprint.is_some();
-        ensure_provider_page_limit(
-            "TRON account transactions",
-            trx_pages_processed,
-            has_next_page,
-        )?;
+    if native_asset_selected(&selected_assets, &native_asset) {
+        loop {
+            let page = client
+                .account_transactions_page(&context.address, trx_from, trx_fingerprint.as_deref())
+                .await?;
+            let page_index = trx_pages_processed;
+            trx_pages_processed += 1;
+            let tron::TronPage {
+                data,
+                next_fingerprint,
+            } = page;
+            let has_next_page = next_fingerprint.is_some();
+            ensure_provider_page_limit(
+                "TRON account transactions",
+                trx_pages_processed,
+                has_next_page,
+            )?;
 
-        for (index, payload) in data.iter().enumerate() {
-            match tron::try_decode_trx_transfer_at_index(
-                payload,
-                native_asset.decimals,
-                paged_log_index(page_index, index)?,
-            )? {
-                tron::TrxTransferDecode::Transfer(transfer) => trx_transfers.push(transfer),
-                tron::TrxTransferDecode::Skip => continue,
+            for (index, payload) in data.iter().enumerate() {
+                match tron::try_decode_trx_transfer_at_index(
+                    payload,
+                    native_asset.decimals,
+                    paged_log_index(page_index, index)?,
+                )? {
+                    tron::TrxTransferDecode::Transfer(transfer) => trx_transfers.push(transfer),
+                    tron::TrxTransferDecode::Skip => continue,
+                }
             }
-        }
 
-        let Some(next) = next_fingerprint else {
-            break;
-        };
-        trx_fingerprint = Some(next);
+            let Some(next) = next_fingerprint else {
+                break;
+            };
+            trx_fingerprint = Some(next);
+        }
     }
 
     let trx_cursor_value = tron_cursor_value(&trx_transfers);
 
-    let trc20_assets =
-        repositories::active_assets_for_chain_by_type(pool, context.chain_id, "trc20").await?;
+    let trc20_assets = selected_assets_by_type(&selected_assets, "trc20");
     let trc20_cursor =
         repositories::scan_cursor(pool, context.id, TRON_TRC20_TRANSFER_CURSOR).await?;
     let trc20_from = trc20_cursor
@@ -674,6 +707,10 @@ pub async fn scan_btc_address_with_provider(
 ) -> AppResult<Vec<AddressEvent>> {
     ensure_provider_matches_context(provider, context)?;
     let native_asset = repositories::native_asset_for_chain(pool, context.chain_id).await?;
+    let selected_assets = repositories::selected_assets_for_address(pool, context.id).await?;
+    if !native_asset_selected(&selected_assets, &native_asset) {
+        return Ok(Vec::new());
+    }
     let timeout = provider_timeout_duration(provider)?;
 
     let client = BtcClient::new(provider.base_url.clone(), timeout);
@@ -1070,6 +1107,77 @@ mod tests {
                 scan_interval_seconds: 60,
                 chain_type: "evm".to_string(),
             }
+        }
+    }
+
+    mod selected_asset_filters {
+        use coin_listener_core::models::Asset;
+        use uuid::Uuid;
+
+        use crate::{asset_type_selected, native_asset_selected, selected_assets_by_type};
+
+        fn asset(
+            id: u128,
+            asset_type: &str,
+            symbol: &str,
+            contract_address: Option<&str>,
+        ) -> Asset {
+            Asset {
+                id: Uuid::from_u128(id),
+                chain_id: Uuid::from_u128(2),
+                asset_type: asset_type.to_string(),
+                symbol: symbol.to_string(),
+                name: symbol.to_string(),
+                contract_address: contract_address.map(ToString::to_string),
+                decimals: 18,
+                is_builtin: true,
+                status: "active".to_string(),
+            }
+        }
+
+        #[test]
+        fn native_asset_selected_only_when_native_id_is_present() {
+            let native = asset(1, "native", "ETH", None);
+            let usdt = asset(
+                2,
+                "erc20",
+                "USDT",
+                Some("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+            );
+
+            assert!(native_asset_selected(
+                &[native.clone(), usdt.clone()],
+                &native
+            ));
+            assert!(!native_asset_selected(&[usdt], &native));
+        }
+
+        #[test]
+        fn selected_assets_by_type_filters_contract_assets() {
+            let eth = asset(1, "native", "ETH", None);
+            let usdt = asset(
+                2,
+                "erc20",
+                "USDT",
+                Some("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+            );
+            let usdc = asset(
+                3,
+                "erc20",
+                "USDC",
+                Some("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+            );
+
+            let selected = selected_assets_by_type(&[eth, usdt.clone(), usdc.clone()], "erc20");
+
+            assert_eq!(selected, vec![usdc, usdt]);
+        }
+
+        #[test]
+        fn asset_type_selected_detects_any_selected_asset_of_type() {
+            let btc = asset(1, "native", "BTC", None);
+            assert!(asset_type_selected(&[btc], "native"));
+            assert!(!asset_type_selected(&[], "native"));
         }
     }
 
@@ -1633,6 +1741,53 @@ mod tests {
         assert!(provider_attempt.contains("context: &ScanAddressContext"));
         assert!(provider_attempt.contains("ensure_provider_matches_context(provider, context)?"));
         assert!(!provider_attempt.contains("get_scan_address_context"));
+    }
+
+    #[test]
+    fn evm_scan_uses_selected_assets_for_native_and_erc20_paths() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub async fn scan_evm_address_with_provider(")
+            .expect("EVM provider function");
+        let end = source
+            .find("pub async fn scan_evm_address(")
+            .expect("EVM scan function");
+        let evm = &source[start..end];
+
+        assert!(evm.contains("selected_assets_for_address(pool, context.id).await?"));
+        assert!(evm.contains("native_asset_selected(&selected_assets, &native_asset)"));
+        assert!(evm.contains("&selected_assets"));
+    }
+
+    #[test]
+    fn worker_no_longer_scans_all_active_assets_for_transfer_paths() {
+        let source = include_str!("lib.rs");
+        let end = source.find("#[cfg(test)]").expect("test module");
+        let production = &source[..end];
+
+        assert!(
+            !production.contains("active_erc20_assets_for_chain(pool, context.chain_id).await?")
+        );
+        assert!(!production
+            .contains("active_assets_for_chain_by_type(pool, context.chain_id, \"trc20\").await?"));
+        assert!(production.contains("selected_assets_by_type(selected_assets, \"erc20\")"));
+        assert!(production.contains("selected_assets_by_type(&selected_assets, \"trc20\")"));
+    }
+
+    #[test]
+    fn btc_scan_skips_when_native_asset_is_not_selected() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub async fn scan_btc_address_with_provider(")
+            .expect("BTC provider function");
+        let end = source
+            .find("pub async fn scan_btc_address(")
+            .expect("BTC scan function");
+        let btc = &source[start..end];
+
+        assert!(btc.contains("selected_assets_for_address(pool, context.id).await?"));
+        assert!(btc.contains("if !native_asset_selected(&selected_assets, &native_asset)"));
+        assert!(btc.contains("return Ok(Vec::new())"));
     }
 
     #[test]

@@ -658,7 +658,10 @@ async fn asset_ids_by_address(
 
     let mut grouped = HashMap::<Uuid, Vec<Uuid>>::new();
     for row in rows {
-        grouped.entry(row.address_id).or_default().push(row.asset_id);
+        grouped
+            .entry(row.address_id)
+            .or_default()
+            .push(row.asset_id);
     }
     Ok(grouped)
 }
@@ -872,7 +875,10 @@ pub async fn list_watched_addresses(
         .fetch_all(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
-    let address_ids = addresses.iter().map(|address| address.id).collect::<Vec<_>>();
+    let address_ids = addresses
+        .iter()
+        .map(|address| address.id)
+        .collect::<Vec<_>>();
     let mut asset_ids = asset_ids_by_address(pool, &address_ids).await?;
 
     Ok(addresses
@@ -1592,7 +1598,6 @@ mod tests {
         ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY, ACTIVE_USER_QUERY,
         ASSET_IDS_FOR_ADDRESS_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
         CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, DELETE_WATCHED_ADDRESS_QUERY,
-        WATCHED_ADDRESS_ASSET_IDS_FOR_ADDRESSES_QUERY,
         GET_NOTIFICATION_OUTBOX_ITEM_QUERY, GET_WATCHED_ADDRESS_QUERY,
         INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
         INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY, LATEST_BALANCE_SNAPSHOT_QUERY,
@@ -1604,7 +1609,7 @@ mod tests {
         REPLACE_WATCHED_ADDRESS_ASSETS_INSERT_QUERY, SCAN_CURSOR_QUERY,
         SELECTED_ASSETS_FOR_ADDRESS_QUERY, SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY,
         UPDATE_WATCHED_ADDRESS_QUERY, UPSERT_SCAN_CURSOR_QUERY, VALIDATE_ASSETS_FOR_CHAIN_QUERY,
-        WATCHED_ADDRESS_ASSETS_MIGRATION,
+        WATCHED_ADDRESS_ASSETS_MIGRATION, WATCHED_ADDRESS_ASSET_IDS_FOR_ADDRESSES_QUERY,
     };
     use chrono::{TimeZone, Utc};
     use coin_listener_core::{
