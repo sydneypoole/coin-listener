@@ -117,6 +117,7 @@ pub const VALIDATE_ASSETS_FOR_CHAIN_QUERY: &str = r#"
 SELECT id, chain_id, asset_type, symbol, name, contract_address, decimals, is_builtin, status
 FROM assets
 WHERE id = ANY($1)
+  AND status = 'active'
 ORDER BY id
 "#;
 
@@ -692,6 +693,7 @@ pub async fn validate_assets_for_chain(
     }
     for asset in &assets {
         validate_asset_chain_match(chain_id, asset)?;
+        validate_asset_is_active(asset)?;
     }
 
     Ok(deduped)
@@ -732,6 +734,13 @@ pub fn validate_asset_chain_match(chain_id: Uuid, asset: &Asset) -> AppResult<()
         return Err(AppError::Validation(
             "asset must belong to watched address chain".to_string(),
         ));
+    }
+    Ok(())
+}
+
+pub fn validate_asset_is_active(asset: &Asset) -> AppResult<()> {
+    if asset.status != "active" {
+        return Err(AppError::Validation("asset must be active".to_string()));
     }
     Ok(())
 }
@@ -1829,6 +1838,12 @@ mod tests {
             .contains("asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE"));
         assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains("PRIMARY KEY (address_id, asset_id)"));
         assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains("idx_watched_address_assets_asset"));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains("INSERT INTO watched_address_assets"));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains("FROM watched_addresses wa"));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION
+            .contains("INNER JOIN assets a ON a.chain_id = wa.chain_id"));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains("a.status = 'active'"));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains("ON CONFLICT DO NOTHING"));
     }
 
     #[test]
@@ -2084,6 +2099,7 @@ mod tests {
         assert!(ASSET_IDS_FOR_ADDRESS_QUERY.contains("ORDER BY created_at, asset_id"));
 
         assert!(VALIDATE_ASSETS_FOR_CHAIN_QUERY.contains("WHERE id = ANY($1)"));
+        assert!(VALIDATE_ASSETS_FOR_CHAIN_QUERY.contains("AND status = 'active'"));
         assert!(VALIDATE_ASSETS_FOR_CHAIN_QUERY.contains("ORDER BY id"));
 
         assert!(REPLACE_WATCHED_ADDRESS_ASSETS_DELETE_QUERY
@@ -2150,6 +2166,22 @@ mod tests {
         .expect_err("wrong chain rejected");
         assert!(
             matches!(wrong_chain, AppError::Validation(message) if message.contains("asset must belong to watched address chain"))
+        );
+
+        let inactive = super::validate_asset_is_active(&coin_listener_core::models::Asset {
+            id: uuid::Uuid::from_u128(2),
+            chain_id: uuid::Uuid::from_u128(1),
+            asset_type: "native".to_string(),
+            symbol: "ETH".to_string(),
+            name: "Ether".to_string(),
+            contract_address: None,
+            decimals: 18,
+            is_builtin: true,
+            status: "inactive".to_string(),
+        })
+        .expect_err("inactive asset rejected");
+        assert!(
+            matches!(inactive, AppError::Validation(message) if message == "asset must be active")
         );
     }
 
