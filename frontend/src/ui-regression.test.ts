@@ -22,6 +22,35 @@ function expectNotContains(source: string, unexpected: string) {
   }
 }
 
+function expectMatches(source: string, pattern: RegExp, label: string) {
+  if (!pattern.test(source)) {
+    throw new Error(`Expected source to match ${label}: ${pattern}`);
+  }
+}
+
+function expectNotMatches(source: string, pattern: RegExp, label: string) {
+  if (pattern.test(source)) {
+    throw new Error(`Expected source not to match ${label}: ${pattern}`);
+  }
+}
+
+function expectOrdered(source: string, first: string, second: string) {
+  const firstIndex = source.indexOf(first);
+  const secondIndex = source.indexOf(second);
+
+  if (firstIndex === -1) {
+    throw new Error(`Expected source to contain ordered item: ${first}`);
+  }
+
+  if (secondIndex === -1) {
+    throw new Error(`Expected source to contain ordered item: ${second}`);
+  }
+
+  if (firstIndex > secondIndex) {
+    throw new Error(`Expected ${first} to appear before ${second}`);
+  }
+}
+
 describe('frontend UI regressions', () => {
   test('provider management exposes edit and connectivity test controls', () => {
     const page = readSource('pages/ProvidersPage.tsx');
@@ -120,11 +149,11 @@ describe('frontend UI regressions', () => {
     expectContains(packageJson, '@tailwindcss/vite');
     expectContains(packageJson, '@douyinfe/semi-vite-plugin');
     expectContains(viteConfig, 'tailwindcss()');
-    expectContains(viteConfig, 'semiTheming({ cssLayer: true })');
+    expectMatches(viteConfig, /semiTheming\(\s*\{\s*cssLayer:\s*true\s*\}\s*\)/, 'Semi CSS layer plugin');
     expectContains(semiLayer, '@layer theme, base, semi, utilities;');
     expectContains(tailwind, '@import "tailwindcss";');
-    expectContains(main, "import './semi-layer.css';");
-    expectContains(main, "import './tailwind.css';");
+    expectOrdered(main, "import './semi-layer.css';", "import './tailwind.css';");
+    expectOrdered(main, "import './tailwind.css';", "import './styles.css';");
   });
 
   test('theme mode persists and uses semi dark mode contract', () => {
@@ -133,6 +162,8 @@ describe('frontend UI regressions', () => {
     const toggle = readSource('components/ThemeToggle.tsx');
 
     expectContains(themeMode, 'coin-listener:theme-mode');
+    expectContains(themeMode, 'localStorage.getItem');
+    expectContains(themeMode, 'localStorage.setItem');
     expectContains(themeMode, "document.body.setAttribute('theme-mode', 'dark')");
     expectContains(themeMode, "document.body.removeAttribute('theme-mode')");
     expectContains(themeMode, "matchMedia('(prefers-color-scheme: dark)')");
@@ -160,7 +191,7 @@ describe('frontend UI regressions', () => {
     expectContains(table, 'coin-listener:data-table-widths:');
     expectContains(table, 'localStorage');
     expectContains(table, 'onResizeStop');
-    expectContains(table, "fixed: 'right'");
+    expectMatches(table, /fixed:\s*['"]right['"]/, 'fixed right action column');
     expectContains(table, 'resizable=');
     expectContains(table, 'data-table-surface');
   });
@@ -182,8 +213,12 @@ describe('frontend UI regressions', () => {
       const page = readSource(pagePath);
       expectContains(page, 'DataTable');
       expectContains(page, 'tableId=');
-      expectNotContains(page, ' Table,');
-      expectNotContains(page, '<Table<');
+      expectNotMatches(
+        page,
+        /import\s*\{[^}]*\bTable\b[^}]*\}\s*from\s*['"]@douyinfe\/semi-ui['"]/,
+        `${pagePath} Semi Table import`,
+      );
+      expectNotMatches(page, /<Table(?:\s|>|\/|<)/, `${pagePath} direct Semi Table JSX`);
     }
   });
 });
