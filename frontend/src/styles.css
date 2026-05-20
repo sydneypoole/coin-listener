@@ -190,3 +190,24 @@ body {
 .metric-card-success { border-color: rgba(34, 197, 94, 0.32); }
 .metric-card-warning { border-color: rgba(245, 158, 11, 0.34); }
 .metric-card-danger { border-color: rgba(239, 68, 68, 0.34); }
+
+.data-table-surface {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.data-table .semi-table-container {
+  min-width: 0;
+}
+
+.data-table .semi-table-thead > .semi-table-row > .semi-table-row-head {
+  color: var(--semi-color-text-1);
+  background: color-mix(in srgb, var(--semi-color-bg-2) 86%, transparent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.data-table .semi-table-row:hover .semi-table-row-cell {
+  background: color-mix(in srgb, var(--semi-color-primary) 7%, var(--semi-color-bg-1));
+}

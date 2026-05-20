@@ -191,7 +191,7 @@ describe('frontend UI regressions', () => {
     expectContains(table, 'coin-listener:data-table-widths:');
     expectContains(table, 'localStorage');
     expectContains(table, 'onResizeStop');
-    expectMatches(table, /fixed:\s*['"]right['"]/, 'fixed right action column');
+    expectMatches(table, /fixed:\s*isActionColumn\s*\?\s*\(['"]right['"] as const\)/, 'fixed right action column');
     expectContains(table, 'resizable=');
     expectContains(table, 'data-table-surface');
   });
