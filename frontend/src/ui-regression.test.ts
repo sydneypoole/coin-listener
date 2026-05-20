@@ -198,6 +198,21 @@ describe('frontend UI regressions', () => {
     expectContains(table, 'data-table-surface');
   });
 
+  test('provider health table columns have stable unique keys', () => {
+    const page = readSource('pages/SystemStatusPage.tsx');
+
+    for (const key of [
+      "key: 'health-status'",
+      "key: 'health-failures'",
+      "key: 'health-last-success'",
+      "key: 'health-last-failure'",
+      "key: 'health-disabled-until'",
+      "key: 'health-last-error'",
+    ]) {
+      expectContains(page, key);
+    }
+  });
+
   test('business pages use DataTable for table overflow control', () => {
     const pagePaths = [
       'pages/ChainsPage.tsx',
