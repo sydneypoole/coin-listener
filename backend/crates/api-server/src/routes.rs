@@ -737,6 +737,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn watched_address_request_requires_asset_ids_field() {
+        let missing_assets = r#"{
+            "chain_id":"00000000-0000-0000-0000-000000000002",
+            "address":"0x0000000000000000000000000000000000000001",
+            "label":null,
+            "priority":"normal",
+            "scan_interval_seconds":300,
+            "transfer_filter_enabled":true,
+            "balance_change_filter_enabled":true,
+            "status":"active"
+        }"#;
+
+        let error =
+            serde_json::from_str::<coin_listener_core::models::CreateWatchedAddressRequest>(
+                missing_assets,
+            )
+            .expect_err("missing asset_ids should fail deserialization");
+
+        assert!(error.to_string().contains("asset_ids"));
+    }
+
+    #[test]
+    fn watched_address_request_accepts_non_empty_asset_ids() {
+        let payload = r#"{
+            "chain_id":"00000000-0000-0000-0000-000000000002",
+            "address":"0x0000000000000000000000000000000000000001",
+            "label":null,
+            "priority":"normal",
+            "scan_interval_seconds":300,
+            "transfer_filter_enabled":true,
+            "balance_change_filter_enabled":true,
+            "status":"active",
+            "asset_ids":["00000000-0000-0000-0000-000000000101"]
+        }"#;
+
+        let request =
+            serde_json::from_str::<coin_listener_core::models::CreateWatchedAddressRequest>(
+                payload,
+            )
+            .expect("request with asset_ids deserializes");
+
+        assert_eq!(request.asset_ids, vec![uuid::Uuid::from_u128(0x101)]);
+    }
+
     #[tokio::test]
     async fn router_exposes_events_filter_query() {
         let app = build_router(test_state());
