@@ -91,7 +91,7 @@ describe('frontend UI regressions', () => {
       'pages/ProvidersPage.tsx',
     ];
 
-    expectContains(styles, 'overflow-x: hidden');
+    expectMatches(styles, /overflow(?:-x)?:\s*hidden/, 'page horizontal overflow guard');
     expectContains(styles, '.table-cell-mono');
 
     for (const pagePath of pages) {
