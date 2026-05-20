@@ -1,8 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Form, Select, Space, Table, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { Banner, Button, Form, Select, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
 import { ApiRequestError, listAssets, listChains, listEvents, listWatchedAddresses, scanAddress } from '../api/client';
 import type { AddressEvent, EventQuery } from '../api/types';
+import { DataSurface } from '../components/DataSurface';
+import { DataTable } from '../components/DataTable';
+import { FilterPanel } from '../components/FilterPanel';
+import { PageScaffold } from '../components/PageScaffold';
 
 const { Text } = Typography;
 
@@ -108,7 +112,7 @@ export function EventsPage() {
   }
 
   return (
-    <Space vertical align="start" spacing={16} className="content-stack">
+    <PageScaffold title="事件中心">
       {eventsQuery.isError ? (
         <Banner
           type="danger"
@@ -117,39 +121,39 @@ export function EventsPage() {
         />
       ) : null}
 
-      <Card title="事件筛选" className="filter-card">
+      <FilterPanel title="事件筛选">
         <Form<FilterForm> layout="horizontal" onSubmit={handleFilterSubmit} labelPosition="left">
           {({ formApi }) => (
             <>
-          <Form.Select field="chain_id" label="链" showClear placeholder="全部链" filter>
-            {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}
-          </Form.Select>
-          <Form.Select field="address_id" label="地址" showClear placeholder="全部地址" filter>
-            {(addressesQuery.data ?? []).map(address => (
-              <Form.Select.Option key={address.id} value={address.id}>
-                {address.label ? `${address.label} / ${address.address}` : address.address}
-              </Form.Select.Option>
-            ))}
-          </Form.Select>
-          <Form.Select field="asset_id" label="资产" showClear placeholder="全部资产" filter>
-            {(assetsQuery.data ?? []).map(asset => <Form.Select.Option key={asset.id} value={asset.id}>{asset.symbol}</Form.Select.Option>)}
-          </Form.Select>
-          <Form.Select field="event_type" label="事件类型" showClear placeholder="全部类型" optionList={eventTypeOptions} />
-          <Form.Select field="direction" label="方向" showClear placeholder="全部方向" optionList={directionOptions} />
-          <Form.Select field="is_transfer" label="是否转账" showClear placeholder="全部">
-            <Form.Select.Option value="true">是</Form.Select.Option>
-            <Form.Select.Option value="false">否</Form.Select.Option>
-          </Form.Select>
-          <Space>
-            <Button htmlType="submit" type="primary">查询</Button>
-            <Button onClick={() => resetFilters(formApi)}>重置</Button>
-          </Space>
+              <Form.Select field="chain_id" label="链" showClear placeholder="全部链" filter>
+                {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}
+              </Form.Select>
+              <Form.Select field="address_id" label="地址" showClear placeholder="全部地址" filter>
+                {(addressesQuery.data ?? []).map(address => (
+                  <Form.Select.Option key={address.id} value={address.id}>
+                    {address.label ? `${address.label} / ${address.address}` : address.address}
+                  </Form.Select.Option>
+                ))}
+              </Form.Select>
+              <Form.Select field="asset_id" label="资产" showClear placeholder="全部资产" filter>
+                {(assetsQuery.data ?? []).map(asset => <Form.Select.Option key={asset.id} value={asset.id}>{asset.symbol}</Form.Select.Option>)}
+              </Form.Select>
+              <Form.Select field="event_type" label="事件类型" showClear placeholder="全部类型" optionList={eventTypeOptions} />
+              <Form.Select field="direction" label="方向" showClear placeholder="全部方向" optionList={directionOptions} />
+              <Form.Select field="is_transfer" label="是否转账" showClear placeholder="全部">
+                <Form.Select.Option value="true">是</Form.Select.Option>
+                <Form.Select.Option value="false">否</Form.Select.Option>
+              </Form.Select>
+              <Space>
+                <Button htmlType="submit" type="primary">查询</Button>
+                <Button onClick={() => resetFilters(formApi)}>重置</Button>
+              </Space>
             </>
           )}
         </Form>
-      </Card>
+      </FilterPanel>
 
-      <Card title="开发模拟扫描" className="filter-card">
+      <FilterPanel title="开发模拟扫描">
         <Space vertical align="start">
           {devRouteUnavailable ? (
             <Banner
@@ -187,10 +191,11 @@ export function EventsPage() {
             {simulateDisabledReason ?? '仅支持 EVM / Base 地址；如接口返回 404，请设置 ENABLE_DEV_ROUTES=true 后重启后端。'}
           </Text>
         </Space>
-      </Card>
+      </FilterPanel>
 
-      <Card title="事件中心">
-        <Table<AddressEvent>
+      <DataSurface title="事件中心">
+        <DataTable<AddressEvent>
+          tableId="events"
           loading={eventsQuery.isLoading}
           dataSource={eventsQuery.data ?? []}
           rowKey="id"
@@ -199,7 +204,7 @@ export function EventsPage() {
           columns={[
             { title: '时间', dataIndex: 'created_at', width: 180, render: value => new Date(String(value)).toLocaleString() },
             { title: '链', dataIndex: 'chain_id', width: 120, render: value => chainMap.get(String(value)) ?? String(value) },
-            { title: '地址', dataIndex: 'address_id', width: 280, render: value => renderAddress(String(value)) },
+            { title: '地址', dataIndex: 'address_id', width: 280, ellipsis: { showTitle: true }, className: 'table-cell-mono', render: value => renderAddress(String(value)) },
             { title: '资产', dataIndex: 'asset_id', width: 100, render: value => assetMap.get(String(value)) ?? String(value) },
             { title: '类型', dataIndex: 'event_type', width: 150, render: value => <Tag>{String(value)}</Tag> },
             { title: '转账', dataIndex: 'is_transfer', width: 90, render: value => <Tag color={value ? 'green' : 'grey'}>{value ? '是' : '否'}</Tag> },
@@ -208,10 +213,10 @@ export function EventsPage() {
             { title: '余额变化', dataIndex: 'balance_delta_raw', width: 140, render: value => value ? String(value) : '-' },
             { title: '确认数', dataIndex: 'confirmations', width: 90 },
             { title: '通知状态', width: 100, render: () => <Tag color="grey">待接入</Tag> },
-            { title: '交易哈希', dataIndex: 'tx_hash', width: 260, ellipsis: { showTitle: true }, render: value => value ? String(value) : '-' },
+            { title: '交易哈希', dataIndex: 'tx_hash', width: 260, ellipsis: { showTitle: true }, className: 'table-cell-mono', render: value => value ? String(value) : '-' },
           ]}
         />
-      </Card>
-    </Space>
+      </DataSurface>
+    </PageScaffold>
   );
 }

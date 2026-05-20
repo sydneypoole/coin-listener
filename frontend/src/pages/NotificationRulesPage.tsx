@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Form, Modal, Space, Table, Tag, Toast } from '@douyinfe/semi-ui';
+import { Banner, Button, Form, Modal, Space, Tag, Toast } from '@douyinfe/semi-ui';
 import {
   createNotificationRule,
   deleteNotificationRule,
@@ -12,6 +12,9 @@ import {
   updateNotificationRule,
 } from '../api/client';
 import type { CreateNotificationRuleRequest, NotificationRule } from '../api/types';
+import { DataSurface } from '../components/DataSurface';
+import { DataTable } from '../components/DataTable';
+import { PageScaffold } from '../components/PageScaffold';
 
 const eventTypeOptions = [
   { label: 'transfer', value: 'transfer' },
@@ -131,7 +134,7 @@ export function NotificationRulesPage() {
   }
 
   return (
-    <Space vertical align="start" spacing={16} className="content-stack">
+    <PageScaffold title="通知规则">
       {rulesQuery.isError ? (
         <Banner
           type="danger"
@@ -140,25 +143,24 @@ export function NotificationRulesPage() {
         />
       ) : null}
 
-      <Card
-        title="通知规则"
-        headerExtraContent={<Button type="primary" onClick={openCreateModal}>创建规则</Button>}
-      >
-        <Table<NotificationRule>
+      <DataSurface title="通知规则" actions={<Button type="primary" onClick={openCreateModal}>创建规则</Button>}>
+        <DataTable<NotificationRule>
+          tableId="notification-rules"
+          actionColumnKeys={['operations']}
           loading={rulesQuery.isLoading}
           dataSource={rulesQuery.data ?? []}
           rowKey="id"
           pagination={{ pageSize: 10 }}
           scroll={{ x: 1300 }}
           columns={[
-            { title: '名称', dataIndex: 'name', width: 180 },
+            { title: '名称', dataIndex: 'name', width: 180, ellipsis: { showTitle: true } },
             { title: '启用', dataIndex: 'enabled', width: 80, render: value => <Tag color={value ? 'green' : 'grey'}>{value ? '启用' : '停用'}</Tag> },
             { title: '链', dataIndex: 'chain_id', width: 140, render: value => value ? chainMap.get(String(value)) ?? String(value) : '-' },
-            { title: '地址', dataIndex: 'address_id', width: 260, render: value => renderAddress(value ? String(value) : null) },
+            { title: '地址', dataIndex: 'address_id', width: 260, ellipsis: { showTitle: true }, className: 'table-cell-mono', render: value => renderAddress(value ? String(value) : null) },
             { title: '资产', dataIndex: 'asset_id', width: 120, render: value => value ? assetMap.get(String(value)) ?? String(value) : '-' },
             { title: '事件类型', dataIndex: 'event_type', width: 150, render: value => value ? <Tag>{String(value)}</Tag> : '-' },
             { title: '方向', dataIndex: 'direction', width: 90, render: value => value ? String(value) : '-' },
-            { title: '最小金额 raw', dataIndex: 'min_amount_raw', width: 150, render: value => value ? String(value) : '-' },
+            { title: '最小金额 raw', dataIndex: 'min_amount_raw', width: 150, ellipsis: { showTitle: true }, className: 'table-cell-mono', render: value => value ? String(value) : '-' },
             {
               title: '渠道',
               dataIndex: 'channel_ids',
@@ -171,8 +173,8 @@ export function NotificationRulesPage() {
             },
             {
               title: '操作',
+              key: 'operations',
               width: 150,
-              fixed: 'right',
               render: (_, rule) => (
                 <Space>
                   <Button size="small" onClick={() => openEditModal(rule)}>编辑</Button>
@@ -182,7 +184,7 @@ export function NotificationRulesPage() {
             },
           ]}
         />
-      </Card>
+      </DataSurface>
 
       <Modal
         title={editingRule ? '编辑通知规则' : '创建通知规则'}
@@ -223,6 +225,6 @@ export function NotificationRulesPage() {
           </Space>
         </Form>
       </Modal>
-    </Space>
+    </PageScaffold>
   );
 }

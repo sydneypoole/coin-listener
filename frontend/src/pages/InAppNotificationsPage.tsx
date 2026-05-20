@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Space, Switch, Table, Tag, Toast } from '@douyinfe/semi-ui';
+import { Banner, Button, Space, Switch, Tag, Toast } from '@douyinfe/semi-ui';
 import { listInAppNotifications, markInAppNotificationRead } from '../api/client';
 import type { InAppNotification } from '../api/types';
+import { DataSurface } from '../components/DataSurface';
+import { DataTable } from '../components/DataTable';
+import { FilterPanel } from '../components/FilterPanel';
+import { PageScaffold } from '../components/PageScaffold';
 
 type InAppNotificationsPageProps = {
   onUnreadSettled?: (count: number) => void;
@@ -32,7 +36,7 @@ export function InAppNotificationsPage({ onUnreadSettled }: InAppNotificationsPa
   });
 
   return (
-    <Space vertical align="start" spacing={16} className="content-stack">
+    <PageScaffold title="站内通知">
       {notificationsQuery.isError ? (
         <Banner
           type="danger"
@@ -41,16 +45,18 @@ export function InAppNotificationsPage({ onUnreadSettled }: InAppNotificationsPa
         />
       ) : null}
 
-      <Card title="站内通知筛选" className="filter-card">
+      <FilterPanel title="站内通知筛选">
         <Space>
           <Switch checked={unreadOnly} onChange={checked => setUnreadOnly(Boolean(checked))} />
           <span>只看未读</span>
           <Button onClick={() => notificationsQuery.refetch()}>刷新</Button>
         </Space>
-      </Card>
+      </FilterPanel>
 
-      <Card title="站内通知">
-        <Table<InAppNotification>
+      <DataSurface title="站内通知">
+        <DataTable<InAppNotification>
+          tableId="in-app-notifications"
+          actionColumnKeys={['operations']}
           loading={notificationsQuery.isLoading}
           dataSource={notificationsQuery.data ?? []}
           rowKey="id"
@@ -58,7 +64,7 @@ export function InAppNotificationsPage({ onUnreadSettled }: InAppNotificationsPa
           scroll={{ x: 1000 }}
           columns={[
             { title: '时间', dataIndex: 'created_at', width: 180, render: value => new Date(String(value)).toLocaleString() },
-            { title: '标题', dataIndex: 'title', width: 180 },
+            { title: '标题', dataIndex: 'title', width: 180, ellipsis: { showTitle: true } },
             { title: '内容', dataIndex: 'body', width: 420, ellipsis: { showTitle: true } },
             {
               title: '状态',
@@ -68,6 +74,7 @@ export function InAppNotificationsPage({ onUnreadSettled }: InAppNotificationsPa
             },
             {
               title: '操作',
+              key: 'operations',
               width: 120,
               render: (_, notification) => (
                 <Button
@@ -82,7 +89,7 @@ export function InAppNotificationsPage({ onUnreadSettled }: InAppNotificationsPa
             },
           ]}
         />
-      </Card>
-    </Space>
+      </DataSurface>
+    </PageScaffold>
   );
 }
