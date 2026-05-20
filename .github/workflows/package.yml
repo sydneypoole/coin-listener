@@ -19,10 +19,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: npm
@@ -44,7 +44,7 @@ jobs:
           zip -r "${GITHUB_WORKSPACE}/coin-listener-frontend-dist-${GITHUB_SHA}.zip" .
 
       - name: Upload frontend dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coin-listener-frontend-dist
           path: coin-listener-frontend-dist-${{ github.sha }}.zip
@@ -56,7 +56,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -76,7 +76,7 @@ jobs:
         run: tar -czf "coin-listener-all-in-one-linux-amd64-${GITHUB_SHA}.tar.gz" -C backend/target/release all-in-one
 
       - name: Upload backend executable artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coin-listener-all-in-one-linux-amd64
           path: coin-listener-all-in-one-linux-amd64-${{ github.sha }}.tar.gz
@@ -88,7 +88,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prepare Docker metadata
         id: docker-meta
@@ -121,7 +121,7 @@ jobs:
           test -s "${{ steps.docker-meta.outputs.archive }}"
 
       - name: Upload Docker image artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coin-listener-all-in-one-docker-image
           path: ${{ steps.docker-meta.outputs.archive }}
