@@ -153,7 +153,7 @@ export function NotificationOperationsPage() {
 
       <DataSurface title="Notification Outbox" actions={<Text type="tertiary">limit {filters.limit ?? 50} / offset {filters.offset ?? 0}</Text>}>
         <DataTable<NotificationOutboxListItem>
-          tableId="notification-operations"
+          tableId="notification-outbox"
           loading={outboxQuery.isLoading}
           dataSource={outboxQuery.data?.items ?? []}
           rowKey="id"
@@ -262,7 +262,7 @@ function OutboxDetailModal({
 
           <DataSurface title="Deliveries">
             <DataTable<NotificationDeliveryListItem>
-              tableId="notification-operations"
+              tableId="notification-deliveries"
               dataSource={detail.deliveries}
               rowKey="id"
               pagination={{ pageSize: 5 }}

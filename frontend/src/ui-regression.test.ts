@@ -159,6 +159,7 @@ describe('frontend UI regressions', () => {
   test('theme mode persists and uses semi dark mode contract', () => {
     const themeMode = readSource('themeMode.ts');
     const app = readSource('App.tsx');
+    const shell = readSource('components/AppShell.tsx');
     const toggle = readSource('components/ThemeToggle.tsx');
 
     expectContains(themeMode, 'coin-listener:theme-mode');
@@ -168,6 +169,7 @@ describe('frontend UI regressions', () => {
     expectContains(themeMode, "document.body.removeAttribute('theme-mode')");
     expectContains(themeMode, "matchMedia('(prefers-color-scheme: dark)')");
     expectContains(toggle, 'ThemeToggle');
+    expectContains(shell, '<ThemeToggle');
     expectContains(app, '<AppShell');
   });
 

@@ -160,7 +160,7 @@ export function SystemStatusPage() {
 
       <DataSurface title="Provider 按链状态" actions={<Text type="tertiary">active {status?.providers.active ?? 0} / inactive {status?.providers.inactive ?? 0}</Text>}>
         <DataTable<ProviderChainStatus>
-          tableId="system-provider-status"
+          tableId="system-provider-by-chain"
           loading={statusQuery.isLoading}
           dataSource={status?.providers.by_chain ?? []}
           rowKey="chain_id"
@@ -175,7 +175,7 @@ export function SystemStatusPage() {
 
       <DataSurface title="Provider 明细">
         <DataTable<ProviderStatusItem>
-          tableId="system-provider-status"
+          tableId="system-provider-items"
           loading={statusQuery.isLoading}
           dataSource={status?.providers.items ?? []}
           rowKey="id"

@@ -8,7 +8,7 @@ type RowData = Record<string, unknown>;
 
 type WidthMap = Record<string, number>;
 
-type DataTableProps<RecordType extends RowData> = Omit<TableProps<RecordType>, 'columns' | 'resizable'> & {
+type DataTableProps<RecordType extends RowData> = Omit<TableProps<RecordType>, 'children' | 'columns' | 'resizable'> & {
   tableId: string;
   columns: ColumnProps<RecordType>[];
   actionColumnKeys?: Array<string | number>;
