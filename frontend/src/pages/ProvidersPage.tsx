@@ -1,8 +1,11 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Card, Form, Modal, Space, Table, Tag, Toast } from '@douyinfe/semi-ui';
+import { Button, Form, Modal, Space, Tag, Toast } from '@douyinfe/semi-ui';
 import { createProvider, listChains, listProviders, testProvider, updateProvider } from '../api/client';
 import type { CreateProviderRequest, Provider } from '../api/types';
+import { DataSurface } from '../components/DataSurface';
+import { DataTable } from '../components/DataTable';
+import { PageScaffold } from '../components/PageScaffold';
 
 export function ProvidersPage() {
   const [visible, setVisible] = useState(false);
@@ -87,45 +90,49 @@ export function ProvidersPage() {
   }
 
   return (
-    <Card title="Provider 配置" headerExtraContent={<Button onClick={openCreateModal}>新增 Provider</Button>}>
-      <Table<Provider>
-        loading={providersQuery.isLoading}
-        dataSource={providersQuery.data ?? []}
-        rowKey="id"
-        pagination={{ pageSize: 10 }}
-        scroll={{ x: 1200 }}
-        columns={[
-          { title: '链', dataIndex: 'chain_id', width: 140, render: value => chainMap.get(String(value)) ?? String(value) },
-          { title: '名称', dataIndex: 'name', width: 160, ellipsis: { showTitle: true } },
-          { title: '类型', dataIndex: 'provider_type', width: 120 },
-          { title: 'URL', dataIndex: 'base_url', width: 300, ellipsis: { showTitle: true }, className: 'table-cell-mono' },
-          { title: '优先级', dataIndex: 'priority', width: 100 },
-          { title: 'QPS', dataIndex: 'qps_limit', width: 100 },
-          { title: '超时', dataIndex: 'timeout_ms', width: 110 },
-          { title: '状态', dataIndex: 'status', width: 100, render: value => <Tag color={String(value) === 'active' ? 'green' : 'grey'}>{String(value)}</Tag> },
-          {
-            title: '操作',
-            width: 150,
-            fixed: 'right',
-            render: (_, provider) => {
-              const testDisabled = !canTestProvider(provider);
-              return (
-                <Space>
-                  <Button size="small" onClick={() => openEditModal(provider)}>编辑</Button>
-                  <Button
-                    size="small"
-                    disabled={testDisabled}
-                    loading={testingProviderId === provider.id}
-                    onClick={() => handleTestProvider(provider)}
-                  >
-                    {testDisabled ? '仅 EVM RPC 可测' : '测试'}
-                  </Button>
-                </Space>
-              );
+    <PageScaffold title="Provider 配置" actions={<Button onClick={openCreateModal}>新增 Provider</Button>}>
+      <DataSurface title="Provider 列表">
+        <DataTable<Provider>
+          tableId="providers"
+          actionColumnKeys={['operations']}
+          loading={providersQuery.isLoading}
+          dataSource={providersQuery.data ?? []}
+          rowKey="id"
+          pagination={{ pageSize: 10 }}
+          scroll={{ x: 1200 }}
+          columns={[
+            { title: '链', dataIndex: 'chain_id', width: 140, render: value => chainMap.get(String(value)) ?? String(value) },
+            { title: '名称', dataIndex: 'name', width: 160, ellipsis: { showTitle: true } },
+            { title: '类型', dataIndex: 'provider_type', width: 120 },
+            { title: 'URL', dataIndex: 'base_url', width: 300, ellipsis: { showTitle: true }, className: 'table-cell-mono' },
+            { title: '优先级', dataIndex: 'priority', width: 100 },
+            { title: 'QPS', dataIndex: 'qps_limit', width: 100 },
+            { title: '超时', dataIndex: 'timeout_ms', width: 110 },
+            { title: '状态', dataIndex: 'status', width: 100, render: value => <Tag color={String(value) === 'active' ? 'green' : 'grey'}>{String(value)}</Tag> },
+            {
+              key: 'operations',
+              title: '操作',
+              width: 150,
+              render: (_, provider) => {
+                const testDisabled = !canTestProvider(provider);
+                return (
+                  <Space>
+                    <Button size="small" onClick={() => openEditModal(provider)}>编辑</Button>
+                    <Button
+                      size="small"
+                      disabled={testDisabled}
+                      loading={testingProviderId === provider.id}
+                      onClick={() => handleTestProvider(provider)}
+                    >
+                      {testDisabled ? '仅 EVM RPC 可测' : '测试'}
+                    </Button>
+                  </Space>
+                );
+              },
             },
-          },
-        ]}
-      />
+          ]}
+        />
+      </DataSurface>
       <Modal title={editingProvider ? '编辑 Provider' : '新增 Provider'} visible={visible} onCancel={closeModal} footer={null}>
         <p className="form-help-text">当前仅支持 EVM/Base RPC 测试；WebSocket 与 REST API Provider 可保存，但暂不提供连通性测试。</p>
         <Form initValues={initialValues()} onSubmit={handleSubmit} labelPosition="left" labelWidth={110}>
@@ -153,6 +160,6 @@ export function ProvidersPage() {
           </Space>
         </Form>
       </Modal>
-    </Card>
+    </PageScaffold>
   );
 }

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Card, Form, Modal, Popconfirm, Select, Space, Table, Tag, Toast } from '@douyinfe/semi-ui';
+import { Button, Form, Modal, Popconfirm, Select, Space, Tag, Toast } from '@douyinfe/semi-ui';
 import {
   createWatchedAddress,
   deleteWatchedAddress,
@@ -10,6 +10,9 @@ import {
   updateWatchedAddress,
 } from '../api/client';
 import type { Asset, CreateWatchedAddressRequest, WatchedAddress } from '../api/types';
+import { DataSurface } from '../components/DataSurface';
+import { DataTable } from '../components/DataTable';
+import { PageScaffold } from '../components/PageScaffold';
 
 type ChainRow = {
   id: string;
@@ -165,38 +168,42 @@ export function AddressesPage() {
   }
 
   return (
-    <Card title="监听地址" headerExtraContent={<Button onClick={openCreateModal}>新增地址</Button>}>
-      <Table<WatchedAddress>
-        loading={addressesQuery.isLoading}
-        dataSource={addressesQuery.data ?? []}
-        rowKey="id"
-        pagination={{ pageSize: 10 }}
-        scroll={{ x: 1500 }}
-        columns={[
-          { title: '链', dataIndex: 'chain_id', width: 150, render: value => chainMap.get(String(value)) ?? String(value) },
-          { title: '标签', dataIndex: 'label', width: 150, ellipsis: { showTitle: true }, render: value => value ? String(value) : '-' },
-          { title: '地址', dataIndex: 'address', width: 340, ellipsis: { showTitle: true }, className: 'table-cell-mono' },
-          { title: '监听资产', dataIndex: 'asset_ids', width: 180, ellipsis: { showTitle: true }, render: value => selectedAssetSymbols(value as string[]) },
-          { title: '优先级', dataIndex: 'priority', width: 100, render: value => <Tag>{String(value)}</Tag> },
-          { title: '扫描间隔', dataIndex: 'scan_interval_seconds', width: 110 },
-          { title: '转账', dataIndex: 'transfer_filter_enabled', width: 90, render: value => value ? '开启' : '关闭' },
-          { title: '余额变化', dataIndex: 'balance_change_filter_enabled', width: 110, render: value => value ? '开启' : '关闭' },
-          { title: '状态', dataIndex: 'status', width: 100 },
-          {
-            title: '操作',
-            width: 140,
-            fixed: 'right',
-            render: (_, record) => (
-              <Space>
-                <Button theme="borderless" onClick={() => openEditModal(record)}>编辑</Button>
-                <Popconfirm title="确认删除该地址？" onConfirm={() => deleteMutation.mutate(record.id)}>
-                  <Button type="danger" theme="borderless">删除</Button>
-                </Popconfirm>
-              </Space>
-            ),
-          },
-        ]}
-      />
+    <PageScaffold title="监听地址" actions={<Button onClick={openCreateModal}>新增地址</Button>}>
+      <DataSurface title="监听地址列表">
+        <DataTable<WatchedAddress>
+          tableId="addresses"
+          actionColumnKeys={['operations']}
+          loading={addressesQuery.isLoading}
+          dataSource={addressesQuery.data ?? []}
+          rowKey="id"
+          pagination={{ pageSize: 10 }}
+          scroll={{ x: 1500 }}
+          columns={[
+            { title: '链', dataIndex: 'chain_id', width: 150, render: value => chainMap.get(String(value)) ?? String(value) },
+            { title: '标签', dataIndex: 'label', width: 150, ellipsis: { showTitle: true }, render: value => value ? String(value) : '-' },
+            { title: '地址', dataIndex: 'address', width: 340, ellipsis: { showTitle: true }, className: 'table-cell-mono' },
+            { title: '监听资产', dataIndex: 'asset_ids', width: 180, ellipsis: { showTitle: true }, render: value => selectedAssetSymbols(value as string[]) },
+            { title: '优先级', dataIndex: 'priority', width: 100, render: value => <Tag>{String(value)}</Tag> },
+            { title: '扫描间隔', dataIndex: 'scan_interval_seconds', width: 110 },
+            { title: '转账', dataIndex: 'transfer_filter_enabled', width: 90, render: value => value ? '开启' : '关闭' },
+            { title: '余额变化', dataIndex: 'balance_change_filter_enabled', width: 110, render: value => value ? '开启' : '关闭' },
+            { title: '状态', dataIndex: 'status', width: 100 },
+            {
+              key: 'operations',
+              title: '操作',
+              width: 140,
+              render: (_, record) => (
+                <Space>
+                  <Button theme="borderless" onClick={() => openEditModal(record)}>编辑</Button>
+                  <Popconfirm title="确认删除该地址？" onConfirm={() => deleteMutation.mutate(record.id)}>
+                    <Button type="danger" theme="borderless">删除</Button>
+                  </Popconfirm>
+                </Space>
+              ),
+            },
+          ]}
+        />
+      </DataSurface>
       <Modal title={editingAddress ? '编辑监听地址' : '新增监听地址'} visible={visible} onCancel={closeModal} footer={null}>
         <Form
           key={editingAddress?.id ?? 'create'}
@@ -268,6 +275,6 @@ export function AddressesPage() {
           </Space>
         </Form>
       </Modal>
-    </Card>
+    </PageScaffold>
   );
 }
