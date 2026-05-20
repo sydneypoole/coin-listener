@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Duration, Utc};
 use coin_listener_chain_providers::evm;
 use coin_listener_core::{
@@ -79,6 +81,39 @@ WHERE chain_id = $1
   AND asset_type = $2
   AND status = 'active'
 ORDER BY symbol, name
+"#;
+
+pub const SELECTED_ASSETS_FOR_ADDRESS_QUERY: &str = r#"
+SELECT a.id, a.chain_id, a.asset_type, a.symbol, a.name, a.contract_address, a.decimals, a.is_builtin, a.status
+FROM watched_address_assets waa
+INNER JOIN assets a ON a.id = waa.asset_id
+WHERE waa.address_id = $1
+  AND a.status = 'active'
+ORDER BY a.asset_type, a.symbol, a.name
+"#;
+
+pub const ASSET_IDS_FOR_ADDRESS_QUERY: &str = r#"
+SELECT asset_id
+FROM watched_address_assets
+WHERE address_id = $1
+ORDER BY created_at, asset_id
+"#;
+
+pub const VALIDATE_ASSETS_FOR_CHAIN_QUERY: &str = r#"
+SELECT id, chain_id, asset_type, symbol, name, contract_address, decimals, is_builtin, status
+FROM assets
+WHERE id = ANY($1)
+ORDER BY id
+"#;
+
+pub const REPLACE_WATCHED_ADDRESS_ASSETS_DELETE_QUERY: &str =
+    "DELETE FROM watched_address_assets WHERE address_id = $1";
+
+pub const REPLACE_WATCHED_ADDRESS_ASSETS_INSERT_QUERY: &str = r#"
+INSERT INTO watched_address_assets (address_id, asset_id)
+SELECT $1, asset_id
+FROM UNNEST($2::uuid[]) AS asset_id
+ON CONFLICT DO NOTHING
 "#;
 
 pub const LIST_WATCHED_ADDRESSES_QUERY: &str = r#"
@@ -554,6 +589,92 @@ pub async fn active_assets_for_chain_by_type(
         .fetch_all(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn selected_assets_for_address(pool: &PgPool, address_id: Uuid) -> AppResult<Vec<Asset>> {
+    sqlx::query_as::<_, Asset>(SELECTED_ASSETS_FOR_ADDRESS_QUERY)
+        .bind(address_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn asset_ids_for_address(pool: &PgPool, address_id: Uuid) -> AppResult<Vec<Uuid>> {
+    sqlx::query_scalar::<_, Uuid>(ASSET_IDS_FOR_ADDRESS_QUERY)
+        .bind(address_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn validate_assets_for_chain(
+    pool: &PgPool,
+    chain_id: Uuid,
+    asset_ids: &[Uuid],
+) -> AppResult<Vec<Uuid>> {
+    validate_asset_selection_input(chain_id, asset_ids)?;
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for asset_id in asset_ids {
+        if seen.insert(*asset_id) {
+            deduped.push(*asset_id);
+        }
+    }
+
+    let assets = sqlx::query_as::<_, Asset>(VALIDATE_ASSETS_FOR_CHAIN_QUERY)
+        .bind(&deduped)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    if assets.len() != deduped.len() {
+        return Err(AppError::Validation("asset does not exist".to_string()));
+    }
+    for asset in &assets {
+        validate_asset_chain_match(chain_id, asset)?;
+    }
+
+    Ok(deduped)
+}
+
+pub async fn replace_watched_address_assets(
+    transaction: &mut Transaction<'_, Postgres>,
+    address_id: Uuid,
+    asset_ids: &[Uuid],
+) -> AppResult<()> {
+    sqlx::query(REPLACE_WATCHED_ADDRESS_ASSETS_DELETE_QUERY)
+        .bind(address_id)
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    sqlx::query(REPLACE_WATCHED_ADDRESS_ASSETS_INSERT_QUERY)
+        .bind(address_id)
+        .bind(asset_ids)
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(())
+}
+
+pub fn validate_asset_selection_input(_chain_id: Uuid, asset_ids: &[Uuid]) -> AppResult<()> {
+    if asset_ids.is_empty() {
+        return Err(AppError::Validation(
+            "asset_ids must not be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_asset_chain_match(chain_id: Uuid, asset: &Asset) -> AppResult<()> {
+    if asset.chain_id != chain_id {
+        return Err(AppError::Validation(
+            "asset must belong to watched address chain".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn scan_cursor(
@@ -1370,19 +1491,23 @@ fn validate_address_for_chain(chain: &Chain, address: &str) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_scan_at_from, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
+        asset_ids_for_address, next_scan_at_from, selected_assets_for_address,
+        validate_assets_for_chain, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
         ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY, ACTIVE_USER_QUERY,
-        CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY, CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY,
-        DELETE_WATCHED_ADDRESS_QUERY, GET_NOTIFICATION_OUTBOX_ITEM_QUERY,
-        GET_WATCHED_ADDRESS_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
+        ASSET_IDS_FOR_ADDRESS_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
+        CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, DELETE_WATCHED_ADDRESS_QUERY,
+        GET_NOTIFICATION_OUTBOX_ITEM_QUERY, GET_WATCHED_ADDRESS_QUERY,
+        INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
         INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY, LATEST_BALANCE_SNAPSHOT_QUERY,
         LIST_EVENTS_QUERY, LIST_NOTIFICATION_OUTBOX_QUERY, LIST_WATCHED_ADDRESSES_QUERY,
         MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY, MARK_CLAIMED_SCAN_ENQUEUED_QUERY,
         MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY, MARK_NOTIFICATION_OUTBOX_FAILED_QUERY,
         MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY, NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY,
-        RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY, SCAN_CURSOR_QUERY,
-        SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY, UPDATE_WATCHED_ADDRESS_QUERY,
-        UPSERT_SCAN_CURSOR_QUERY, WATCHED_ADDRESS_ASSETS_MIGRATION,
+        RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY, REPLACE_WATCHED_ADDRESS_ASSETS_DELETE_QUERY,
+        REPLACE_WATCHED_ADDRESS_ASSETS_INSERT_QUERY, SCAN_CURSOR_QUERY,
+        SELECTED_ASSETS_FOR_ADDRESS_QUERY, SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY,
+        UPDATE_WATCHED_ADDRESS_QUERY, UPSERT_SCAN_CURSOR_QUERY, VALIDATE_ASSETS_FOR_CHAIN_QUERY,
+        WATCHED_ADDRESS_ASSETS_MIGRATION,
     };
     use chrono::{TimeZone, Utc};
     use coin_listener_core::{
@@ -1773,6 +1898,91 @@ mod tests {
         assert!(DELETE_WATCHED_ADDRESS_QUERY.contains("AND tenant_id = $2"));
         assert!(GET_WATCHED_ADDRESS_QUERY.contains("WHERE id = $1"));
         assert!(GET_WATCHED_ADDRESS_QUERY.contains("AND tenant_id = $2"));
+    }
+
+    #[test]
+    fn watched_address_asset_queries_are_scoped_and_ordered() {
+        assert!(SELECTED_ASSETS_FOR_ADDRESS_QUERY.contains("FROM watched_address_assets waa"));
+        assert!(SELECTED_ASSETS_FOR_ADDRESS_QUERY
+            .contains("INNER JOIN assets a ON a.id = waa.asset_id"));
+        assert!(SELECTED_ASSETS_FOR_ADDRESS_QUERY.contains("waa.address_id = $1"));
+        assert!(SELECTED_ASSETS_FOR_ADDRESS_QUERY.contains("a.status = 'active'"));
+        assert!(
+            SELECTED_ASSETS_FOR_ADDRESS_QUERY.contains("ORDER BY a.asset_type, a.symbol, a.name")
+        );
+
+        assert!(ASSET_IDS_FOR_ADDRESS_QUERY.contains("SELECT asset_id"));
+        assert!(ASSET_IDS_FOR_ADDRESS_QUERY.contains("WHERE address_id = $1"));
+        assert!(ASSET_IDS_FOR_ADDRESS_QUERY.contains("ORDER BY created_at, asset_id"));
+
+        assert!(VALIDATE_ASSETS_FOR_CHAIN_QUERY.contains("WHERE id = ANY($1)"));
+        assert!(VALIDATE_ASSETS_FOR_CHAIN_QUERY.contains("ORDER BY id"));
+
+        assert!(REPLACE_WATCHED_ADDRESS_ASSETS_DELETE_QUERY
+            .contains("DELETE FROM watched_address_assets"));
+        assert!(REPLACE_WATCHED_ADDRESS_ASSETS_DELETE_QUERY.contains("WHERE address_id = $1"));
+        assert!(REPLACE_WATCHED_ADDRESS_ASSETS_INSERT_QUERY.contains("UNNEST($2::uuid[])"));
+        assert!(REPLACE_WATCHED_ADDRESS_ASSETS_INSERT_QUERY.contains("ON CONFLICT DO NOTHING"));
+    }
+
+    #[test]
+    fn watched_address_asset_helper_signatures_are_stable() {
+        #[allow(dead_code)]
+        async fn assert_selected(
+            pool: &PgPool,
+            address_id: uuid::Uuid,
+        ) -> AppResult<Vec<coin_listener_core::models::Asset>> {
+            selected_assets_for_address(pool, address_id).await
+        }
+
+        #[allow(dead_code)]
+        async fn assert_asset_ids(
+            pool: &PgPool,
+            address_id: uuid::Uuid,
+        ) -> AppResult<Vec<uuid::Uuid>> {
+            asset_ids_for_address(pool, address_id).await
+        }
+
+        #[allow(dead_code)]
+        async fn assert_validate(
+            pool: &PgPool,
+            chain_id: uuid::Uuid,
+            asset_ids: &[uuid::Uuid],
+        ) -> AppResult<Vec<uuid::Uuid>> {
+            validate_assets_for_chain(pool, chain_id, asset_ids).await
+        }
+
+        let _ = assert_selected;
+        let _ = assert_asset_ids;
+        let _ = assert_validate;
+    }
+
+    #[test]
+    fn validate_assets_for_chain_error_text_is_stable() {
+        let empty = super::validate_asset_selection_input(uuid::Uuid::from_u128(1), &[])
+            .expect_err("empty asset selection rejected");
+        assert!(
+            matches!(empty, AppError::Validation(message) if message == "asset_ids must not be empty")
+        );
+
+        let wrong_chain = super::validate_asset_chain_match(
+            uuid::Uuid::from_u128(1),
+            &coin_listener_core::models::Asset {
+                id: uuid::Uuid::from_u128(2),
+                chain_id: uuid::Uuid::from_u128(3),
+                asset_type: "native".to_string(),
+                symbol: "ETH".to_string(),
+                name: "Ether".to_string(),
+                contract_address: None,
+                decimals: 18,
+                is_builtin: true,
+                status: "active".to_string(),
+            },
+        )
+        .expect_err("wrong chain rejected");
+        assert!(
+            matches!(wrong_chain, AppError::Validation(message) if message.contains("asset must belong to watched address chain"))
+        );
     }
 
     #[test]
