@@ -16,6 +16,12 @@ function expectContains(source: string, expected: string) {
   }
 }
 
+function expectNotContains(source: string, unexpected: string) {
+  if (source.includes(unexpected)) {
+    throw new Error(`Expected source not to contain: ${unexpected}`);
+  }
+}
+
 describe('frontend UI regressions', () => {
   test('provider management exposes edit and connectivity test controls', () => {
     const page = readSource('pages/ProvidersPage.tsx');
@@ -93,5 +99,13 @@ describe('frontend UI regressions', () => {
     expectContains(page, 'scroll={{ x: 1500 }}');
     expectContains(page, 'slice(0, 6)');
     expectContains(page, 'slice(-4)');
+  });
+
+  test('watched address row ids do not require browser crypto.randomUUID', () => {
+    const page = readSource('pages/AddressesPage.tsx');
+
+    expectContains(page, 'function createChainRowId()');
+    expectContains(page, 'address-chain-row-');
+    expectNotContains(page, 'crypto.randomUUID');
   });
 });

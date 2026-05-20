@@ -17,6 +17,13 @@ type ChainRow = {
   asset_ids: string[];
 };
 
+let chainRowIdSequence = 0;
+
+function createChainRowId() {
+  chainRowIdSequence += 1;
+  return `address-chain-row-${chainRowIdSequence}`;
+}
+
 export function AddressesPage() {
   const [visible, setVisible] = useState(false);
   const [editingAddress, setEditingAddress] = useState<WatchedAddress | null>(null);
@@ -105,7 +112,7 @@ export function AddressesPage() {
   }
 
   function emptyChainRow(): ChainRow {
-    return { id: crypto.randomUUID(), chain_id: '', asset_ids: [] };
+    return { id: createChainRowId(), chain_id: '', asset_ids: [] };
   }
 
   function resetCreateForm() {
@@ -120,7 +127,7 @@ export function AddressesPage() {
 
   function openEditModal(address: WatchedAddress) {
     setEditingAddress(address);
-    setChainRows([{ id: crypto.randomUUID(), chain_id: address.chain_id, asset_ids: address.asset_ids }]);
+    setChainRows([{ id: createChainRowId(), chain_id: address.chain_id, asset_ids: address.asset_ids }]);
     setVisible(true);
   }
 
