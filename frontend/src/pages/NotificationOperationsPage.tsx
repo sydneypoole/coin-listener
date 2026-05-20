@@ -1,10 +1,15 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Col, Form, Modal, Row, Space, Table, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { Banner, Button, Card, Form, Modal, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
 import { getNotificationOutbox, getSystemStatus, listNotificationOutbox, retryNotificationOutbox } from '../api/client';
-import type { NotificationDeliveryListItem, NotificationOutboxListItem, NotificationOutboxQuery } from '../api/types';
+import type { NotificationDeliveryListItem, NotificationOutboxDetail, NotificationOutboxListItem, NotificationOutboxQuery } from '../api/types';
+import { DataSurface } from '../components/DataSurface';
+import { DataTable } from '../components/DataTable';
+import { FilterPanel } from '../components/FilterPanel';
+import { MetricCard, MetricGrid } from '../components/MetricGrid';
+import { PageScaffold } from '../components/PageScaffold';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 
 type FilterForm = {
   status?: string;
@@ -100,7 +105,11 @@ export function NotificationOperationsPage() {
   const outbox = statusQuery.data?.notifications.outbox;
 
   return (
-    <Space vertical align="start" spacing={16} className="content-stack">
+    <PageScaffold
+      title="通知运维"
+      description="跟踪 Notification Outbox 积压、重试窗口与投递明细。"
+      actions={<Tag color={statusQuery.isFetching ? 'blue' : 'green'}>{statusQuery.isFetching ? 'refreshing' : '10s auto refresh'}</Tag>}
+    >
       {outboxQuery.isError ? (
         <Banner
           type="danger"
@@ -117,30 +126,16 @@ export function NotificationOperationsPage() {
         />
       ) : null}
 
-      <Card title="通知任务积压总览" loading={statusQuery.isLoading}>
-        <Row gutter={[16, 16]}>
-          <Col span={8}>
-            <Metric title="Pending" value={outbox?.pending ?? 0} hint="等待 notifier claim" />
-          </Col>
-          <Col span={8}>
-            <Metric title="Retryable" value={outbox?.retryable ?? 0} hint="等待自动重试" />
-          </Col>
-          <Col span={8}>
-            <Metric title="Processing" value={outbox?.processing ?? 0} hint={`stale ${outbox?.stale_processing ?? 0}`} />
-          </Col>
-          <Col span={8}>
-            <Metric title="Failed" value={outbox?.failed ?? 0} hint="可人工重试" />
-          </Col>
-          <Col span={8}>
-            <Metric title="Stale Processing" value={outbox?.stale_processing ?? 0} hint="locked_at 超过 15 分钟" />
-          </Col>
-          <Col span={8}>
-            <Metric title="Next Due" value={formatTime(outbox?.next_due_at)} hint="pending/retryable due" />
-          </Col>
-        </Row>
-      </Card>
+      <MetricGrid>
+        <MetricCard title="Pending" value={outbox?.pending ?? 0} hint="等待 notifier claim" />
+        <MetricCard title="Retryable" value={outbox?.retryable ?? 0} hint="等待自动重试" tone={outbox?.retryable ? 'warning' : 'neutral'} />
+        <MetricCard title="Processing" value={outbox?.processing ?? 0} hint={`stale ${outbox?.stale_processing ?? 0}`} />
+        <MetricCard title="Failed" value={outbox?.failed ?? 0} hint="可人工重试" tone={outbox?.failed ? 'danger' : 'neutral'} />
+        <MetricCard title="Stale Processing" value={outbox?.stale_processing ?? 0} hint="locked_at 超过 15 分钟" tone={outbox?.stale_processing ? 'danger' : 'neutral'} />
+        <MetricCard title="Next Due" value={formatTime(outbox?.next_due_at)} hint="pending/retryable due" />
+      </MetricGrid>
 
-      <Card title="Outbox 筛选" className="filter-card">
+      <FilterPanel title="Outbox 筛选">
         <Form<FilterForm> layout="horizontal" onSubmit={handleFilterSubmit} labelPosition="left">
           {({ formApi }) => (
             <>
@@ -149,15 +144,16 @@ export function NotificationOperationsPage() {
               <Space>
                 <Button htmlType="submit" type="primary">查询</Button>
                 <Button onClick={() => resetFilters(formApi)}>重置</Button>
-                <Button onClick={() => outboxQuery.refetch()}>刷新</Button>
+                <Button loading={outboxQuery.isFetching} onClick={() => outboxQuery.refetch()}>刷新</Button>
               </Space>
             </>
           )}
         </Form>
-      </Card>
+      </FilterPanel>
 
-      <Card title="Notification Outbox">
-        <Table<NotificationOutboxListItem>
+      <DataSurface title="Notification Outbox" actions={<Text type="tertiary">limit {filters.limit ?? 50} / offset {filters.offset ?? 0}</Text>}>
+        <DataTable<NotificationOutboxListItem>
+          tableId="notification-operations"
           loading={outboxQuery.isLoading}
           dataSource={outboxQuery.data?.items ?? []}
           rowKey="id"
@@ -192,8 +188,8 @@ export function NotificationOperationsPage() {
             { title: 'Last Error', dataIndex: 'last_error', width: 280, ellipsis: { showTitle: true }, render: value => truncate(value ? String(value) : null) },
             {
               title: '操作',
+              key: 'operations',
               width: 170,
-              fixed: 'right',
               render: (_, row) => (
                 <Space>
                   <Button size="small" onClick={() => setSelectedOutboxId(row.id)}>详情</Button>
@@ -211,7 +207,7 @@ export function NotificationOperationsPage() {
             },
           ]}
         />
-      </Card>
+      </DataSurface>
 
       <OutboxDetailModal
         visible={Boolean(selectedOutboxId)}
@@ -219,19 +215,7 @@ export function NotificationOperationsPage() {
         detail={detailQuery.data}
         onClose={() => setSelectedOutboxId(undefined)}
       />
-    </Space>
-  );
-}
-
-function Metric({ title, value, hint }: { title: string; value: string | number; hint: string }) {
-  return (
-    <Card className="status-card">
-      <Space vertical align="start">
-        <Text type="tertiary">{title}</Text>
-        <Title heading={3}>{value}</Title>
-        <Text type="tertiary">{hint}</Text>
-      </Space>
-    </Card>
+    </PageScaffold>
   );
 }
 
@@ -243,43 +227,42 @@ function OutboxDetailModal({
 }: {
   visible: boolean;
   loading: boolean;
-  detail?: {
-    outbox: NotificationOutboxListItem;
-    event: { id: string; event_type: string; direction: string; tx_hash?: string | null; metadata: Record<string, unknown> };
-    deliveries: NotificationDeliveryListItem[];
-  };
+  detail?: NotificationOutboxDetail;
   onClose: () => void;
 }) {
   return (
-    <Modal title="通知任务详情" visible={visible} onCancel={onClose} footer={null} width={1100}>
+    <Modal title="通知任务详情" visible={visible} onCancel={onClose} footer={null} width={1120}>
       {loading ? <Text>正在加载详情...</Text> : null}
       {detail ? (
         <Space vertical align="start" spacing={16} style={{ width: '100%' }}>
-          <Card title="Outbox">
-            <Space vertical align="start">
-              <Text>ID：{detail.outbox.id}</Text>
-              <Text>Event：{detail.outbox.event_id}</Text>
-              <Text>状态：<Tag color={outboxStatusColor(detail.outbox.status)}>{detail.outbox.status}</Tag></Text>
-              <Text>Attempt：{detail.outbox.attempt_count}</Text>
-              <Text>Next Attempt：{formatTime(detail.outbox.next_attempt_at)}</Text>
-              <Text>Lock：{detail.outbox.locked_by ?? '-'} / {formatTime(detail.outbox.locked_at)}</Text>
-              <Text>Last Error：{detail.outbox.last_error ?? '-'}</Text>
-            </Space>
-          </Card>
+          <div className="notification-detail-grid">
+            <Card title="Outbox" className="notification-detail-card">
+              <DetailLine label="ID" value={detail.outbox.id} mono />
+              <DetailLine label="Event" value={detail.outbox.event_id} mono />
+              <div className="detail-line">
+                <Text type="tertiary">状态</Text>
+                <Tag color={outboxStatusColor(detail.outbox.status)}>{detail.outbox.status}</Tag>
+              </div>
+              <DetailLine label="Attempt" value={String(detail.outbox.attempt_count)} />
+              <DetailLine label="Next Attempt" value={formatTime(detail.outbox.next_attempt_at)} />
+              <DetailLine label="Lock" value={`${detail.outbox.locked_by ?? '-'} / ${formatTime(detail.outbox.locked_at)}`} />
+              <DetailLine label="Last Error" value={detail.outbox.last_error ?? '-'} />
+            </Card>
 
-          <Card title="Event">
-            <Space vertical align="start">
-              <Text>类型：{detail.event.event_type}</Text>
-              <Text>方向：{detail.event.direction}</Text>
-              <Text>交易哈希：{detail.event.tx_hash ?? '-'}</Text>
-              <pre style={{ maxWidth: 1000, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                {JSON.stringify(detail.event.metadata, null, 2)}
-              </pre>
-            </Space>
-          </Card>
+            <Card title="Event" className="notification-detail-card">
+              <DetailLine label="类型" value={detail.event.event_type} />
+              <DetailLine label="方向" value={detail.event.direction} />
+              <DetailLine label="交易哈希" value={detail.event.tx_hash ?? '-'} mono />
+              <div className="detail-line detail-line-vertical">
+                <Text type="tertiary">Metadata</Text>
+                <pre className="detail-json">{JSON.stringify(detail.event.metadata, null, 2)}</pre>
+              </div>
+            </Card>
+          </div>
 
-          <Card title="Deliveries">
-            <Table<NotificationDeliveryListItem>
+          <DataSurface title="Deliveries">
+            <DataTable<NotificationDeliveryListItem>
+              tableId="notification-operations"
               dataSource={detail.deliveries}
               rowKey="id"
               pagination={{ pageSize: 5 }}
@@ -298,9 +281,18 @@ function OutboxDetailModal({
                 { title: 'Last Error', dataIndex: 'last_error', width: 260, ellipsis: { showTitle: true }, render: value => truncate(value ? String(value) : null, 120) },
               ]}
             />
-          </Card>
+          </DataSurface>
         </Space>
       ) : null}
     </Modal>
+  );
+}
+
+function DetailLine({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="detail-line">
+      <Text type="tertiary">{label}</Text>
+      <span className={mono ? 'table-cell-mono detail-value' : 'detail-value'}>{value}</span>
+    </div>
   );
 }

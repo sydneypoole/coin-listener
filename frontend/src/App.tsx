@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Notification, Space, Tag, Typography } from '@douyinfe/semi-ui';
+import { Button, Notification, Space, Tag, Typography } from '@douyinfe/semi-ui';
 import { IconBell, IconPulse, IconServer, IconSetting, IconUser } from '@douyinfe/semi-icons';
 import { request } from './api/client';
 import { fetchHealth, type HealthResponse } from './api/health';
 import { AppShell } from './components/AppShell';
+import { DataSurface } from './components/DataSurface';
+import { MetricCard, MetricGrid } from './components/MetricGrid';
+import { PageScaffold } from './components/PageScaffold';
 import type { LoginResponse } from './api/types';
 import { clearSession, getSessionGeneration, loadStoredSession, saveSession, setUnauthorizedHandler } from './auth/session';
 import { AddressesPage } from './pages/AddressesPage';
@@ -20,7 +23,7 @@ import { SystemStatusPage } from './pages/SystemStatusPage';
 import { connectRealtimeNotifications } from './realtime/notifications';
 import { applyThemeMode, loadThemeMode, saveThemeMode, subscribeSystemTheme, type ThemeMode } from './themeMode';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 type PageKey =
   | 'dashboard'
@@ -33,6 +36,15 @@ type PageKey =
   | 'notification-rules'
   | 'notification-operations'
   | 'in-app-notifications';
+
+type HealthQuery = ReturnType<typeof useQuery<HealthResponse>>;
+
+const dashboardSteps = [
+  { title: '监听地址', label: 'Watch', description: '按链与资产集合维护扫描目标' },
+  { title: 'Provider Mesh', label: 'RPC', description: '多 Provider 优先级、限流与熔断' },
+  { title: '事件中心', label: 'Event', description: '归集转账、余额变更与合约交互' },
+  { title: '通知出站', label: 'Notify', description: 'Outbox 重试、投递与站内通知闭环' },
+];
 
 export function App() {
   const queryClient = useQueryClient();
@@ -144,14 +156,15 @@ export function App() {
       onSelectPage={setPage}
       onLogout={handleLogout}
     >
-      {renderPage(page, healthQuery, setRealtimeUnreadCount)}
+      {renderPage(page, healthQuery, realtimeUnreadCount, setRealtimeUnreadCount)}
     </AppShell>
   );
 }
 
 function renderPage(
   page: PageKey,
-  healthQuery: ReturnType<typeof useQuery<HealthResponse>>,
+  healthQuery: HealthQuery,
+  realtimeUnreadCount: number,
   setRealtimeUnreadCount: (count: number) => void,
 ) {
   if (page === 'system-status') return <SystemStatusPage />;
@@ -166,30 +179,92 @@ function renderPage(
     return <InAppNotificationsPage onUnreadSettled={setRealtimeUnreadCount} />;
   }
 
+  return <DashboardOverview healthQuery={healthQuery} realtimeUnreadCount={realtimeUnreadCount} />;
+}
+
+function DashboardOverview({ healthQuery, realtimeUnreadCount }: { healthQuery: HealthQuery; realtimeUnreadCount: number }) {
+  const healthLabel = healthStatusText(healthQuery);
+
   return (
-    <Space vertical align="start" spacing={24} className="content-stack">
-      <Banner
-        type="info"
-        title="Milestone 3"
-        description="当前版本提供登录、链配置、资产配置、Provider 配置、监听地址管理、事件中心、通知规则、通知运维、站内通知和系统状态。"
-      />
-      <Card title="API 健康状态" className="status-card">
-        {healthQuery.isLoading ? <Text>正在检查 API...</Text> : null}
-        {healthQuery.isError ? (
-          <Space vertical align="start">
-            <Tag color="red">API 不可用</Tag>
-            <Text type="danger">{healthQuery.error instanceof Error ? healthQuery.error.message : '请求失败'}</Text>
-            <Button onClick={() => healthQuery.refetch()}>重新检查</Button>
-          </Space>
-        ) : null}
-        {healthQuery.data ? (
-          <Space vertical align="start">
-            <Tag color="green">{healthQuery.data.status}</Tag>
-            <Text>服务：{healthQuery.data.service}</Text>
-            <Button onClick={() => healthQuery.refetch()}>刷新</Button>
-          </Space>
-        ) : null}
-      </Card>
-    </Space>
+    <PageScaffold
+      title="链上运维总览"
+      description="从 Provider、扫描队列、事件入库到通知出站的控制面入口。"
+      actions={(
+        <Button loading={healthQuery.isFetching} onClick={() => healthQuery.refetch()}>
+          刷新 API 健康
+        </Button>
+      )}
+    >
+      <MetricGrid>
+        <MetricCard title="API Gateway" value={healthLabel} hint={healthQuery.data?.service ?? 'health endpoint'} tone={healthTone(healthQuery)} />
+        <MetricCard title="控制面" value="多链" hint="链、资产、Provider 统一配置" />
+        <MetricCard title="实时通知" value={realtimeUnreadCount} hint="本会话新增站内通知" tone={realtimeUnreadCount > 0 ? 'warning' : 'neutral'} />
+        <MetricCard title="刷新策略" value="手动" hint="健康检查保持原查询与重试行为" />
+      </MetricGrid>
+
+      <DataSurface title="控制面健康" actions={<Tag color={healthTagColor(healthQuery)}>{healthLabel}</Tag>}>
+        <div className="dashboard-health-panel">
+          <div>
+            <Text type="tertiary">API Health</Text>
+            <div className="dashboard-health-title">{healthQuery.data?.service ?? 'Coin Listener API'}</div>
+            <Text type={healthQuery.isError ? 'danger' : 'tertiary'}>
+              {healthDescription(healthQuery)}
+            </Text>
+          </div>
+          <Button loading={healthQuery.isFetching} onClick={() => healthQuery.refetch()}>
+            重新检查
+          </Button>
+        </div>
+      </DataSurface>
+
+      <DataSurface title="链上业务链路" actions={<Text type="tertiary">Watch → RPC → Event → Notify</Text>}>
+        <div className="dashboard-chain-map">
+          {dashboardSteps.map((step, index) => (
+            <div className="dashboard-chain-step" key={step.title}>
+              <div className="dashboard-step-index">0{index + 1}</div>
+              <Tag color="blue">{step.label}</Tag>
+              <div className="dashboard-step-title">{step.title}</div>
+              <Text type="tertiary">{step.description}</Text>
+            </div>
+          ))}
+        </div>
+      </DataSurface>
+
+      <DataSurface title="运维入口">
+        <Space wrap>
+          <Tag color="cyan">系统状态：队列、Provider、服务心跳</Tag>
+          <Tag color="blue">事件中心：链上活动检索</Tag>
+          <Tag color="orange">通知运维：Outbox 重试与详情</Tag>
+          <Tag color="green">站内通知：实时消费反馈</Tag>
+        </Space>
+      </DataSurface>
+    </PageScaffold>
   );
+}
+
+function healthStatusText(healthQuery: HealthQuery) {
+  if (healthQuery.isLoading) return 'checking';
+  if (healthQuery.isError) return 'degraded';
+  return healthQuery.data?.status ?? 'unknown';
+}
+
+function healthTone(healthQuery: HealthQuery): 'neutral' | 'success' | 'warning' | 'danger' {
+  if (healthQuery.isError) return 'danger';
+  if (healthQuery.isLoading || healthQuery.isFetching) return 'warning';
+  return healthQuery.data ? 'success' : 'neutral';
+}
+
+function healthTagColor(healthQuery: HealthQuery) {
+  if (healthQuery.isError) return 'red';
+  if (healthQuery.isLoading || healthQuery.isFetching) return 'blue';
+  return healthQuery.data ? 'green' : 'grey';
+}
+
+function healthDescription(healthQuery: HealthQuery) {
+  if (healthQuery.isLoading) return '正在检查 API 可用性...';
+  if (healthQuery.isError) {
+    return healthQuery.error instanceof Error ? healthQuery.error.message : '请求失败';
+  }
+  if (healthQuery.data) return `服务状态 ${healthQuery.data.status}`;
+  return '等待健康检查结果';
 }
