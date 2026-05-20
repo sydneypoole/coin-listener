@@ -712,6 +712,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_exposes_watched_address_crud_routes() {
+        let app = build_router(test_state());
+
+        for (method, uri) in [
+            (Method::GET, "/api/addresses"),
+            (Method::POST, "/api/addresses"),
+            (Method::PUT, "/api/addresses/not-a-uuid"),
+            (Method::DELETE, "/api/addresses/not-a-uuid"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("valid request"),
+                )
+                .await
+                .expect("router response");
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+    }
+
+    #[tokio::test]
     async fn router_exposes_events_filter_query() {
         let app = build_router(test_state());
 
