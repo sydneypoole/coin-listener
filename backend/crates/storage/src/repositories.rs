@@ -14,6 +14,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 const DEFAULT_TENANT_ID: Uuid = Uuid::from_u128(1);
+pub const WATCHED_ADDRESS_ASSETS_MIGRATION: &str =
+    include_str!("../migrations/0013_watched_address_assets.sql");
 const CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY: &str = r#"
 SELECT id, tenant_id, chain_id, scan_interval_seconds
 FROM watched_addresses
@@ -1380,7 +1382,7 @@ mod tests {
         MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY, NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY,
         RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY, SCAN_CURSOR_QUERY,
         SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY, UPDATE_WATCHED_ADDRESS_QUERY,
-        UPSERT_SCAN_CURSOR_QUERY,
+        UPSERT_SCAN_CURSOR_QUERY, WATCHED_ADDRESS_ASSETS_MIGRATION,
     };
     use chrono::{TimeZone, Utc};
     use coin_listener_core::{
@@ -1521,6 +1523,19 @@ mod tests {
         ] {
             assert!(INSERT_EVENT_IF_NOT_EXISTS_QUERY.contains(field));
         }
+    }
+
+    #[test]
+    fn watched_address_assets_migration_defines_join_table() {
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION
+            .contains("CREATE TABLE IF NOT EXISTS watched_address_assets"));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains(
+            "address_id UUID NOT NULL REFERENCES watched_addresses(id) ON DELETE CASCADE"
+        ));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION
+            .contains("asset_id UUID NOT NULL REFERENCES assets(id) ON DELETE CASCADE"));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains("PRIMARY KEY (address_id, asset_id)"));
+        assert!(WATCHED_ADDRESS_ASSETS_MIGRATION.contains("idx_watched_address_assets_asset"));
     }
 
     #[test]
