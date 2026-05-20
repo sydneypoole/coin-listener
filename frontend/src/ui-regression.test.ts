@@ -75,4 +75,23 @@ describe('frontend UI regressions', () => {
     expectContains(client, 'createWatchedAddress');
     expectContains(client, 'updateWatchedAddress');
   });
+
+  test('watched address form supports multi-chain asset selection', () => {
+    const page = readSource('pages/AddressesPage.tsx');
+
+    expectContains(page, 'listAssets');
+    expectContains(page, 'chainRows');
+    expectContains(page, 'assetOptionsForChain');
+    expectContains(page, 'multiple');
+    expectContains(page, 'asset_ids');
+    expectContains(page, '监听资产');
+    expectContains(page, '新增链配置');
+    expectContains(page, '编辑监听地址');
+    expectContains(page, 'updateWatchedAddress');
+    expectContains(page, 'Promise.allSettled');
+    expectContains(page, '部分链配置添加失败');
+    expectContains(page, 'scroll={{ x: 1500 }}');
+    expectContains(page, 'slice(0, 6)');
+    expectContains(page, 'slice(-4)');
+  });
 });
