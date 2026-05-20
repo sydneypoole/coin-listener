@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Layout, Nav, Notification, Space, Tag, Typography } from '@douyinfe/semi-ui';
+import { Banner, Button, Card, Notification, Space, Tag, Typography } from '@douyinfe/semi-ui';
 import { IconBell, IconPulse, IconServer, IconSetting, IconUser } from '@douyinfe/semi-icons';
 import { request } from './api/client';
 import { fetchHealth, type HealthResponse } from './api/health';
+import { AppShell } from './components/AppShell';
 import type { LoginResponse } from './api/types';
 import { clearSession, getSessionGeneration, loadStoredSession, saveSession, setUnauthorizedHandler } from './auth/session';
 import { AddressesPage } from './pages/AddressesPage';
@@ -17,8 +18,8 @@ import { NotificationRulesPage } from './pages/NotificationRulesPage';
 import { ProvidersPage } from './pages/ProvidersPage';
 import { SystemStatusPage } from './pages/SystemStatusPage';
 import { connectRealtimeNotifications } from './realtime/notifications';
+import { applyThemeMode, loadThemeMode, saveThemeMode, subscribeSystemTheme, type ThemeMode } from './themeMode';
 
-const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
 
 type PageKey =
@@ -38,6 +39,7 @@ export function App() {
   const [session, setSession] = useState<LoginResponse | null>(() => loadStoredSession());
   const [page, setPage] = useState<PageKey>('dashboard');
   const [realtimeUnreadCount, setRealtimeUnreadCount] = useState(0);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => loadThemeMode());
 
   const resetAuthenticatedState = useCallback(() => {
     queryClient.clear();
@@ -55,6 +57,12 @@ export function App() {
     setUnauthorizedHandler(resetAuthenticatedState);
     return () => setUnauthorizedHandler(null);
   }, [resetAuthenticatedState]);
+
+  useEffect(() => {
+    applyThemeMode(themeMode);
+    if (themeMode !== 'system') return undefined;
+    return subscribeSystemTheme(() => applyThemeMode('system'));
+  }, [themeMode]);
 
   useEffect(() => {
     if (!session) return undefined;
@@ -99,46 +107,45 @@ export function App() {
     resetAuthenticatedState();
   }
 
+  function handleThemeModeChange(nextMode: ThemeMode) {
+    setThemeMode(nextMode);
+    saveThemeMode(nextMode);
+  }
+
+  const navItems = useMemo(() => [
+    { itemKey: 'dashboard', text: '仪表盘', icon: <IconPulse /> },
+    { itemKey: 'system-status', text: '系统状态', icon: <IconPulse /> },
+    { itemKey: 'chains', text: '链配置', icon: <IconServer /> },
+    { itemKey: 'assets', text: '资产配置', icon: <IconSetting /> },
+    { itemKey: 'providers', text: 'Provider', icon: <IconServer /> },
+    { itemKey: 'addresses', text: '监听地址', icon: <IconUser /> },
+    { itemKey: 'events', text: '事件中心', icon: <IconBell /> },
+    { itemKey: 'notification-rules', text: '通知规则', icon: <IconBell /> },
+    { itemKey: 'notification-operations', text: '通知运维', icon: <IconBell /> },
+    {
+      itemKey: 'in-app-notifications',
+      text: realtimeUnreadCount > 0 ? `站内通知 (${realtimeUnreadCount})` : '站内通知',
+      icon: <IconBell />,
+    },
+  ], [realtimeUnreadCount]);
+
   if (!session) {
     return <LoginPage onLogin={handleLogin} />;
   }
 
   return (
-    <Layout className="app-shell">
-      <Sider className="app-sider">
-        <div className="brand">Coin Listener</div>
-        <Nav
-          selectedKeys={[page]}
-          onSelect={({ itemKey }) => setPage(itemKey as PageKey)}
-          items={[
-            { itemKey: 'dashboard', text: '仪表盘', icon: <IconPulse /> },
-            { itemKey: 'system-status', text: '系统状态', icon: <IconPulse /> },
-            { itemKey: 'chains', text: '链配置', icon: <IconServer /> },
-            { itemKey: 'assets', text: '资产配置', icon: <IconSetting /> },
-            { itemKey: 'providers', text: 'Provider', icon: <IconServer /> },
-            { itemKey: 'addresses', text: '监听地址', icon: <IconUser /> },
-            { itemKey: 'events', text: '事件中心', icon: <IconBell /> },
-            { itemKey: 'notification-rules', text: '通知规则', icon: <IconBell /> },
-            { itemKey: 'notification-operations', text: '通知运维', icon: <IconBell /> },
-            {
-              itemKey: 'in-app-notifications',
-              text: realtimeUnreadCount > 0 ? `站内通知 (${realtimeUnreadCount})` : '站内通知',
-              icon: <IconBell />,
-            },
-          ]}
-        />
-      </Sider>
-      <Layout>
-        <Header className="app-header">
-          <Title heading={4}>多链地址监听平台</Title>
-          <Space>
-            <Text type="tertiary">{session.user.display_name} / {session.tenant.name}</Text>
-            <Button onClick={handleLogout}>退出登录</Button>
-          </Space>
-        </Header>
-        <Content className="app-content">{renderPage(page, healthQuery, setRealtimeUnreadCount)}</Content>
-      </Layout>
-    </Layout>
+    <AppShell<PageKey>
+      page={page}
+      navItems={navItems}
+      userLabel={session.user.display_name}
+      tenantLabel={session.tenant.name}
+      themeMode={themeMode}
+      onThemeModeChange={handleThemeModeChange}
+      onSelectPage={setPage}
+      onLogout={handleLogout}
+    >
+      {renderPage(page, healthQuery, setRealtimeUnreadCount)}
+    </AppShell>
   );
 }
 

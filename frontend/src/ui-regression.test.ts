@@ -168,7 +168,7 @@ describe('frontend UI regressions', () => {
     expectContains(themeMode, "document.body.removeAttribute('theme-mode')");
     expectContains(themeMode, "matchMedia('(prefers-color-scheme: dark)')");
     expectContains(toggle, 'ThemeToggle');
-    expectContains(app, '<ThemeToggle');
+    expectContains(app, '<AppShell');
   });
 
   test('frontend design system components exist', () => {
