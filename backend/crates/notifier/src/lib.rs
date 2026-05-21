@@ -892,6 +892,60 @@ pub async fn run_notifier(
     Ok(())
 }
 
+pub async fn run_telegram_update_poller(
+    pool: PgPool,
+    sender: external::ExternalNotificationSender,
+    shutdown: Arc<AtomicBool>,
+) -> AppResult<()> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+    while !notifier_shutdown_requested(&shutdown) {
+        let bots = notifications::list_active_verified_telegram_bot_secrets(&pool).await?;
+        for bot in bots {
+            let offset = coin_listener_storage::telegram_bindings::get_telegram_update_offset(
+                &pool,
+                bot.tenant_id,
+                bot.id,
+            )
+            .await?;
+            let updates = match sender.get_telegram_updates(&bot.bot_token, offset).await {
+                Ok(updates) => updates,
+                Err(outcome) => {
+                    warn!(
+                        telegram_bot_id = %bot.id,
+                        last_error = ?outcome.metadata().last_error,
+                        "telegram getUpdates failed"
+                    );
+                    continue;
+                }
+            };
+
+            for update in updates {
+                process_telegram_binding_update(
+                    &pool,
+                    &sender,
+                    bot.id,
+                    &bot.bot_token,
+                    &update,
+                    Utc::now(),
+                )
+                .await?;
+                coin_listener_storage::telegram_bindings::upsert_telegram_update_offset(
+                    &pool,
+                    bot.tenant_id,
+                    bot.id,
+                    update.update_id,
+                )
+                .await?;
+            }
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    Ok(())
+}
+
 fn normalize_non_negative_integer(value: &str) -> Option<&str> {
     if value.is_empty() || !value.chars().all(|character| character.is_ascii_digit()) {
         return None;
@@ -1129,6 +1183,24 @@ mod tests {
         assert!(source.contains("mark_notification_outbox_retryable"));
         assert!(source.contains("mark_notification_outbox_failed"));
         assert!(!source.contains(&forbidden));
+    }
+
+    #[test]
+    fn telegram_update_poller_uses_binding_processor_and_offsets() {
+        let source = include_str!("lib.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+        let poller_start = production_source
+            .find("pub async fn run_telegram_update_poller")
+            .expect("poller runtime is present in production source");
+        let poller_source = &production_source[poller_start..];
+
+        assert!(poller_source.contains("get_telegram_update_offset"));
+        assert!(poller_source.contains("get_telegram_updates"));
+        assert!(poller_source.contains("process_telegram_binding_update"));
+        assert!(poller_source.contains("upsert_telegram_update_offset"));
     }
 
     #[test]

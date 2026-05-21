@@ -5,6 +5,7 @@ use coin_listener_storage::{
     connect_postgres, connect_redis, run_migrations,
     service_heartbeats::{run_service_heartbeat, service_heartbeat_instance_id},
 };
+use notifier::external::ExternalNotificationSender;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -48,6 +49,13 @@ async fn main() -> anyhow::Result<()> {
         realtime_shutdown,
     ));
 
+    let telegram_poller_shutdown = Arc::clone(&shutdown);
+    tokio::spawn(notifier::run_telegram_update_poller(
+        postgres.clone(),
+        ExternalNotificationSender::new(reqwest::Client::new()),
+        telegram_poller_shutdown,
+    ));
+
     let state = Arc::new(ApiState {
         postgres,
         redis: Some(redis),
@@ -74,4 +82,23 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn api_server_starts_telegram_update_poller() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+
+        assert!(production_source.contains("run_telegram_update_poller"));
+        assert!(
+            production_source.contains("ExternalNotificationSender::new(reqwest::Client::new())")
+        );
+        assert!(production_source.contains("postgres.clone()"));
+        assert!(production_source.contains("Arc::clone(&shutdown)"));
+    }
 }
