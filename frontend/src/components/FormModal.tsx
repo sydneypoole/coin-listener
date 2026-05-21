@@ -9,7 +9,7 @@ const FORM_MODAL_WIDTHS = {
 
 type FormModalSize = keyof typeof FORM_MODAL_WIDTHS;
 
-type FormModalProps = Omit<ComponentProps<typeof Modal>, 'footer' | 'width'> & {
+type FormModalProps = Omit<ComponentProps<typeof Modal>, 'footer' | 'width' | 'size'> & {
   size?: FormModalSize;
 };
 

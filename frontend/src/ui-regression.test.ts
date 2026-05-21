@@ -247,6 +247,7 @@ describe('frontend UI regressions', () => {
     expectContains(formModal, 'medium: 720');
     expectContains(formModal, 'large: 920');
     expectContains(formModal, 'wide: 1120');
+    expectContains(formModal, "'footer' | 'width' | 'size'");
     expectContains(formModal, 'calc(100vw - 32px)');
     expectContains(addressesPage, '<FormModal');
     expectContains(addressesPage, 'size="large"');
