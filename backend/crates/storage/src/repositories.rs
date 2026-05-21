@@ -1711,6 +1711,17 @@ mod tests {
     }
 
     #[test]
+    fn telegram_and_address_import_migration_defines_task_tables() {
+        let migration = include_str!("../migrations/0014_telegram_bots_and_address_imports.sql");
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS telegram_bots"));
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS watched_address_import_tasks"));
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS watched_address_import_rows"));
+        assert!(migration.contains("idx_watched_address_import_tasks_claim"));
+        assert!(migration.contains("idx_watched_address_import_rows_task_status"));
+    }
+
+    #[test]
     fn migration_versions_are_unique() {
         let migration_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let mut versions = std::collections::HashSet::new();

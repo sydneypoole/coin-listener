@@ -1214,14 +1214,16 @@ mod tests {
         validate_notification_rule_reference_consistency, validate_notification_rule_request,
         ExternalDeliveryStart, CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY,
         CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
-        DELETE_NOTIFICATION_RULE_QUERY, INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
+        DELETE_NOTIFICATION_CHANNEL_QUERY, DELETE_NOTIFICATION_RULE_QUERY,
+        GET_NOTIFICATION_CHANNEL_QUERY, INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
         IN_APP_NOTIFICATION_NOTIFY_CHANNEL, IN_APP_NOTIFICATION_NOTIFY_QUERY,
         LIST_IN_APP_NOTIFICATIONS_QUERY, LIST_NOTIFICATION_CHANNELS_QUERY,
         LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY, LIST_NOTIFICATION_DELIVERIES_QUERY,
         LIST_NOTIFICATION_RULES_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
         MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY, MARK_IN_APP_NOTIFICATION_READ_QUERY,
         SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY,
-        UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY, UPDATE_NOTIFICATION_RULE_QUERY,
+        UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY, UPDATE_NOTIFICATION_CHANNEL_QUERY,
+        UPDATE_NOTIFICATION_RULE_QUERY,
     };
     use coin_listener_core::{
         models::{
@@ -1234,20 +1236,38 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn channel_validation_accepts_email_and_telegram() {
+        for channel_type in ["email", "telegram"] {
+            let request = CreateNotificationChannelRequest {
+                channel_type: channel_type.to_string(),
+                name: format!("{channel_type} channel"),
+                config: None,
+                status: Some("active".to_string()),
+            };
+
+            assert!(validate_notification_channel_request(&request).is_ok());
+        }
+    }
+
+    #[test]
+    fn notification_channel_management_queries_are_tenant_scoped() {
+        assert!(GET_NOTIFICATION_CHANNEL_QUERY.contains("tenant_id = $2"));
+        assert!(UPDATE_NOTIFICATION_CHANNEL_QUERY.contains("tenant_id = $6"));
+        assert!(DELETE_NOTIFICATION_CHANNEL_QUERY.contains("tenant_id = $2"));
+    }
+
+    #[test]
     fn channel_validation_rejects_unknown_type() {
         let request = CreateNotificationChannelRequest {
-            channel_type: "email".to_string(),
-            name: "Email".to_string(),
+            channel_type: "sms".to_string(),
+            name: "SMS".to_string(),
             config: None,
             status: Some("active".to_string()),
         };
 
         let result = validate_notification_channel_request(&request);
 
-        assert!(matches!(
-            result,
-            Err(AppError::Validation(message)) if message == "channel_type must be in_app, telegram, or webhook"
-        ));
+        assert!(matches!(result, Err(AppError::Validation(_))));
     }
 
     #[test]

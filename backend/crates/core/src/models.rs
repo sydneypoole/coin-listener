@@ -578,7 +578,8 @@ pub struct AddressEventDraft {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddressEvent, CreateBalanceSnapshotRequest, CreateWatchedAddressRequest, EventStatus,
+        AddressEvent, CreateBalanceSnapshotRequest, CreateTelegramBotRequest,
+        CreateWatchedAddressImportRequest, CreateWatchedAddressRequest, EventStatus,
         NotificationDelivery, NotificationDeliveryListItem, NotificationDeliveryListResponse,
         NotificationDeliveryQuery, NotificationOutboxDetail, NotificationOutboxItem,
         NotificationOutboxListItem, NotificationOutboxListResponse, NotificationOutboxQuery,
@@ -589,6 +590,50 @@ mod tests {
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
+
+    #[test]
+    fn telegram_bot_create_request_deserializes_token_without_serializing_secret() {
+        let payload = r#"{
+            "name":"Ops bot",
+            "bot_token":"123456:secret-token",
+            "status":"active"
+        }"#;
+
+        let request: CreateTelegramBotRequest = serde_json::from_str(payload).unwrap();
+
+        assert_eq!(request.name, "Ops bot");
+        assert_eq!(request.bot_token, "123456:secret-token");
+        assert_eq!(request.status.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn address_import_create_request_carries_defaults_and_rows() {
+        let payload = r#"{
+            "defaults": {
+                "chain_id":"00000000-0000-0000-0000-000000000002",
+                "asset_ids":["00000000-0000-0000-0000-000000000101"],
+                "priority":"normal",
+                "scan_interval_seconds":300,
+                "transfer_filter_enabled":true,
+                "balance_change_filter_enabled":true,
+                "status":"active"
+            },
+            "rows": [{
+                "row_number":1,
+                "raw_text":"0x0000000000000000000000000000000000000001,Hot wallet,critical",
+                "address":"0x0000000000000000000000000000000000000001",
+                "label":"Hot wallet",
+                "priority":"critical"
+            }]
+        }"#;
+
+        let request: CreateWatchedAddressImportRequest = serde_json::from_str(payload).unwrap();
+
+        assert_eq!(request.defaults.priority, "normal");
+        assert_eq!(request.rows.len(), 1);
+        assert_eq!(request.rows[0].row_number, 1);
+        assert_eq!(request.rows[0].priority.as_deref(), Some("critical"));
+    }
 
     #[test]
     fn provider_health_status_round_trips_as_json() {

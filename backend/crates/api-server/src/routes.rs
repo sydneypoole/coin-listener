@@ -737,6 +737,32 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn router_exposes_watched_address_import_routes() {
+        let app = build_router(test_state());
+
+        for (method, uri) in [
+            (Method::POST, "/api/addresses/imports"),
+            (Method::GET, "/api/addresses/imports/not-a-uuid"),
+            (Method::GET, "/api/addresses/imports/not-a-uuid/errors"),
+            (Method::POST, "/api/addresses/imports/not-a-uuid/cancel"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("valid request"),
+                )
+                .await
+                .expect("router response");
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+    }
+
     #[test]
     fn watched_address_request_requires_asset_ids_field() {
         let missing_assets = r#"{
@@ -823,6 +849,51 @@ mod tests {
         let app = build_router(test_state());
 
         for (method, uri, status) in [
+            (
+                Method::GET,
+                "/api/telegram-bots",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::POST,
+                "/api/telegram-bots",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::PUT,
+                "/api/telegram-bots/not-a-uuid",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::DELETE,
+                "/api/telegram-bots/not-a-uuid",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::POST,
+                "/api/telegram-bots/not-a-uuid/verify",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::PUT,
+                "/api/notification-channels/not-a-uuid",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::DELETE,
+                "/api/notification-channels/not-a-uuid",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::POST,
+                "/api/notification-channels/not-a-uuid/verify",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::POST,
+                "/api/notification-channels/not-a-uuid/test",
+                StatusCode::UNAUTHORIZED,
+            ),
             (
                 Method::PUT,
                 "/api/notification-channels",
