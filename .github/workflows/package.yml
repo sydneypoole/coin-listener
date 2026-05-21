@@ -60,9 +60,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          dump_npm_logs() {
+            status=$?
+            if [[ "${status}" -ne 0 ]]; then
+              echo "::group::npm failure logs"
+              npm config list
+              if compgen -G "${HOME}/.npm/_logs/*debug*.log" > /dev/null; then
+                for log in "${HOME}"/.npm/_logs/*debug*.log; do
+                  echo "--- ${log} ---"
+                  tail -n 200 "${log}"
+                done
+              else
+                echo "No npm debug logs found"
+              fi
+              echo "::endgroup::"
+            fi
+            exit "${status}"
+          }
+          trap dump_npm_logs EXIT
+
+          export NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
           echo "::group::npm registry reachability"
-          npm ping --registry=https://registry.npmjs.org/ || true
+          echo "npm_registry=$(npm config get registry)"
+          npm ping
+          npm view @tailwindcss/vite version
           echo "::endgroup::"
+
           npm ci --prefix frontend --loglevel=verbose
 
       - name: Build frontend
