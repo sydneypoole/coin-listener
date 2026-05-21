@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Form, Modal, Popconfirm, Select, Space, Tag, Toast } from '@douyinfe/semi-ui';
+import { Button, Form, Popconfirm, Select, Space, Tag, Toast } from '@douyinfe/semi-ui';
 import {
   createWatchedAddress,
   deleteWatchedAddress,
@@ -12,6 +12,7 @@ import {
 import type { Asset, CreateWatchedAddressRequest, WatchedAddress } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
+import { FormModal } from '../components/FormModal';
 import { PageScaffold } from '../components/PageScaffold';
 
 type ChainRow = {
@@ -204,7 +205,7 @@ export function AddressesPage() {
           ]}
         />
       </DataSurface>
-      <Modal title={editingAddress ? '编辑监听地址' : '新增监听地址'} visible={visible} onCancel={closeModal} footer={null}>
+      <FormModal title={editingAddress ? '编辑监听地址' : '新增监听地址'} visible={visible} onCancel={closeModal} size="large">
         <Form
           key={editingAddress?.id ?? 'create'}
           onSubmit={handleSubmit}
@@ -269,12 +270,12 @@ export function AddressesPage() {
           </div>
           {!editingAddress && <Button htmlType="button" onClick={addChainRow} theme="borderless">新增链配置</Button>}
 
-          <Space style={{ marginTop: 16 }}>
+          <Space className="form-modal-actions">
             <Button htmlType="submit" type="primary" loading={saveMutation.isPending}>保存</Button>
             <Button htmlType="button" onClick={closeModal}>取消</Button>
           </Space>
         </Form>
-      </Modal>
+      </FormModal>
     </PageScaffold>
   );
 }

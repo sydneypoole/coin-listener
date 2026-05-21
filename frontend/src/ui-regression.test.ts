@@ -239,6 +239,21 @@ describe('frontend UI regressions', () => {
     }
   });
 
+  test('form modal sizes are centralized and used by dense forms', () => {
+    const formModal = readSource('components/FormModal.tsx');
+    const addressesPage = readSource('pages/AddressesPage.tsx');
+    const notificationRulesPage = readSource('pages/NotificationRulesPage.tsx');
+
+    expectContains(formModal, 'medium: 720');
+    expectContains(formModal, 'large: 920');
+    expectContains(formModal, 'wide: 1120');
+    expectContains(formModal, 'calc(100vw - 32px)');
+    expectContains(addressesPage, '<FormModal');
+    expectContains(addressesPage, 'size="large"');
+    expectContains(notificationRulesPage, '<FormModal');
+    expectContains(notificationRulesPage, 'size="large"');
+  });
+
   test('notification and telegram API contracts are exposed to frontend', () => {
     const types = readSource('api/types.ts');
     const client = readSource('api/client.ts');

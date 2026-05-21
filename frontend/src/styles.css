@@ -79,6 +79,14 @@ body {
   color: var(--semi-color-text-2);
 }
 
+.form-modal .semi-modal-body {
+  padding-bottom: 20px;
+}
+
+.form-modal-actions {
+  margin-top: 16px;
+}
+
 .login-page {
   position: relative;
   min-height: 100vh;

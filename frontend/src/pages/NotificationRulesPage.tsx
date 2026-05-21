@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Form, Modal, Space, Tag, Toast } from '@douyinfe/semi-ui';
+import { Banner, Button, Form, Space, Tag, Toast } from '@douyinfe/semi-ui';
 import {
   createNotificationRule,
   deleteNotificationRule,
@@ -14,6 +14,7 @@ import {
 import type { CreateNotificationRuleRequest, NotificationRule } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
+import { FormModal } from '../components/FormModal';
 import { PageScaffold } from '../components/PageScaffold';
 
 const eventTypeOptions = [
@@ -186,14 +187,14 @@ export function NotificationRulesPage() {
         />
       </DataSurface>
 
-      <Modal
+      <FormModal
         title={editingRule ? '编辑通知规则' : '创建通知规则'}
         visible={modalVisible}
         onCancel={() => {
           setModalVisible(false);
           setEditingRule(null);
         }}
-        footer={null}
+        size="large"
       >
         <Form<RuleForm> initValues={initialValues()} onSubmit={handleSubmit} labelPosition="left" labelWidth={110}>
           <Form.Input field="name" label="名称" rules={[{ required: true, message: '请输入规则名称' }]} />
@@ -219,12 +220,12 @@ export function NotificationRulesPage() {
             {(channelsQuery.data ?? []).map(channel => <Form.Select.Option key={channel.id} value={channel.id}>{channel.name} / {channel.channel_type}</Form.Select.Option>)}
           </Form.Select>
           <Form.Switch field="enabled" label="启用" />
-          <Space>
+          <Space className="form-modal-actions">
             <Button htmlType="submit" type="primary" loading={saveMutation.isPending}>保存</Button>
             <Button onClick={() => setModalVisible(false)}>取消</Button>
           </Space>
         </Form>
-      </Modal>
+      </FormModal>
     </PageScaffold>
   );
 }
