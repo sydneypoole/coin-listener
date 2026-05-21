@@ -17,12 +17,13 @@ use coin_listener_chain_providers::{
 };
 use coin_listener_core::{
     models::{
-        AddressEvent, Asset, BalanceSnapshot, CreateBalanceSnapshotRequest, Provider,
-        ScanAddressContext, ScanAddressTask, ScanCursor,
+        AddressEvent, Asset, BalanceSnapshot, CreateBalanceSnapshotRequest,
+        CreateWatchedAddressRequest, Provider, ScanAddressContext, ScanAddressTask, ScanCursor,
     },
     AppError, AppResult,
 };
 use coin_listener_storage::{
+    address_imports,
     provider_health::{
         active_rpc_provider_candidates, record_provider_failure, record_provider_success,
         try_acquire_provider_qps,
@@ -44,6 +45,7 @@ pub const BTC_INITIAL_BLOCK_WINDOW: i64 = 3;
 pub const MAX_PROVIDER_PAGES_PER_SCAN: usize = 10;
 pub const BTC_CURSOR_OVERLAP_BLOCKS: i64 = 1;
 pub const PROVIDER_PAGE_LOG_INDEX_STRIDE: usize = 10_000;
+pub const ADDRESS_IMPORT_ROW_BATCH_SIZE: i64 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanPlan {
@@ -863,6 +865,75 @@ pub async fn process_scan_task(
     outcome
 }
 
+pub async fn process_one_address_import_task(
+    pool: &PgPool,
+    worker_id: &str,
+    now: DateTime<Utc>,
+) -> AppResult<bool> {
+    let Some(task) =
+        address_imports::claim_next_watched_address_import(pool, now, worker_id).await?
+    else {
+        return Ok(false);
+    };
+
+    let rows = address_imports::pending_import_rows(
+        pool,
+        task.tenant_id,
+        task.id,
+        ADDRESS_IMPORT_ROW_BATCH_SIZE,
+    )
+    .await?;
+
+    for row in rows {
+        let request = CreateWatchedAddressRequest {
+            tenant_id: Some(task.tenant_id),
+            chain_id: task.chain_id,
+            address: row.address,
+            label: row.label,
+            priority: row.priority.unwrap_or_else(|| task.priority.clone()),
+            scan_interval_seconds: row
+                .scan_interval_seconds
+                .unwrap_or(task.scan_interval_seconds),
+            transfer_filter_enabled: row
+                .transfer_filter_enabled
+                .unwrap_or(task.transfer_filter_enabled),
+            balance_change_filter_enabled: row
+                .balance_change_filter_enabled
+                .unwrap_or(task.balance_change_filter_enabled),
+            status: row.status.unwrap_or_else(|| task.address_status.clone()),
+            asset_ids: task.asset_ids.clone(),
+        };
+
+        match repositories::create_watched_address(pool, request).await {
+            Ok(address) => {
+                address_imports::mark_import_row_success(
+                    pool,
+                    task.tenant_id,
+                    task.id,
+                    row.row_number,
+                    address.id,
+                )
+                .await?;
+            }
+            Err(error) => {
+                address_imports::mark_import_row_failed(
+                    pool,
+                    task.tenant_id,
+                    task.id,
+                    row.row_number,
+                    "create_failed",
+                    &error.to_string(),
+                )
+                .await?;
+            }
+        }
+    }
+
+    address_imports::refresh_import_task_counts(pool, task.tenant_id, task.id).await?;
+    address_imports::complete_import_if_finished(pool, task.tenant_id, task.id, now).await?;
+    Ok(true)
+}
+
 async fn process_locked_scan_task(
     pool: &PgPool,
     redis: &mut MultiplexedConnection,
@@ -908,6 +979,10 @@ pub async fn run_worker(
     shutdown: Arc<AtomicBool>,
 ) -> AppResult<()> {
     while !worker_shutdown_requested(&shutdown) {
+        if let Err(error) = process_one_address_import_task(&pool, "worker", Utc::now()).await {
+            warn!(error = %error, "address import task processing failed");
+        }
+
         match scan_queue.dequeue(&mut redis, 5).await {
             Ok(Some(task)) => {
                 let task_id = task.task_id;
@@ -1656,6 +1731,24 @@ mod tests {
                 updated_at: Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap(),
             }
         }
+    }
+
+    #[test]
+    fn address_import_batch_size_is_bounded() {
+        assert_eq!(crate::ADDRESS_IMPORT_ROW_BATCH_SIZE, 50);
+    }
+
+    #[test]
+    fn worker_source_processes_address_import_before_scan_dequeue() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let run_worker_source = &source[run_worker_index..];
+        let import_index = run_worker_source
+            .find("process_one_address_import_task(&pool")
+            .unwrap();
+        let dequeue_index = run_worker_source.find("scan_queue.dequeue").unwrap();
+
+        assert!(import_index < dequeue_index);
     }
 
     #[test]

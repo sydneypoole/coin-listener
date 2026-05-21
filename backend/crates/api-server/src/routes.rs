@@ -15,12 +15,13 @@ use coin_listener_chain_providers::evm::EvmRpcClient;
 use coin_listener_core::{
     models::{
         CreateNotificationChannelRequest, CreateNotificationRuleRequest, CreateProviderRequest,
-        CreateTelegramBotRequest, CreateWatchedAddressRequest, EventQuery, InAppNotificationQuery,
-        LoginRequest, LoginResponse, NotificationChannelTestResponse,
-        NotificationDeliveryListResponse, NotificationDeliveryQuery,
-        NotificationOutboxListResponse, NotificationOutboxQuery, QueueStatus,
-        RetryNotificationOutboxResponse, SystemStatus, UpdateNotificationChannelRequest,
-        UpdateTelegramBotRequest, UserSummary, VerificationResponse,
+        CreateTelegramBotRequest, CreateWatchedAddressImportRequest, CreateWatchedAddressRequest,
+        EventQuery, InAppNotificationQuery, LoginRequest, LoginResponse,
+        NotificationChannelTestResponse, NotificationDeliveryListResponse,
+        NotificationDeliveryQuery, NotificationOutboxListResponse, NotificationOutboxQuery,
+        QueueStatus, RetryNotificationOutboxResponse, SystemStatus,
+        UpdateNotificationChannelRequest, UpdateTelegramBotRequest, UserSummary,
+        VerificationResponse,
     },
     AppError, AppResult,
 };
@@ -74,6 +75,16 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route("/api/providers/:id", put(update_provider))
         .route("/api/providers/:id/test", post(test_provider))
         .route("/api/addresses", get(list_addresses).post(create_address))
+        .route("/api/addresses/imports", post(create_address_import))
+        .route("/api/addresses/imports/:id", get(get_address_import))
+        .route(
+            "/api/addresses/imports/:id/errors",
+            get(list_address_import_errors),
+        )
+        .route(
+            "/api/addresses/imports/:id/cancel",
+            post(cancel_address_import),
+        )
         .route(
             "/api/addresses/:id",
             put(update_address).delete(delete_address),
@@ -368,6 +379,62 @@ async fn delete_address(
 ) -> Result<StatusCode, ApiError> {
     repositories::delete_watched_address(&state.postgres, auth.tenant_id, id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_address_import(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<CreateWatchedAddressImportRequest>,
+) -> Result<Response, ApiError> {
+    let task = coin_listener_storage::address_imports::create_watched_address_import(
+        &state.postgres,
+        auth.tenant_id,
+        request,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(task)).into_response())
+}
+
+async fn get_address_import(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let task = coin_listener_storage::address_imports::get_watched_address_import(
+        &state.postgres,
+        auth.tenant_id,
+        id,
+    )
+    .await?;
+    Ok(Json(task).into_response())
+}
+
+async fn list_address_import_errors(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let errors = coin_listener_storage::address_imports::list_watched_address_import_errors(
+        &state.postgres,
+        auth.tenant_id,
+        id,
+    )
+    .await?;
+    Ok(Json(errors).into_response())
+}
+
+async fn cancel_address_import(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let task = coin_listener_storage::address_imports::cancel_watched_address_import(
+        &state.postgres,
+        auth.tenant_id,
+        id,
+    )
+    .await?;
+    Ok(Json(task).into_response())
 }
 
 async fn list_events(
