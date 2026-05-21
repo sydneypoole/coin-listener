@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use coin_listener_core::{
     models::{
         AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule,
-        NotifyEventTask,
+        NotifyEventTask, TelegramBindingRequest, TelegramChatBinding,
     },
     AppError, AppResult, NotifyConfig,
 };
@@ -79,8 +79,80 @@ pub const NOT_IMPLEMENTED_CHANNEL_ERROR: &str = "channel type not implemented";
 pub const UNAVAILABLE_CHANNEL_ERROR: &str = "channel unavailable";
 pub const MISSING_CHANNEL_ERROR_PREFIX: &str = "channel missing";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramBindingCandidate {
+    pub code: String,
+    pub chat: TelegramChatBinding,
+}
+
 pub fn notifier_shutdown_requested(shutdown: &AtomicBool) -> bool {
     shutdown.load(AtomicOrdering::Relaxed)
+}
+
+pub fn telegram_binding_candidate(
+    update: &crate::telegram_updates::TelegramUpdate,
+) -> Option<TelegramBindingCandidate> {
+    Some(TelegramBindingCandidate {
+        code: crate::telegram_updates::extract_binding_code_from_update(update)?,
+        chat: crate::telegram_updates::chat_binding_from_update(update)?,
+    })
+}
+
+pub async fn process_telegram_binding_update(
+    pool: &PgPool,
+    sender: &external::ExternalNotificationSender,
+    telegram_bot_id: uuid::Uuid,
+    bot_token: &str,
+    update: &crate::telegram_updates::TelegramUpdate,
+    now: DateTime<Utc>,
+) -> AppResult<Option<TelegramBindingRequest>> {
+    let Some(candidate) = telegram_binding_candidate(update) else {
+        return Ok(None);
+    };
+
+    let Some(binding) = coin_listener_storage::telegram_bindings::bind_pending_request(
+        pool,
+        telegram_bot_id,
+        &candidate.code,
+        candidate.chat.clone(),
+        now,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let chat_name = binding
+        .chat_title
+        .as_deref()
+        .or(binding.chat_username.as_deref())
+        .or(binding.chat_id.as_deref())
+        .unwrap_or("Telegram 会话");
+    let outcome = sender
+        .send_telegram(
+            &external::TelegramChannelConfig {
+                telegram_bot_id: Some(telegram_bot_id),
+                bot_token_env: None,
+                chat_id: binding
+                    .chat_id
+                    .clone()
+                    .unwrap_or_else(|| candidate.chat.chat_id.clone()),
+            },
+            bot_token,
+            &external::telegram_binding_confirmation_text(chat_name),
+        )
+        .await;
+
+    if !outcome.is_sent() {
+        warn!(
+            telegram_bot_id = %telegram_bot_id,
+            update_id = update.update_id,
+            error = ?outcome.metadata().last_error,
+            "telegram binding confirmation was not sent"
+        );
+    }
+
+    Ok(Some(binding))
 }
 
 pub fn notification_rule_matches_event(rule: &NotificationRule, event: &AddressEvent) -> bool {
@@ -841,6 +913,7 @@ mod tests {
         models::{AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule},
         AppError, NotifyConfig,
     };
+    use serde_json::json;
 
     use crate::external::{ExternalChannelType, ExternalSendMetadata, ExternalSendOutcome};
     use crate::{
@@ -938,6 +1011,54 @@ mod tests {
             created_at: Utc.with_ymd_and_hms(2026, 5, 17, 16, 0, 0).unwrap(),
             updated_at: Utc.with_ymd_and_hms(2026, 5, 17, 16, 0, 0).unwrap(),
         }
+    }
+
+    #[test]
+    fn binding_processor_ignores_update_without_code() {
+        let update = crate::telegram_updates::TelegramUpdate {
+            update_id: 200,
+            message: Some(crate::telegram_updates::TelegramMessage {
+                text: Some("hello bot".to_string()),
+                chat: crate::telegram_updates::TelegramChat {
+                    id: json!(12345),
+                    chat_type: "private".to_string(),
+                    title: None,
+                    username: Some("alice".to_string()),
+                    first_name: Some("Alice".to_string()),
+                    last_name: None,
+                },
+            }),
+            channel_post: None,
+        };
+
+        assert_eq!(crate::telegram_binding_candidate(&update), None);
+    }
+
+    #[test]
+    fn binding_processor_extracts_code_and_chat_candidate() {
+        let update = crate::telegram_updates::TelegramUpdate {
+            update_id: 201,
+            message: Some(crate::telegram_updates::TelegramMessage {
+                text: Some("please bind CL-7K2P9Q".to_string()),
+                chat: crate::telegram_updates::TelegramChat {
+                    id: json!(-1001234567890_i64),
+                    chat_type: "supergroup".to_string(),
+                    title: Some("Ops Alerts".to_string()),
+                    username: Some("ops_alerts".to_string()),
+                    first_name: None,
+                    last_name: None,
+                },
+            }),
+            channel_post: None,
+        };
+
+        let candidate = crate::telegram_binding_candidate(&update).expect("binding candidate");
+
+        assert_eq!(candidate.code, "CL-7K2P9Q");
+        assert_eq!(candidate.chat.chat_id, "-1001234567890");
+        assert_eq!(candidate.chat.chat_type, "supergroup");
+        assert_eq!(candidate.chat.chat_title.as_deref(), Some("Ops Alerts"));
+        assert_eq!(candidate.chat.chat_username.as_deref(), Some("ops_alerts"));
     }
 
     #[test]

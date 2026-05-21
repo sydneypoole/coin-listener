@@ -90,6 +90,24 @@ pub const BIND_PENDING_REQUEST_QUERY: &str = r#"
               expires_at, bound_at, created_at, updated_at
     "#;
 
+pub const GET_TELEGRAM_UPDATE_OFFSET_QUERY: &str = r#"
+    SELECT last_update_id
+    FROM telegram_bot_update_offsets
+    WHERE tenant_id = $1
+      AND telegram_bot_id = $2
+    "#;
+
+pub const UPSERT_TELEGRAM_UPDATE_OFFSET_QUERY: &str = r#"
+    INSERT INTO telegram_bot_update_offsets (tenant_id, telegram_bot_id, last_update_id)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (tenant_id, telegram_bot_id)
+    DO UPDATE SET last_update_id = GREATEST(
+            telegram_bot_update_offsets.last_update_id,
+            EXCLUDED.last_update_id
+        ),
+        updated_at = NOW()
+    "#;
+
 pub async fn create_binding_request(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -163,6 +181,37 @@ pub async fn bind_pending_request(
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
+pub async fn get_telegram_update_offset(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    telegram_bot_id: Uuid,
+) -> AppResult<i64> {
+    sqlx::query_scalar::<_, i64>(GET_TELEGRAM_UPDATE_OFFSET_QUERY)
+        .bind(tenant_id)
+        .bind(telegram_bot_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+        .map(|offset| offset.unwrap_or(0))
+}
+
+pub async fn upsert_telegram_update_offset(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    telegram_bot_id: Uuid,
+    update_id: i64,
+) -> AppResult<()> {
+    sqlx::query(UPSERT_TELEGRAM_UPDATE_OFFSET_QUERY)
+        .bind(tenant_id)
+        .bind(telegram_bot_id)
+        .bind(update_id)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +249,13 @@ mod tests {
         assert!(BIND_PENDING_REQUEST_QUERY.contains("status = 'pending'"));
         assert!(BIND_PENDING_REQUEST_QUERY.contains("expires_at > $5"));
         assert!(BIND_PENDING_REQUEST_QUERY.contains("FOR UPDATE"));
+    }
+
+    #[test]
+    fn offset_queries_are_scoped_to_bot_and_tenant() {
+        assert!(GET_TELEGRAM_UPDATE_OFFSET_QUERY.contains("tenant_id = $1"));
+        assert!(GET_TELEGRAM_UPDATE_OFFSET_QUERY.contains("telegram_bot_id = $2"));
+        assert!(UPSERT_TELEGRAM_UPDATE_OFFSET_QUERY
+            .contains("ON CONFLICT (tenant_id, telegram_bot_id)"));
     }
 }
