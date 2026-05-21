@@ -331,6 +331,24 @@ describe('frontend UI regressions', () => {
     }
   });
 
+  test('watched address page supports backend task batch import', () => {
+    const page = readSource('pages/AddressesPage.tsx');
+
+    for (const expected of [
+      '批量添加',
+      'parseAddressImportInput',
+      'createWatchedAddressImport',
+      'getWatchedAddressImport',
+      'listWatchedAddressImportErrors',
+      'cancelWatchedAddressImport',
+      'tableId="address-import-preview"',
+      'tableId="address-import-errors"',
+      'importTaskId',
+    ]) {
+      expectContains(page, expected);
+    }
+  });
+
   test('address import parser supports line and CSV input', async () => {
     const { parseAddressImportInput } = await import('./addressImport.ts');
 

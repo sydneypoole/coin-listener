@@ -87,6 +87,23 @@ body {
   margin-top: 16px;
 }
 
+.address-import-section,
+.address-import-progress {
+  margin-top: 16px;
+}
+
+.address-import-progress {
+  padding: 14px;
+  border: 1px solid var(--semi-color-border);
+  border-radius: 12px;
+  background: var(--semi-color-bg-1);
+}
+
+.address-import-progress-title {
+  margin-bottom: 10px;
+  font-weight: 700;
+}
+
 .rule-channel-actions {
   display: flex;
   flex-direction: column;

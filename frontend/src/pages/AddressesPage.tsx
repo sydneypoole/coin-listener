@@ -1,11 +1,16 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Form, Popconfirm, Select, Space, Tag, Toast } from '@douyinfe/semi-ui';
+import { Banner, Button, Form, Popconfirm, Progress, Select, Space, Tag, Toast } from '@douyinfe/semi-ui';
+import { parseAddressImportInput } from '../addressImport';
 import {
+  cancelWatchedAddressImport,
   createWatchedAddress,
+  createWatchedAddressImport,
   deleteWatchedAddress,
+  getWatchedAddressImport,
   listAssets,
   listChains,
+  listWatchedAddressImportErrors,
   listWatchedAddresses,
   updateWatchedAddress,
 } from '../api/client';
@@ -28,16 +33,40 @@ function createChainRowId() {
   return `address-chain-row-${chainRowIdSequence}`;
 }
 
+function importProgress(task: { total_rows: number; processed_rows: number }) {
+  if (task.total_rows <= 0) return 0;
+  return Math.round((task.processed_rows / task.total_rows) * 100);
+}
+
 export function AddressesPage() {
   const [visible, setVisible] = useState(false);
+  const [batchVisible, setBatchVisible] = useState(false);
+  const [batchInput, setBatchInput] = useState('');
+  const [importTaskId, setImportTaskId] = useState<string | null>(null);
   const [editingAddress, setEditingAddress] = useState<WatchedAddress | null>(null);
   const [chainRows, setChainRows] = useState<ChainRow[]>([emptyChainRow()]);
   const queryClient = useQueryClient();
   const addressesQuery = useQuery({ queryKey: ['addresses'], queryFn: listWatchedAddresses });
   const chainsQuery = useQuery({ queryKey: ['chains'], queryFn: listChains });
   const assetsQuery = useQuery({ queryKey: ['assets'], queryFn: listAssets });
+  const importTaskQuery = useQuery({
+    queryKey: ['address-import', importTaskId],
+    queryFn: () => getWatchedAddressImport(importTaskId ?? ''),
+    enabled: Boolean(importTaskId),
+    refetchInterval: query => {
+      const status = query.state.data?.status;
+      return status === 'pending' || status === 'running' ? 2000 : false;
+    },
+  });
+  const importErrorsQuery = useQuery({
+    queryKey: ['address-import-errors', importTaskId],
+    queryFn: () => listWatchedAddressImportErrors(importTaskId ?? ''),
+    enabled: Boolean(importTaskId) && ['completed', 'failed', 'cancelled'].includes(importTaskQuery.data?.status ?? ''),
+  });
   const chainMap = useMemo(() => new Map((chainsQuery.data ?? []).map(chain => [chain.id, chain.name])), [chainsQuery.data]);
   const assetMap = useMemo(() => new Map((assetsQuery.data ?? []).map(asset => [asset.id, asset])), [assetsQuery.data]);
+  const parsedImport = useMemo(() => parseAddressImportInput(batchInput), [batchInput]);
+  const importableRows = parsedImport.rows.filter(row => !row.error);
 
   const saveMutation = useMutation({
     mutationFn: async (values: Record<string, unknown>) => {
@@ -83,6 +112,46 @@ export function AddressesPage() {
       Toast.error(error instanceof Error ? error.message : '保存失败');
       queryClient.invalidateQueries({ queryKey: ['addresses'] });
     },
+  });
+
+  const createImportMutation = useMutation({
+    mutationFn: (values: Record<string, unknown>) => createWatchedAddressImport({
+      defaults: {
+        chain_id: String(values.chain_id),
+        asset_ids: Array.isArray(values.asset_ids) ? values.asset_ids.map(String) : [],
+        priority: String(values.priority),
+        scan_interval_seconds: Number(values.scan_interval_seconds),
+        transfer_filter_enabled: Boolean(values.transfer_filter_enabled),
+        balance_change_filter_enabled: Boolean(values.balance_change_filter_enabled),
+        status: String(values.status),
+      },
+      rows: importableRows.map(row => ({
+        row_number: row.row_number,
+        raw_text: row.raw_text,
+        address: row.address,
+        label: row.label ?? null,
+        priority: row.priority ?? null,
+        scan_interval_seconds: row.scan_interval_seconds ?? null,
+        transfer_filter_enabled: row.transfer_filter_enabled ?? null,
+        balance_change_filter_enabled: row.balance_change_filter_enabled ?? null,
+        status: row.status ?? null,
+      })),
+    }),
+    onSuccess: task => {
+      Toast.success('导入任务已创建');
+      setImportTaskId(task.id);
+      queryClient.invalidateQueries({ queryKey: ['addresses'] });
+    },
+    onError: error => Toast.error(error instanceof Error ? error.message : '导入任务创建失败'),
+  });
+
+  const cancelImportMutation = useMutation({
+    mutationFn: cancelWatchedAddressImport,
+    onSuccess: () => {
+      Toast.success('导入任务已取消');
+      queryClient.invalidateQueries({ queryKey: ['address-import', importTaskId] });
+    },
+    onError: error => Toast.error(error instanceof Error ? error.message : '取消导入失败'),
   });
 
   const deleteMutation = useMutation({
@@ -140,6 +209,10 @@ export function AddressesPage() {
     resetCreateForm();
   }
 
+  function closeBatchModal() {
+    setBatchVisible(false);
+  }
+
   function addChainRow() {
     setChainRows(rows => [...rows, emptyChainRow()]);
   }
@@ -169,7 +242,12 @@ export function AddressesPage() {
   }
 
   return (
-    <PageScaffold title="监听地址" actions={<Button onClick={openCreateModal}>新增地址</Button>}>
+    <PageScaffold title="监听地址" actions={(
+      <Space>
+        <Button onClick={() => setBatchVisible(true)}>批量添加</Button>
+        <Button onClick={openCreateModal}>新增地址</Button>
+      </Space>
+    )}>
       <DataSurface title="监听地址列表">
         <DataTable<WatchedAddress>
           tableId="addresses"
@@ -274,6 +352,109 @@ export function AddressesPage() {
             <Button htmlType="submit" type="primary" loading={saveMutation.isPending}>保存</Button>
             <Button htmlType="button" onClick={closeModal}>取消</Button>
           </Space>
+        </Form>
+      </FormModal>
+      <FormModal title="批量添加监听地址" visible={batchVisible} onCancel={closeBatchModal} size="wide">
+        {parsedImport.warnings.length > 0 ? (
+          <Banner type="warning" title="导入提示" description={parsedImport.warnings.join('；')} />
+        ) : null}
+        <Form<Record<string, unknown>>
+          onSubmit={values => createImportMutation.mutate(values)}
+          labelPosition="left"
+          labelWidth={130}
+          initValues={{
+            priority: 'normal',
+            scan_interval_seconds: 300,
+            transfer_filter_enabled: true,
+            balance_change_filter_enabled: true,
+            status: 'active',
+          }}
+        >
+          {({ formState }) => (
+            <>
+              <Form.Select field="chain_id" label="默认链" rules={[{ required: true, message: '请选择默认链' }]} filter>
+                {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}
+              </Form.Select>
+              <Form.Select
+                field="asset_ids"
+                label="监听资产"
+                multiple
+                filter
+                rules={[{ required: true, message: '请选择监听资产' }]}
+                optionList={assetOptionsForChain(String(formState.values?.chain_id ?? ''))}
+              />
+              <Form.Select field="priority" label="默认优先级">
+                <Form.Select.Option value="normal">normal</Form.Select.Option>
+                <Form.Select.Option value="high">high</Form.Select.Option>
+                <Form.Select.Option value="critical">critical</Form.Select.Option>
+              </Form.Select>
+              <Form.InputNumber field="scan_interval_seconds" label="扫描间隔秒" min={10} />
+              <Form.Switch field="transfer_filter_enabled" label="关注转账" />
+              <Form.Switch field="balance_change_filter_enabled" label="关注余额变化" />
+              <Form.Select field="status" label="默认状态">
+                <Form.Select.Option value="active">active</Form.Select.Option>
+                <Form.Select.Option value="paused">paused</Form.Select.Option>
+              </Form.Select>
+              <Form.TextArea
+                field="raw_input"
+                label="地址或CSV"
+                autosize={{ minRows: 5, maxRows: 10 }}
+                placeholder="每行一个地址，或粘贴 address,label,priority CSV"
+                onChange={value => setBatchInput(String(value))}
+              />
+              <div className="address-import-section">
+                <DataTable
+                  tableId="address-import-preview"
+                  dataSource={parsedImport.rows}
+                  rowKey="row_number"
+                  pagination={false}
+                  scroll={{ x: 900 }}
+                  columns={[
+                    { title: '行号', dataIndex: 'row_number', width: 80 },
+                    { title: '地址', dataIndex: 'address', width: 320, className: 'table-cell-mono', ellipsis: { showTitle: true } },
+                    { title: '标签', dataIndex: 'label', width: 160, render: value => value ? String(value) : '-' },
+                    { title: '优先级', dataIndex: 'priority', width: 120, render: value => value ? String(value) : '-' },
+                    { title: '状态', dataIndex: 'error', width: 160, render: value => value ? <Tag color="red">{String(value)}</Tag> : <Tag color="green">可导入</Tag> },
+                  ]}
+                />
+              </div>
+              {importTaskQuery.data ? (
+                <div className="address-import-progress">
+                  <div className="address-import-progress-title">导入进度</div>
+                  <Progress percent={importProgress(importTaskQuery.data)} />
+                  <Space wrap>
+                    <Tag>总数 {importTaskQuery.data.total_rows}</Tag>
+                    <Tag color="blue">已处理 {importTaskQuery.data.processed_rows}</Tag>
+                    <Tag color="green">成功 {importTaskQuery.data.success_rows}</Tag>
+                    <Tag color="red">失败 {importTaskQuery.data.failed_rows}</Tag>
+                    <Tag>{importTaskQuery.data.status}</Tag>
+                  </Space>
+                </div>
+              ) : null}
+              <div className="address-import-section">
+                <DataTable
+                  tableId="address-import-errors"
+                  dataSource={importErrorsQuery.data ?? []}
+                  rowKey="row_number"
+                  pagination={{ pageSize: 10 }}
+                  scroll={{ x: 900 }}
+                  columns={[
+                    { title: '行号', dataIndex: 'row_number', width: 80 },
+                    { title: '地址', dataIndex: 'address', width: 320, className: 'table-cell-mono', ellipsis: { showTitle: true } },
+                    { title: '原始内容', dataIndex: 'raw_text', width: 260, ellipsis: { showTitle: true } },
+                    { title: '错误', dataIndex: 'error_message', width: 260, ellipsis: { showTitle: true } },
+                  ]}
+                />
+              </div>
+              <Space className="form-modal-actions">
+                <Button htmlType="submit" type="primary" loading={createImportMutation.isPending} disabled={importableRows.length === 0}>创建导入任务</Button>
+                {importTaskId ? (
+                  <Button htmlType="button" type="danger" loading={cancelImportMutation.isPending} onClick={() => cancelImportMutation.mutate(importTaskId)}>取消导入</Button>
+                ) : null}
+                <Button htmlType="button" onClick={closeBatchModal}>关闭</Button>
+              </Space>
+            </>
+          )}
         </Form>
       </FormModal>
     </PageScaffold>
