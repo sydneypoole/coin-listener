@@ -6,12 +6,15 @@ import type {
   CreateNotificationChannelRequest,
   CreateNotificationRuleRequest,
   CreateProviderRequest,
+  CreateTelegramBotRequest,
+  CreateWatchedAddressImportRequest,
   CreateWatchedAddressRequest,
   EventQuery,
   InAppNotification,
   InAppNotificationQuery,
   LoginResponse,
   NotificationChannel,
+  NotificationChannelTestResponse,
   NotificationDeliveryListResponse,
   NotificationDeliveryQuery,
   NotificationOutboxDetail,
@@ -22,7 +25,13 @@ import type {
   ProviderTestResponse,
   RetryNotificationOutboxResponse,
   SystemStatus,
+  TelegramBot,
+  UpdateNotificationChannelRequest,
+  UpdateTelegramBotRequest,
+  VerificationResponse,
   WatchedAddress,
+  WatchedAddressImportErrorRow,
+  WatchedAddressImportTask,
 } from './types';
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -148,6 +157,57 @@ export function scanAddress(id: string): Promise<AddressEvent> {
   });
 }
 
+export function createWatchedAddressImport(payload: CreateWatchedAddressImportRequest): Promise<WatchedAddressImportTask> {
+  return request<WatchedAddressImportTask>('/api/addresses/imports', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getWatchedAddressImport(id: string): Promise<WatchedAddressImportTask> {
+  return request<WatchedAddressImportTask>(`/api/addresses/imports/${id}`);
+}
+
+export function listWatchedAddressImportErrors(id: string): Promise<WatchedAddressImportErrorRow[]> {
+  return request<WatchedAddressImportErrorRow[]>(`/api/addresses/imports/${id}/errors`);
+}
+
+export function cancelWatchedAddressImport(id: string): Promise<WatchedAddressImportTask> {
+  return request<WatchedAddressImportTask>(`/api/addresses/imports/${id}/cancel`, {
+    method: 'POST',
+  });
+}
+
+export function listTelegramBots(): Promise<TelegramBot[]> {
+  return request<TelegramBot[]>('/api/telegram-bots');
+}
+
+export function createTelegramBot(payload: CreateTelegramBotRequest): Promise<TelegramBot> {
+  return request<TelegramBot>('/api/telegram-bots', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateTelegramBot(id: string, payload: UpdateTelegramBotRequest): Promise<TelegramBot> {
+  return request<TelegramBot>(`/api/telegram-bots/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteTelegramBot(id: string): Promise<void> {
+  return request<void>(`/api/telegram-bots/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export function verifyTelegramBot(id: string): Promise<VerificationResponse> {
+  return request<VerificationResponse>(`/api/telegram-bots/${id}/verify`, {
+    method: 'POST',
+  });
+}
+
 export function listNotificationChannels(): Promise<NotificationChannel[]> {
   return request<NotificationChannel[]>('/api/notification-channels');
 }
@@ -156,6 +216,34 @@ export function createNotificationChannel(payload: CreateNotificationChannelRequ
   return request<NotificationChannel>('/api/notification-channels', {
     method: 'POST',
     body: JSON.stringify(payload),
+  });
+}
+
+export function updateNotificationChannel(
+  id: string,
+  payload: UpdateNotificationChannelRequest,
+): Promise<NotificationChannel> {
+  return request<NotificationChannel>(`/api/notification-channels/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteNotificationChannel(id: string): Promise<void> {
+  return request<void>(`/api/notification-channels/${id}`, {
+    method: 'DELETE',
+  });
+}
+
+export function verifyNotificationChannel(id: string): Promise<VerificationResponse> {
+  return request<VerificationResponse>(`/api/notification-channels/${id}/verify`, {
+    method: 'POST',
+  });
+}
+
+export function testNotificationChannel(id: string): Promise<NotificationChannelTestResponse> {
+  return request<NotificationChannelTestResponse>(`/api/notification-channels/${id}/test`, {
+    method: 'POST',
   });
 }
 

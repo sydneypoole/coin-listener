@@ -112,6 +112,36 @@ export type CreateWatchedAddressRequest = Omit<WatchedAddress, 'id' | 'tenant_id
   tenant_id?: string;
 };
 
+export type TelegramBot = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  token_preview: string;
+  status: string;
+  verification_status: string;
+  last_verified_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateTelegramBotRequest = {
+  name: string;
+  bot_token: string;
+  status?: string;
+};
+
+export type UpdateTelegramBotRequest = {
+  name: string;
+  bot_token?: string | null;
+  status: string;
+};
+
+export type VerificationResponse = {
+  ok: boolean;
+  message: string;
+};
+
 export type NotificationChannel = {
   id: string;
   tenant_id: string;
@@ -128,6 +158,77 @@ export type CreateNotificationChannelRequest = {
   name: string;
   config?: Record<string, unknown>;
   status?: string;
+};
+
+export type UpdateNotificationChannelRequest = {
+  channel_type: string;
+  name: string;
+  config?: Record<string, unknown>;
+  status: string;
+};
+
+export type NotificationChannelTestResponse = {
+  ok: boolean;
+  message: string;
+};
+
+export type WatchedAddressImportDefaults = {
+  chain_id: string;
+  asset_ids: string[];
+  priority: string;
+  scan_interval_seconds: number;
+  transfer_filter_enabled: boolean;
+  balance_change_filter_enabled: boolean;
+  status: string;
+};
+
+export type WatchedAddressImportRowRequest = {
+  row_number: number;
+  raw_text: string;
+  address: string;
+  label?: string | null;
+  priority?: string | null;
+  scan_interval_seconds?: number | null;
+  transfer_filter_enabled?: boolean | null;
+  balance_change_filter_enabled?: boolean | null;
+  status?: string | null;
+};
+
+export type CreateWatchedAddressImportRequest = {
+  defaults: WatchedAddressImportDefaults;
+  rows: WatchedAddressImportRowRequest[];
+};
+
+export type WatchedAddressImportTask = {
+  id: string;
+  tenant_id: string;
+  status: string;
+  chain_id: string;
+  asset_ids: string[];
+  priority: string;
+  scan_interval_seconds: number;
+  transfer_filter_enabled: boolean;
+  balance_change_filter_enabled: boolean;
+  address_status: string;
+  total_rows: number;
+  processed_rows: number;
+  success_rows: number;
+  failed_rows: number;
+  locked_at?: string | null;
+  locked_by?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchedAddressImportErrorRow = {
+  row_number: number;
+  address: string;
+  raw_text: string;
+  error_code?: string | null;
+  error_message?: string | null;
 };
 
 export type NotificationRule = {

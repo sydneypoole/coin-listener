@@ -238,4 +238,63 @@ describe('frontend UI regressions', () => {
       expectNotMatches(page, /<Table(?:\s|>|\/|<)/, `${pagePath} direct Semi Table JSX`);
     }
   });
+
+  test('notification and telegram API contracts are exposed to frontend', () => {
+    const types = readSource('api/types.ts');
+    const client = readSource('api/client.ts');
+
+    for (const expected of [
+      'export type TelegramBot',
+      'export type CreateTelegramBotRequest',
+      'export type UpdateTelegramBotRequest',
+      'export type NotificationChannelTestResponse',
+      'export type WatchedAddressImportTask',
+      'export type CreateWatchedAddressImportRequest',
+      'export type WatchedAddressImportErrorRow',
+    ]) {
+      expectContains(types, expected);
+    }
+
+    for (const expected of [
+      'listTelegramBots',
+      'createTelegramBot',
+      'updateTelegramBot',
+      'deleteTelegramBot',
+      'verifyTelegramBot',
+      'updateNotificationChannel',
+      'deleteNotificationChannel',
+      'verifyNotificationChannel',
+      'testNotificationChannel',
+      'createWatchedAddressImport',
+      'getWatchedAddressImport',
+      'listWatchedAddressImportErrors',
+      'cancelWatchedAddressImport',
+    ]) {
+      expectContains(client, expected);
+    }
+  });
+
+  test('address import parser supports line and CSV input', async () => {
+    const { parseAddressImportInput } = await import('./addressImport.ts');
+
+    const lineResult = parseAddressImportInput('0x0000000000000000000000000000000000000001\n\n0x0000000000000000000000000000000000000002');
+    if (lineResult.rows.length !== 2) throw new Error('line input should produce two rows');
+    if (lineResult.rows[0].row_number !== 1) throw new Error('first line row number mismatch');
+    if (lineResult.rows[1].row_number !== 2) throw new Error('second line row number mismatch');
+    if (lineResult.rows[0].address !== '0x0000000000000000000000000000000000000001') throw new Error('line address mismatch');
+
+    const csvResult = parseAddressImportInput('address,label,priority\n0x0000000000000000000000000000000000000003,Hot,critical');
+    if (csvResult.rows[0].row_number !== 2) throw new Error('CSV row number mismatch');
+    if (csvResult.rows[0].label !== 'Hot') throw new Error('CSV label mismatch');
+    if (csvResult.rows[0].priority !== 'critical') throw new Error('CSV priority mismatch');
+  });
+
+  test('address import parser reports duplicates and unknown CSV fields', async () => {
+    const { parseAddressImportInput } = await import('./addressImport.ts');
+
+    const result = parseAddressImportInput('address,unknown\n0x0000000000000000000000000000000000000004,x\n0x0000000000000000000000000000000000000004,y');
+
+    if (!result.warnings.some(warning => warning.includes('unknown'))) throw new Error('unknown CSV field warning missing');
+    if (!result.rows.some(row => row.error === '重复地址')) throw new Error('duplicate row error missing');
+  });
 });
