@@ -6,6 +6,7 @@ import type {
   CreateNotificationChannelRequest,
   CreateNotificationRuleRequest,
   CreateProviderRequest,
+  CreateTelegramBindingRequest,
   CreateTelegramBotRequest,
   CreateWatchedAddressImportRequest,
   CreateWatchedAddressRequest,
@@ -25,6 +26,7 @@ import type {
   ProviderTestResponse,
   RetryNotificationOutboxResponse,
   SystemStatus,
+  TelegramBindingRequest,
   TelegramBot,
   UpdateNotificationChannelRequest,
   UpdateTelegramBotRequest,
@@ -204,6 +206,23 @@ export function deleteTelegramBot(id: string): Promise<void> {
 
 export function verifyTelegramBot(id: string): Promise<VerificationResponse> {
   return request<VerificationResponse>(`/api/telegram-bots/${id}/verify`, {
+    method: 'POST',
+  });
+}
+
+export function createTelegramBinding(payload: CreateTelegramBindingRequest): Promise<TelegramBindingRequest> {
+  return request<TelegramBindingRequest>('/api/telegram-bindings', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getTelegramBinding(id: string): Promise<TelegramBindingRequest> {
+  return request<TelegramBindingRequest>(`/api/telegram-bindings/${id}`);
+}
+
+export function cancelTelegramBinding(id: string): Promise<TelegramBindingRequest> {
+  return request<TelegramBindingRequest>(`/api/telegram-bindings/${id}/cancel`, {
     method: 'POST',
   });
 }

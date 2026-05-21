@@ -137,6 +137,29 @@ export type UpdateTelegramBotRequest = {
   status: string;
 };
 
+export type TelegramBindingRequest = {
+  id: string;
+  tenant_id: string;
+  telegram_bot_id: string;
+  status: 'pending' | 'bound' | 'expired' | 'cancelled' | string;
+  bind_token: string;
+  short_code: string;
+  deep_link_url?: string | null;
+  chat_id?: string | null;
+  chat_type?: string | null;
+  chat_title?: string | null;
+  chat_username?: string | null;
+  confirmation_error?: string | null;
+  expires_at: string;
+  bound_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateTelegramBindingRequest = {
+  telegram_bot_id: string;
+};
+
 export type VerificationResponse = {
   ok: boolean;
   message: string;

@@ -7,7 +7,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const src = resolve(here);
 
 function readSource(relativePath: string) {
-  return readFileSync(resolve(src, relativePath), 'utf8');
+  try {
+    return readFileSync(resolve(src, relativePath), 'utf8');
+  } catch (error) {
+    throw new Error(`Missing source file: ${relativePath}`, { cause: error });
+  }
 }
 
 function expectContains(source: string, expected: string) {
@@ -328,6 +332,29 @@ describe('frontend UI regressions', () => {
       'cancelWatchedAddressImport',
     ]) {
       expectContains(client, expected);
+    }
+  });
+
+  test('telegram binding API contracts and panel are exposed to frontend', () => {
+    const types = readSource('api/types.ts');
+    const client = readSource('api/client.ts');
+    const panel = readSource('components/TelegramBindingPanel.tsx');
+    const combined = `${types}\n${client}\n${panel}`;
+
+    for (const expected of [
+      'export type TelegramBindingRequest',
+      'export type CreateTelegramBindingRequest',
+      'createTelegramBinding',
+      'getTelegramBinding',
+      'cancelTelegramBinding',
+      'TelegramBindingPanel',
+      '生成绑定码',
+      '/start',
+      '群聊',
+      'short_code',
+      'deep_link_url',
+    ]) {
+      expectContains(combined, expected);
     }
   });
 
