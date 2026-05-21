@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
         realtime: realtime_hub,
+        telegram_webhook_secret: config.notify.telegram_webhook_secret.clone(),
     });
     let api_router = build_router(api_state)
         .layer(CorsLayer::permissive())
@@ -102,6 +103,12 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&shutdown),
     ));
 
+    let mut telegram_poller_handle = tokio::spawn(notifier::run_telegram_update_poller(
+        postgres.clone(),
+        ExternalNotificationSender::new(reqwest::Client::new()),
+        Arc::clone(&shutdown),
+    ));
+
     let server_shutdown = Arc::clone(&shutdown);
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         wait_for_shutdown(server_shutdown).await;
@@ -121,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         result = &mut scheduler_handle => RuntimeEvent::Scheduler(log_service_result("scheduler", service_task_result("scheduler", result))),
         result = &mut worker_handle => RuntimeEvent::Worker(log_service_result("worker", service_task_result("worker", result))),
         result = &mut notifier_handle => RuntimeEvent::Notifier(log_service_result("notifier", service_task_result("notifier", result))),
+        result = &mut telegram_poller_handle => RuntimeEvent::TelegramPoller(log_service_result("telegram-poller", service_task_result("telegram-poller", result))),
         result = &mut realtime_handle => RuntimeEvent::Realtime(log_realtime_result("realtime", realtime_task_result("realtime", result))),
     };
 
@@ -133,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_service_shutdown("worker", worker_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
                 wait_for_realtime_shutdown("realtime", realtime_handle).await,
+                wait_for_service_shutdown("telegram-poller", telegram_poller_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             secondary
@@ -143,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_service_shutdown("worker", worker_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
                 wait_for_realtime_shutdown("realtime", realtime_handle).await,
+                wait_for_service_shutdown("telegram-poller", telegram_poller_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -153,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_service_shutdown("worker", worker_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
                 wait_for_realtime_shutdown("realtime", realtime_handle).await,
+                wait_for_service_shutdown("telegram-poller", telegram_poller_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -163,6 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_service_shutdown("scheduler", scheduler_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
                 wait_for_realtime_shutdown("realtime", realtime_handle).await,
+                wait_for_service_shutdown("telegram-poller", telegram_poller_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -173,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_service_shutdown("scheduler", scheduler_handle).await,
                 wait_for_service_shutdown("worker", worker_handle).await,
                 wait_for_realtime_shutdown("realtime", realtime_handle).await,
+                wait_for_service_shutdown("telegram-poller", telegram_poller_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -183,6 +196,18 @@ async fn main() -> anyhow::Result<()> {
                 wait_for_service_shutdown("scheduler", scheduler_handle).await,
                 wait_for_service_shutdown("worker", worker_handle).await,
                 wait_for_service_shutdown("notifier", notifier_handle).await,
+                wait_for_service_shutdown("telegram-poller", telegram_poller_handle).await,
+            ]);
+            wait_for_heartbeat_shutdown(heartbeat_handles).await;
+            preserve_primary_result(result, secondary)
+        }
+        RuntimeEvent::TelegramPoller(result) => {
+            let secondary = collect_shutdown_errors(vec![
+                wait_for_server_shutdown(server_handle).await,
+                wait_for_service_shutdown("scheduler", scheduler_handle).await,
+                wait_for_service_shutdown("worker", worker_handle).await,
+                wait_for_service_shutdown("notifier", notifier_handle).await,
+                wait_for_realtime_shutdown("realtime", realtime_handle).await,
             ]);
             wait_for_heartbeat_shutdown(heartbeat_handles).await;
             preserve_primary_result(result, secondary)
@@ -196,6 +221,7 @@ enum RuntimeEvent {
     Scheduler(anyhow::Result<()>),
     Worker(anyhow::Result<()>),
     Notifier(anyhow::Result<()>),
+    TelegramPoller(anyhow::Result<()>),
     Realtime(anyhow::Result<()>),
 }
 
@@ -361,5 +387,18 @@ mod tests {
         assert!(source.contains("shutdown_signal()"));
         assert!(source.contains("SignalKind::terminate()"));
         assert!(source.contains("preserve_primary_result("));
+    }
+
+    #[test]
+    fn all_in_one_starts_telegram_update_poller() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+
+        assert!(production_source.contains("run_telegram_update_poller"));
+        assert!(production_source.contains("RuntimeEvent::TelegramPoller"));
+        assert!(production_source.contains("wait_for_service_shutdown(\"telegram-poller\""));
     }
 }

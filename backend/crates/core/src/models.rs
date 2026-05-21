@@ -399,6 +399,7 @@ pub struct TelegramBot {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
+    pub username: Option<String>,
     pub token_preview: String,
     pub status: String,
     pub verification_status: String,
@@ -413,6 +414,7 @@ pub struct TelegramBotSecret {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
+    pub username: Option<String>,
     pub bot_token: String,
     pub token_preview: String,
     pub status: String,
@@ -435,6 +437,39 @@ pub struct UpdateTelegramBotRequest {
     pub name: String,
     pub bot_token: Option<String>,
     pub status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTelegramBindingRequest {
+    pub telegram_bot_id: Uuid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TelegramBindingRequest {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub telegram_bot_id: Uuid,
+    pub status: String,
+    pub bind_token: String,
+    pub short_code: String,
+    pub deep_link_url: Option<String>,
+    pub chat_id: Option<String>,
+    pub chat_type: Option<String>,
+    pub chat_title: Option<String>,
+    pub chat_username: Option<String>,
+    pub confirmation_error: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub bound_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TelegramChatBinding {
+    pub chat_id: String,
+    pub chat_type: String,
+    pub chat_title: Option<String>,
+    pub chat_username: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -705,18 +740,79 @@ pub struct AddressEventDraft {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddressEvent, CreateBalanceSnapshotRequest, CreateTelegramBotRequest,
-        CreateWatchedAddressImportRequest, CreateWatchedAddressRequest, EventStatus,
-        NotificationDelivery, NotificationDeliveryListItem, NotificationDeliveryListResponse,
-        NotificationDeliveryQuery, NotificationOutboxDetail, NotificationOutboxItem,
-        NotificationOutboxListItem, NotificationOutboxListResponse, NotificationOutboxQuery,
-        NotificationStatus, NotifyEventTask, OutboxStatusCounts, ProviderChainStatus,
-        ProviderHealthStatus, ProviderStatus, ProviderStatusItem, QueueStatus,
+        AddressEvent, CreateBalanceSnapshotRequest, CreateTelegramBindingRequest,
+        CreateTelegramBotRequest, CreateWatchedAddressImportRequest, CreateWatchedAddressRequest,
+        EventStatus, NotificationDelivery, NotificationDeliveryListItem,
+        NotificationDeliveryListResponse, NotificationDeliveryQuery, NotificationOutboxDetail,
+        NotificationOutboxItem, NotificationOutboxListItem, NotificationOutboxListResponse,
+        NotificationOutboxQuery, NotificationStatus, NotifyEventTask, OutboxStatusCounts,
+        ProviderChainStatus, ProviderHealthStatus, ProviderStatus, ProviderStatusItem, QueueStatus,
         RetryNotificationOutboxResponse, ScanAddressTask, ScanCursor, ScanStatus,
-        ServiceHealthStatus, ServiceHeartbeatStatusItem, SystemStatus, WatchedAddressResponse,
+        ServiceHealthStatus, ServiceHeartbeatStatusItem, SystemStatus, TelegramBindingRequest,
+        WatchedAddressResponse,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
+
+    #[test]
+    fn telegram_binding_response_carries_private_and_group_binding_fields() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 22, 12, 0, 0).unwrap();
+        let response = TelegramBindingRequest {
+            id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            telegram_bot_id: Uuid::from_u128(3),
+            status: "pending".to_string(),
+            bind_token: "bind_abc".to_string(),
+            short_code: "CL-7K2P9Q".to_string(),
+            deep_link_url: Some("https://t.me/demo_bot?start=bind_abc".to_string()),
+            chat_id: None,
+            chat_type: None,
+            chat_title: None,
+            chat_username: None,
+            confirmation_error: None,
+            expires_at: now,
+            bound_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert_eq!(response.bind_token, "bind_abc");
+        assert_eq!(response.short_code, "CL-7K2P9Q");
+        assert_eq!(
+            response.deep_link_url.as_deref(),
+            Some("https://t.me/demo_bot?start=bind_abc")
+        );
+    }
+
+    #[test]
+    fn create_telegram_binding_request_names_target_bot() {
+        let request = CreateTelegramBindingRequest {
+            telegram_bot_id: Uuid::from_u128(9),
+        };
+
+        assert_eq!(request.telegram_bot_id, Uuid::from_u128(9));
+    }
+
+    #[test]
+    fn telegram_binding_migration_defines_request_and_offset_tables() {
+        let migration = include_str!("../../storage/migrations/0015_telegram_channel_bindings.sql");
+
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS telegram_binding_requests"));
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS telegram_bot_update_offsets"));
+        assert!(migration.contains("short_code TEXT NOT NULL"));
+        assert!(migration.contains("last_update_id BIGINT NOT NULL DEFAULT 0"));
+        assert!(migration.contains("status IN ('pending', 'bound', 'expired', 'cancelled')"));
+        assert!(migration.contains("idx_telegram_bots_id_tenant"));
+        assert!(migration.contains("FOREIGN KEY (telegram_bot_id, tenant_id)"));
+    }
+
+    #[test]
+    fn telegram_bot_username_migration_upgrades_existing_tables() {
+        let migration = include_str!("../../storage/migrations/0016_telegram_bot_username.sql");
+
+        assert!(migration.contains("ALTER TABLE telegram_bots"));
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS username TEXT"));
+    }
 
     #[test]
     fn telegram_bot_create_request_deserializes_token_without_serializing_secret() {

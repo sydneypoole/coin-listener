@@ -7,7 +7,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const src = resolve(here);
 
 function readSource(relativePath: string) {
-  return readFileSync(resolve(src, relativePath), 'utf8');
+  try {
+    return readFileSync(resolve(src, relativePath), 'utf8');
+  } catch (error) {
+    throw new Error(`Missing source file: ${relativePath}`, { cause: error });
+  }
 }
 
 function expectContains(source: string, expected: string) {
@@ -290,10 +294,16 @@ describe('frontend UI regressions', () => {
     expectContains(page, 'isPlainConfigObject');
     expectContains(page, '配置 JSON 必须是对象');
     expectContains(page, 'safeChannelConfig');
+    expectContains(page, 'TelegramBindingPanel');
+    expectContains(page, 'handleTelegramBound');
+    expectNotContains(page, 'label="Chat ID"');
     expectContains(rules, '新建渠道');
     expectContains(rules, '刷新渠道');
     expectContains(rules, 'quickCreatedChannelId');
     expectContains(rules, 'telegramBotsQuery');
+    expectContains(rules, 'TelegramBindingPanel');
+    expectContains(rules, 'handleQuickTelegramBound');
+    expectNotContains(rules, 'label="Chat ID"');
   });
 
   test('notification and telegram API contracts are exposed to frontend', () => {
@@ -328,6 +338,31 @@ describe('frontend UI regressions', () => {
       'cancelWatchedAddressImport',
     ]) {
       expectContains(client, expected);
+    }
+  });
+
+  test('telegram binding API contracts and panel are exposed to frontend', () => {
+    const types = readSource('api/types.ts');
+    const client = readSource('api/client.ts');
+    const panel = readSource('components/TelegramBindingPanel.tsx');
+    const combined = `${types}\n${client}\n${panel}`;
+
+    for (const expected of [
+      'export type TelegramBindingRequest',
+      'export type CreateTelegramBindingRequest',
+      'createTelegramBinding',
+      'getTelegramBinding',
+      'cancelTelegramBinding',
+      'TelegramBindingPanel',
+      '生成绑定码',
+      '/start',
+      '群聊',
+      'short_code',
+      'deep_link_url',
+      "binding.status === 'expired'",
+      '绑定码已过期',
+    ]) {
+      expectContains(combined, expected);
     }
   });
 

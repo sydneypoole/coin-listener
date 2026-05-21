@@ -52,6 +52,7 @@ pub struct NotifyConfig {
     pub outbox_max_attempts: i32,
     pub outbox_stale_lock_seconds: i64,
     pub outbox_idle_sleep_ms: u64,
+    pub telegram_webhook_secret: Option<String>,
 }
 
 impl AppConfig {
@@ -110,6 +111,10 @@ impl AppConfig {
                 "notify.outbox_idle_sleep_ms",
                 env_parse("NOTIFICATION_OUTBOX_IDLE_SLEEP_MS", 500_u64)?,
             ))
+            .merge((
+                "notify.telegram_webhook_secret",
+                env_optional_string("TELEGRAM_WEBHOOK_SECRET"),
+            ))
             .merge(("auth.token_secret", env_string("AUTH_TOKEN_SECRET", "")))
             .merge((
                 "auth.token_ttl_seconds",
@@ -126,6 +131,13 @@ impl AppConfig {
 
 fn env_string(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_optional_string(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn env_parse<T>(name: &str, default: T) -> AppResult<T>
@@ -164,6 +176,7 @@ mod tests {
             outbox_max_attempts: 10,
             outbox_stale_lock_seconds: 300,
             outbox_idle_sleep_ms: 500,
+            telegram_webhook_secret: None,
         };
 
         assert_eq!(config.queue_key, "notify:event:queue");
@@ -171,6 +184,28 @@ mod tests {
         assert_eq!(config.outbox_max_attempts, 10);
         assert_eq!(config.outbox_stale_lock_seconds, 300);
         assert_eq!(config.outbox_idle_sleep_ms, 500);
+        assert_eq!(config.telegram_webhook_secret, None);
+    }
+
+    #[test]
+    fn app_config_loads_telegram_webhook_secret_with_blank_as_none() {
+        let previous = std::env::var_os("TELEGRAM_WEBHOOK_SECRET");
+
+        std::env::set_var("TELEGRAM_WEBHOOK_SECRET", "webhook-secret");
+        let configured = AppConfig::from_env().expect("config loads with telegram webhook secret");
+        assert_eq!(
+            configured.notify.telegram_webhook_secret.as_deref(),
+            Some("webhook-secret")
+        );
+
+        std::env::set_var("TELEGRAM_WEBHOOK_SECRET", "  ");
+        let blank = AppConfig::from_env().expect("config loads with blank telegram webhook secret");
+        assert_eq!(blank.notify.telegram_webhook_secret, None);
+
+        match previous {
+            Some(value) => std::env::set_var("TELEGRAM_WEBHOOK_SECRET", value),
+            None => std::env::remove_var("TELEGRAM_WEBHOOK_SECRET"),
+        }
     }
 
     #[test]

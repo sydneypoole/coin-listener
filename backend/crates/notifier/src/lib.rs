@@ -1,4 +1,5 @@
 pub mod external;
+pub mod telegram_updates;
 
 use std::{
     cmp::Ordering,
@@ -19,7 +20,7 @@ use chrono::{DateTime, Utc};
 use coin_listener_core::{
     models::{
         AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule,
-        NotifyEventTask,
+        NotifyEventTask, TelegramBindingRequest, TelegramChatBinding,
     },
     AppError, AppResult, NotifyConfig,
 };
@@ -78,8 +79,91 @@ pub const NOT_IMPLEMENTED_CHANNEL_ERROR: &str = "channel type not implemented";
 pub const UNAVAILABLE_CHANNEL_ERROR: &str = "channel unavailable";
 pub const MISSING_CHANNEL_ERROR_PREFIX: &str = "channel missing";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramBindingCandidate {
+    pub code: String,
+    pub chat: TelegramChatBinding,
+}
+
 pub fn notifier_shutdown_requested(shutdown: &AtomicBool) -> bool {
     shutdown.load(AtomicOrdering::Relaxed)
+}
+
+pub fn telegram_binding_candidate(
+    update: &crate::telegram_updates::TelegramUpdate,
+) -> Option<TelegramBindingCandidate> {
+    Some(TelegramBindingCandidate {
+        code: crate::telegram_updates::extract_binding_code_from_update(update)?,
+        chat: crate::telegram_updates::chat_binding_from_update(update)?,
+    })
+}
+
+pub async fn process_telegram_binding_update(
+    pool: &PgPool,
+    sender: &external::ExternalNotificationSender,
+    telegram_bot_id: uuid::Uuid,
+    bot_token: &str,
+    update: &crate::telegram_updates::TelegramUpdate,
+    now: DateTime<Utc>,
+) -> AppResult<Option<TelegramBindingRequest>> {
+    let Some(candidate) = telegram_binding_candidate(update) else {
+        return Ok(None);
+    };
+
+    let Some(binding) = coin_listener_storage::telegram_bindings::bind_pending_request(
+        pool,
+        telegram_bot_id,
+        &candidate.code,
+        candidate.chat.clone(),
+        now,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let chat_name = binding
+        .chat_title
+        .as_deref()
+        .or(binding.chat_username.as_deref())
+        .or(binding.chat_id.as_deref())
+        .unwrap_or("Telegram 会话");
+    let outcome = sender
+        .send_telegram(
+            &external::TelegramChannelConfig {
+                telegram_bot_id: Some(telegram_bot_id),
+                bot_token_env: None,
+                chat_id: binding
+                    .chat_id
+                    .clone()
+                    .unwrap_or_else(|| candidate.chat.chat_id.clone()),
+            },
+            bot_token,
+            &external::telegram_binding_confirmation_text(chat_name),
+        )
+        .await;
+
+    if !outcome.is_sent() {
+        let confirmation_error = outcome
+            .metadata()
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "telegram binding confirmation was not sent".to_string());
+        coin_listener_storage::telegram_bindings::update_binding_confirmation_error(
+            pool,
+            &binding,
+            confirmation_error.clone(),
+        )
+        .await?;
+        warn!(
+            telegram_bot_id = %telegram_bot_id,
+            update_id = update.update_id,
+            error = %confirmation_error,
+            "telegram binding confirmation was not sent"
+        );
+    }
+
+    Ok(Some(binding))
 }
 
 pub fn notification_rule_matches_event(rule: &NotificationRule, event: &AddressEvent) -> bool {
@@ -819,6 +903,87 @@ pub async fn run_notifier(
     Ok(())
 }
 
+pub async fn run_telegram_update_poller(
+    pool: PgPool,
+    sender: external::ExternalNotificationSender,
+    shutdown: Arc<AtomicBool>,
+) -> AppResult<()> {
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    const LOCK_TTL: chrono::Duration = chrono::Duration::seconds(30);
+
+    while !notifier_shutdown_requested(&shutdown) {
+        let bots = notifications::list_active_verified_telegram_bot_secrets(&pool).await?;
+        for bot in bots {
+            let locked_at = Utc::now();
+            let Some(offset_claim) =
+                coin_listener_storage::telegram_bindings::claim_telegram_update_offset(
+                    &pool,
+                    bot.tenant_id,
+                    bot.id,
+                    locked_at,
+                    locked_at - LOCK_TTL,
+                )
+                .await?
+            else {
+                continue;
+            };
+
+            let updates = match sender
+                .get_telegram_updates(&bot.bot_token, offset_claim.last_update_id)
+                .await
+            {
+                Ok(updates) => updates,
+                Err(outcome) => {
+                    warn!(
+                        telegram_bot_id = %bot.id,
+                        last_error = ?outcome.metadata().last_error,
+                        "telegram getUpdates failed"
+                    );
+                    coin_listener_storage::telegram_bindings::release_telegram_update_offset_lock(
+                        &pool,
+                        bot.tenant_id,
+                        bot.id,
+                        offset_claim.locked_at,
+                    )
+                    .await?;
+                    continue;
+                }
+            };
+
+            for update in updates {
+                process_telegram_binding_update(
+                    &pool,
+                    &sender,
+                    bot.id,
+                    &bot.bot_token,
+                    &update,
+                    Utc::now(),
+                )
+                .await?;
+                coin_listener_storage::telegram_bindings::upsert_telegram_update_offset(
+                    &pool,
+                    bot.tenant_id,
+                    bot.id,
+                    update.update_id,
+                )
+                .await?;
+            }
+
+            coin_listener_storage::telegram_bindings::release_telegram_update_offset_lock(
+                &pool,
+                bot.tenant_id,
+                bot.id,
+                offset_claim.locked_at,
+            )
+            .await?;
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+
+    Ok(())
+}
+
 fn normalize_non_negative_integer(value: &str) -> Option<&str> {
     if value.is_empty() || !value.chars().all(|character| character.is_ascii_digit()) {
         return None;
@@ -840,6 +1005,7 @@ mod tests {
         models::{AddressEvent, NotificationChannel, NotificationOutboxItem, NotificationRule},
         AppError, NotifyConfig,
     };
+    use serde_json::json;
 
     use crate::external::{ExternalChannelType, ExternalSendMetadata, ExternalSendOutcome};
     use crate::{
@@ -940,6 +1106,70 @@ mod tests {
     }
 
     #[test]
+    fn binding_processor_ignores_update_without_code() {
+        let update = crate::telegram_updates::TelegramUpdate {
+            update_id: 200,
+            message: Some(crate::telegram_updates::TelegramMessage {
+                text: Some("hello bot".to_string()),
+                chat: crate::telegram_updates::TelegramChat {
+                    id: json!(12345),
+                    chat_type: "private".to_string(),
+                    title: None,
+                    username: Some("alice".to_string()),
+                    first_name: Some("Alice".to_string()),
+                    last_name: None,
+                },
+            }),
+            channel_post: None,
+        };
+
+        assert_eq!(crate::telegram_binding_candidate(&update), None);
+    }
+
+    #[test]
+    fn binding_processor_extracts_code_and_chat_candidate() {
+        let update = crate::telegram_updates::TelegramUpdate {
+            update_id: 201,
+            message: Some(crate::telegram_updates::TelegramMessage {
+                text: Some("please bind CL-7K2P9Q".to_string()),
+                chat: crate::telegram_updates::TelegramChat {
+                    id: json!(-1001234567890_i64),
+                    chat_type: "supergroup".to_string(),
+                    title: Some("Ops Alerts".to_string()),
+                    username: Some("ops_alerts".to_string()),
+                    first_name: None,
+                    last_name: None,
+                },
+            }),
+            channel_post: None,
+        };
+
+        let candidate = crate::telegram_binding_candidate(&update).expect("binding candidate");
+
+        assert_eq!(candidate.code, "CL-7K2P9Q");
+        assert_eq!(candidate.chat.chat_id, "-1001234567890");
+        assert_eq!(candidate.chat.chat_type, "supergroup");
+        assert_eq!(candidate.chat.chat_title.as_deref(), Some("Ops Alerts"));
+        assert_eq!(candidate.chat.chat_username.as_deref(), Some("ops_alerts"));
+    }
+
+    #[test]
+    fn binding_processor_persists_confirmation_send_failure() {
+        let source = include_str!("lib.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+        let processor = production_source
+            .split("pub async fn process_telegram_binding_update")
+            .nth(1)
+            .expect("binding processor exists");
+
+        assert!(processor.contains("update_binding_confirmation_error"));
+        assert!(processor.contains("outcome.metadata().last_error"));
+    }
+
+    #[test]
     fn rule_matches_when_all_filters_match() {
         assert!(notification_rule_matches_event(&rule(), &event()));
     }
@@ -985,6 +1215,7 @@ mod tests {
             outbox_max_attempts: 7,
             outbox_stale_lock_seconds: 120,
             outbox_idle_sleep_ms: 250,
+            telegram_webhook_secret: None,
         };
 
         let config = NotificationOutboxDispatcherConfig::from_notify_config(&notify);
@@ -1006,6 +1237,25 @@ mod tests {
         assert!(source.contains("mark_notification_outbox_retryable"));
         assert!(source.contains("mark_notification_outbox_failed"));
         assert!(!source.contains(&forbidden));
+    }
+
+    #[test]
+    fn telegram_update_poller_uses_binding_processor_and_offsets() {
+        let source = include_str!("lib.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+        let poller_start = production_source
+            .find("pub async fn run_telegram_update_poller")
+            .expect("poller runtime is present in production source");
+        let poller_source = &production_source[poller_start..];
+
+        assert!(poller_source.contains("claim_telegram_update_offset"));
+        assert!(poller_source.contains("release_telegram_update_offset_lock"));
+        assert!(poller_source.contains("get_telegram_updates"));
+        assert!(poller_source.contains("process_telegram_binding_update"));
+        assert!(poller_source.contains("upsert_telegram_update_offset"));
     }
 
     #[test]

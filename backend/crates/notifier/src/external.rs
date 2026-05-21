@@ -105,6 +105,10 @@ pub fn notification_idempotency_key(
     format!("notification:v1:{tenant_id}:{event_id}:{rule_id}:{channel_id}")
 }
 
+pub fn telegram_binding_confirmation_text(chat_name: &str) -> String {
+    format!("Coin Listener 通知渠道绑定成功：{chat_name}")
+}
+
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
@@ -183,6 +187,58 @@ impl ExternalNotificationSender {
                 provider_status_code: None,
                 provider_response: None,
             }),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn telegram_get_updates_url_for_test(
+        &self,
+        bot_token: &str,
+        last_update_id: i64,
+    ) -> String {
+        self.telegram_get_updates_url(bot_token, last_update_id)
+    }
+
+    fn telegram_get_updates_url(&self, bot_token: &str, last_update_id: i64) -> String {
+        format!(
+            "{}?offset={}&timeout=0",
+            self.telegram_bot_method_url(bot_token, "getUpdates"),
+            last_update_id + 1,
+        )
+    }
+
+    pub async fn get_telegram_updates(
+        &self,
+        bot_token: &str,
+        last_update_id: i64,
+    ) -> Result<Vec<crate::telegram_updates::TelegramUpdate>, ExternalSendOutcome> {
+        let url = self.telegram_get_updates_url(bot_token, last_update_id);
+        let response = self
+            .client
+            .get(&url)
+            .timeout(Duration::from_millis(5000))
+            .send()
+            .await;
+        match response {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                match read_provider_response_body(response).await {
+                    Ok(body) => parse_telegram_get_updates_response(status, &body),
+                    Err(error) => Err(telegram_get_updates_body_read_error(
+                        &url,
+                        status,
+                        &error.to_string(),
+                    )),
+                }
+            }
+            Err(error) => Err(ExternalSendOutcome::TransientFailure(
+                ExternalSendMetadata {
+                    last_error: Some(telegram_network_error_message(&url, &error.to_string())),
+                    provider_message_id: None,
+                    provider_status_code: None,
+                    provider_response: None,
+                },
+            )),
         }
     }
 
@@ -377,6 +433,35 @@ pub fn classify_webhook_response(status_code: u16, body: &str) -> ExternalSendOu
     }
 }
 
+pub fn telegram_get_updates_body_read_error(
+    url: &str,
+    status_code: u16,
+    error: &str,
+) -> ExternalSendOutcome {
+    ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+        last_error: Some(telegram_network_error_message(url, error)),
+        provider_message_id: None,
+        provider_status_code: Some(status_code as i32),
+        provider_response: None,
+    })
+}
+
+pub fn parse_telegram_verify_username(status_code: u16, body: &str) -> Option<String> {
+    if !matches!(status_code, 200..=299) {
+        return None;
+    }
+    let parsed_body = serde_json::from_str::<Value>(body).ok()?;
+    if parsed_body.get("ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let username = parsed_body
+        .get("result")
+        .and_then(|result| result.get("username"))
+        .and_then(Value::as_str)?;
+    (!username.is_empty() && !username.chars().any(char::is_whitespace))
+        .then(|| username.to_string())
+}
+
 pub fn classify_telegram_verify_response(status_code: u16, body: &str) -> ExternalSendOutcome {
     let parsed_body = serde_json::from_str::<Value>(body).ok();
     let telegram_success = parsed_body
@@ -395,6 +480,44 @@ pub fn classify_telegram_verify_response(status_code: u16, body: &str) -> Extern
     }
 
     classify_telegram_response(status_code, body)
+}
+
+pub fn parse_telegram_get_updates_response(
+    status_code: u16,
+    body: &str,
+) -> Result<Vec<crate::telegram_updates::TelegramUpdate>, ExternalSendOutcome> {
+    if !matches!(status_code, 200..=299) {
+        return Err(classify_telegram_response(status_code, body));
+    }
+    let value: Value = serde_json::from_str(body).map_err(|_| {
+        ExternalSendOutcome::PermanentFailure(ExternalSendMetadata {
+            last_error: Some("telegram getUpdates returned invalid JSON".to_string()),
+            provider_message_id: None,
+            provider_status_code: Some(status_code as i32),
+            provider_response: Some(truncate_provider_response(body)),
+        })
+    })?;
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(classify_telegram_response(status_code, body));
+    }
+    let Some(result) = value.get("result").cloned() else {
+        return Err(ExternalSendOutcome::PermanentFailure(
+            ExternalSendMetadata {
+                last_error: Some("telegram getUpdates result is missing".to_string()),
+                provider_message_id: None,
+                provider_status_code: Some(status_code as i32),
+                provider_response: Some(truncate_provider_response(body)),
+            },
+        ));
+    };
+    serde_json::from_value(result).map_err(|_| {
+        ExternalSendOutcome::PermanentFailure(ExternalSendMetadata {
+            last_error: Some("telegram getUpdates result is invalid".to_string()),
+            provider_message_id: None,
+            provider_status_code: Some(status_code as i32),
+            provider_response: Some(truncate_provider_response(body)),
+        })
+    })
 }
 
 pub fn classify_telegram_response(status_code: u16, body: &str) -> ExternalSendOutcome {
@@ -520,6 +643,12 @@ pub async fn read_provider_response_prefix(mut response: reqwest::Response) -> S
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+async fn read_provider_response_body(
+    response: reqwest::Response,
+) -> Result<String, reqwest::Error> {
+    response.text().await
+}
+
 pub fn truncate_provider_response(body: &str) -> String {
     if body.len() <= PROVIDER_RESPONSE_MAX_BYTES {
         return body.to_string();
@@ -594,10 +723,11 @@ mod tests {
 
     use crate::external::{
         build_webhook_request_parts, classify_telegram_response, classify_telegram_verify_response,
-        classify_webhook_response, notification_idempotency_key, redact_telegram_url,
-        redact_webhook_url, telegram_network_error_message, truncate_provider_response,
-        webhook_network_error_message, webhook_signature, TelegramChannelConfig,
-        WebhookChannelConfig,
+        classify_webhook_response, notification_idempotency_key,
+        parse_telegram_get_updates_response, parse_telegram_verify_username, redact_telegram_url,
+        redact_webhook_url, telegram_get_updates_body_read_error, telegram_network_error_message,
+        truncate_provider_response, webhook_network_error_message, webhook_signature,
+        TelegramChannelConfig, WebhookChannelConfig, PROVIDER_RESPONSE_MAX_BYTES,
     };
 
     fn uuid(value: u128) -> Uuid {
@@ -917,6 +1047,105 @@ mod tests {
         assert!(outcome.is_sent());
         assert_eq!(outcome.metadata().provider_message_id, None);
         assert_eq!(outcome.metadata().provider_status_code, Some(200));
+    }
+
+    #[test]
+    fn telegram_verify_username_parser_extracts_username() {
+        let body = r#"{
+            "ok": true,
+            "result": { "id": 123, "is_bot": true, "username": "coin_listener_bot" }
+        }"#;
+
+        assert_eq!(
+            parse_telegram_verify_username(200, body).as_deref(),
+            Some("coin_listener_bot")
+        );
+        assert_eq!(parse_telegram_verify_username(401, body), None);
+        assert_eq!(
+            parse_telegram_verify_username(200, r#"{"ok":true,"result":{"username":"bad name"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn telegram_get_updates_url_includes_offset() {
+        let sender = crate::external::ExternalNotificationSender::with_telegram_api_base_url(
+            reqwest::Client::new(),
+            "https://telegram.test".to_string(),
+        );
+
+        let url = sender.telegram_get_updates_url_for_test("123:token", 42);
+
+        assert_eq!(
+            url,
+            "https://telegram.test/bot123:token/getUpdates?offset=43&timeout=0"
+        );
+    }
+
+    #[test]
+    fn telegram_get_updates_parses_large_valid_response() {
+        let oversized_text = "a".repeat(PROVIDER_RESPONSE_MAX_BYTES + 64);
+        let body = serde_json::json!({
+            "ok": true,
+            "result": [{
+                "update_id": 7,
+                "message": {
+                    "text": oversized_text,
+                    "chat": { "id": 12345, "type": "private" }
+                }
+            }]
+        })
+        .to_string();
+
+        let updates =
+            parse_telegram_get_updates_response(200, &body).expect("large getUpdates body");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].update_id, 7);
+        assert_eq!(
+            updates[0]
+                .message
+                .as_ref()
+                .and_then(|message| message.text.as_deref()),
+            Some(oversized_text.as_str())
+        );
+    }
+
+    #[test]
+    fn telegram_get_updates_rejects_success_without_result() {
+        let outcome = parse_telegram_get_updates_response(200, r#"{"ok":true}"#)
+            .expect_err("missing result should fail");
+
+        assert!(outcome.is_permanent_failure());
+        assert!(outcome
+            .metadata()
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("result is missing"));
+    }
+
+    #[test]
+    fn telegram_get_updates_body_read_error_is_transient_and_redacted() {
+        let outcome = telegram_get_updates_body_read_error(
+            "https://api.telegram.org/bot123:secret/getUpdates?offset=43&timeout=0",
+            200,
+            "decode failed for https://api.telegram.org/bot123:secret/getUpdates",
+        );
+
+        assert!(outcome.is_transient_failure());
+        assert_eq!(outcome.metadata().provider_status_code, Some(200));
+        let message = outcome.metadata().last_error.as_deref().unwrap_or("");
+        assert!(message.contains("bot<redacted>"));
+        assert!(!message.contains("123:secret"));
+    }
+
+    #[test]
+    fn telegram_confirmation_text_names_bound_chat() {
+        assert_eq!(
+            crate::external::telegram_binding_confirmation_text("Ops Alerts"),
+            "Coin Listener 通知渠道绑定成功：Ops Alerts"
+        );
     }
 
     #[test]

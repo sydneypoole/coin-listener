@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Banner, Button, Form, Popconfirm, Space, Tag, Toast } from '@douyinfe/semi-ui';
+import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface';
 import {
   createNotificationChannel,
   deleteNotificationChannel,
@@ -13,12 +14,14 @@ import {
 import type {
   CreateNotificationChannelRequest,
   NotificationChannel,
+  TelegramBindingRequest,
   UpdateNotificationChannelRequest,
 } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
 import { FormModal } from '../components/FormModal';
 import { PageScaffold } from '../components/PageScaffold';
+import { TelegramBindingPanel } from '../components/TelegramBindingPanel';
 
 type ChannelForm = {
   name?: string;
@@ -30,6 +33,8 @@ type ChannelForm = {
   message_template?: string;
   config_json?: string;
 };
+
+type ChannelFormApi = FormApi<ChannelForm>;
 
 function isPlainConfigObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -98,6 +103,7 @@ function destinationSummary(channel: NotificationChannel) {
 export function NotificationChannelsPage() {
   const [visible, setVisible] = useState(false);
   const [editingChannel, setEditingChannel] = useState<NotificationChannel | null>(null);
+  const [channelFormApi, setChannelFormApi] = useState<ChannelFormApi | null>(null);
   const queryClient = useQueryClient();
   const channelsQuery = useQuery({ queryKey: ['notification-channels'], queryFn: listNotificationChannels });
   const botsQuery = useQuery({ queryKey: ['telegram-bots'], queryFn: listTelegramBots });
@@ -158,6 +164,13 @@ export function NotificationChannelsPage() {
   function closeModal() {
     setVisible(false);
     setEditingChannel(null);
+  }
+
+  function handleTelegramBound(binding: TelegramBindingRequest) {
+    const chatId = binding.chat_id ?? '';
+    const alias = binding.chat_title || binding.chat_username || chatId || '';
+    channelFormApi?.setValue('chat_id', chatId);
+    channelFormApi?.setValue('chat_alias', alias);
   }
 
   return (
@@ -225,6 +238,7 @@ export function NotificationChannelsPage() {
           onSubmit={values => saveMutation.mutate(values)}
           labelPosition="left"
           labelWidth={120}
+          getFormApi={setChannelFormApi}
         >
           {({ formState }) => {
             const channelType = formState.values?.channel_type ?? 'telegram';
@@ -246,8 +260,9 @@ export function NotificationChannelsPage() {
                     <Form.Select field="telegram_bot_id" label="TG机器人" filter rules={[{ required: true, message: '请选择TG机器人' }]}>
                       {(botsQuery.data ?? []).map(bot => <Form.Select.Option key={bot.id} value={bot.id}>{bot.name} / {bot.token_preview}</Form.Select.Option>)}
                     </Form.Select>
-                    <Form.Input field="chat_id" label="Chat ID" rules={[{ required: true, message: '请输入 Chat ID' }]} />
-                    <Form.Input field="chat_alias" label="会话别名" />
+                    <TelegramBindingPanel telegramBotId={formState.values?.telegram_bot_id} onBound={handleTelegramBound} />
+                    <Form.Input field="chat_alias" label="已绑定会话" disabled rules={[{ required: true, message: '请先绑定 Telegram 会话' }]} />
+                    <Form.Input field="chat_id" noLabel style={{ display: 'none' }} rules={[{ required: true, message: '请先绑定 Telegram 会话' }]} />
                     <Form.TextArea field="message_template" label="消息模板" autosize />
                   </>
                 ) : (

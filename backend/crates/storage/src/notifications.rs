@@ -61,7 +61,7 @@ pub const DELETE_NOTIFICATION_CHANNEL_QUERY: &str =
     "DELETE FROM notification_channels WHERE id = $1 AND tenant_id = $2";
 
 const LIST_TELEGRAM_BOTS_QUERY: &str = r#"
-        SELECT id, tenant_id, name, token_preview, status, verification_status,
+        SELECT id, tenant_id, name, username, token_preview, status, verification_status,
                last_verified_at, last_error, created_at, updated_at
         FROM telegram_bots
         WHERE tenant_id = $1
@@ -71,16 +71,34 @@ const LIST_TELEGRAM_BOTS_QUERY: &str = r#"
 const CREATE_TELEGRAM_BOT_QUERY: &str = r#"
         INSERT INTO telegram_bots (tenant_id, name, bot_token, token_preview, status)
         VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, tenant_id, name, token_preview, status, verification_status,
+        RETURNING id, tenant_id, name, username, token_preview, status, verification_status,
                   last_verified_at, last_error, created_at, updated_at
         "#;
 
 const GET_TELEGRAM_BOT_SECRET_QUERY: &str = r#"
-        SELECT id, tenant_id, name, bot_token, token_preview, status, verification_status,
+        SELECT id, tenant_id, name, username, bot_token, token_preview, status, verification_status,
                last_verified_at, last_error, created_at, updated_at
         FROM telegram_bots
         WHERE id = $1
           AND tenant_id = $2
+        "#;
+
+const GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY: &str = r#"
+        SELECT id, tenant_id, name, username, bot_token, token_preview, status, verification_status,
+               last_verified_at, last_error, created_at, updated_at
+        FROM telegram_bots
+        WHERE id = $1
+          AND status = 'active'
+          AND verification_status = 'verified'
+        "#;
+
+const LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY: &str = r#"
+        SELECT id, tenant_id, name, username, bot_token, token_preview, status, verification_status,
+               last_verified_at, last_error, created_at, updated_at
+        FROM telegram_bots
+        WHERE status = 'active'
+          AND verification_status = 'verified'
+        ORDER BY created_at ASC
         "#;
 
 const UPDATE_TELEGRAM_BOT_QUERY: &str = r#"
@@ -89,6 +107,10 @@ const UPDATE_TELEGRAM_BOT_QUERY: &str = r#"
             bot_token = COALESCE($4, bot_token),
             token_preview = COALESCE($5, token_preview),
             status = $6,
+            username = CASE
+                WHEN $4::text IS NULL THEN username
+                ELSE NULL
+            END,
             verification_status = CASE
                 WHEN $4::text IS NULL THEN verification_status
                 ELSE 'unverified'
@@ -104,7 +126,7 @@ const UPDATE_TELEGRAM_BOT_QUERY: &str = r#"
             updated_at = NOW()
         WHERE id = $1
           AND tenant_id = $2
-        RETURNING id, tenant_id, name, token_preview, status, verification_status,
+        RETURNING id, tenant_id, name, username, token_preview, status, verification_status,
                   last_verified_at, last_error, created_at, updated_at
         "#;
 
@@ -114,12 +136,16 @@ const DELETE_TELEGRAM_BOT_QUERY: &str =
 const MARK_TELEGRAM_BOT_VERIFICATION_QUERY: &str = r#"
         UPDATE telegram_bots
         SET verification_status = $3,
-            last_verified_at = $5,
-            last_error = $4,
+            username = CASE
+                WHEN $3 = 'verified' THEN $4
+                ELSE username
+            END,
+            last_error = $5,
+            last_verified_at = $6,
             updated_at = NOW()
         WHERE id = $1
           AND tenant_id = $2
-        RETURNING id, tenant_id, name, token_preview, status, verification_status,
+        RETURNING id, tenant_id, name, username, token_preview, status, verification_status,
                   last_verified_at, last_error, created_at, updated_at
         "#;
 
@@ -688,6 +714,27 @@ pub async fn get_telegram_bot_secret(
         .ok_or_else(|| AppError::NotFound("telegram bot".to_string()))
 }
 
+pub async fn telegram_bot_secret_by_id_any_tenant(
+    pool: &PgPool,
+    id: Uuid,
+) -> AppResult<TelegramBotSecret> {
+    sqlx::query_as::<_, TelegramBotSecret>(GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("telegram bot".to_string()))
+}
+
+pub async fn list_active_verified_telegram_bot_secrets(
+    pool: &PgPool,
+) -> AppResult<Vec<TelegramBotSecret>> {
+    sqlx::query_as::<_, TelegramBotSecret>(LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
 pub async fn update_telegram_bot(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -741,6 +788,7 @@ pub async fn mark_telegram_bot_verification(
     tenant_id: Uuid,
     id: Uuid,
     status: &str,
+    username: Option<String>,
     last_error: Option<String>,
     verified_at: DateTime<Utc>,
 ) -> AppResult<TelegramBot> {
@@ -750,6 +798,7 @@ pub async fn mark_telegram_bot_verification(
         .bind(id)
         .bind(tenant_id)
         .bind(status)
+        .bind(username)
         .bind(last_error)
         .bind(verified_at)
         .fetch_optional(pool)
@@ -1513,15 +1562,16 @@ mod tests {
         ExternalDeliveryStart, CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY,
         CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
         DELETE_NOTIFICATION_CHANNEL_QUERY, DELETE_NOTIFICATION_RULE_QUERY,
-        GET_NOTIFICATION_CHANNEL_QUERY, INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
-        IN_APP_NOTIFICATION_NOTIFY_CHANNEL, IN_APP_NOTIFICATION_NOTIFY_QUERY,
+        GET_NOTIFICATION_CHANNEL_QUERY, GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY,
+        INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY, IN_APP_NOTIFICATION_NOTIFY_CHANNEL,
+        IN_APP_NOTIFICATION_NOTIFY_QUERY, LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY,
         LIST_IN_APP_NOTIFICATIONS_QUERY, LIST_NOTIFICATION_CHANNELS_QUERY,
         LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY, LIST_NOTIFICATION_DELIVERIES_QUERY,
         LIST_NOTIFICATION_RULES_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
         MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY, MARK_IN_APP_NOTIFICATION_READ_QUERY,
         SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY,
         UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY, UPDATE_NOTIFICATION_CHANNEL_QUERY,
-        UPDATE_NOTIFICATION_RULE_QUERY,
+        UPDATE_NOTIFICATION_RULE_QUERY, UPDATE_TELEGRAM_BOT_QUERY,
     };
     use coin_listener_core::{
         models::{
@@ -1764,6 +1814,42 @@ mod tests {
         assert!(UPDATE_NOTIFICATION_RULE_QUERY.contains("WHERE id = $1"));
         assert!(UPDATE_NOTIFICATION_RULE_QUERY.contains("AND tenant_id = $12"));
         assert!(DELETE_NOTIFICATION_RULE_QUERY.contains("WHERE id = $1 AND tenant_id = $2"));
+    }
+
+    #[test]
+    fn telegram_webhook_bot_secret_query_requires_active_verified_bot() {
+        assert!(GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY.contains("status = 'active'"));
+        assert!(GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY
+            .contains("verification_status = 'verified'"));
+    }
+
+    #[test]
+    fn active_verified_telegram_bot_secret_query_filters_and_selects_username() {
+        let source = include_str!("notifications.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+
+        assert!(LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY.contains("username"));
+        assert!(LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY.contains("bot_token"));
+        assert!(LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY.contains("status = 'active'"));
+        assert!(LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY
+            .contains("verification_status = 'verified'"));
+        assert!(LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY.contains("ORDER BY created_at ASC"));
+        assert!(
+            production_source.contains("pub async fn list_active_verified_telegram_bot_secrets")
+        );
+        assert!(production_source.contains(
+            "sqlx::query_as::<_, TelegramBotSecret>(LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY)"
+        ));
+    }
+
+    #[test]
+    fn telegram_bot_update_clears_username_when_token_changes() {
+        assert!(UPDATE_TELEGRAM_BOT_QUERY.contains("username = CASE"));
+        assert!(UPDATE_TELEGRAM_BOT_QUERY.contains("WHEN $4::text IS NULL THEN username"));
+        assert!(UPDATE_TELEGRAM_BOT_QUERY.contains("ELSE NULL"));
     }
 
     #[test]

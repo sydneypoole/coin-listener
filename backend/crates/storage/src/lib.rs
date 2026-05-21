@@ -8,6 +8,7 @@ pub mod repositories;
 pub mod scan_queue;
 pub mod service_heartbeats;
 pub mod system_status;
+pub mod telegram_bindings;
 
 pub use postgres::{connect_postgres, run_migrations};
 pub use redis::connect_redis;

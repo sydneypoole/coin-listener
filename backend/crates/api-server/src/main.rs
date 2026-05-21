@@ -5,11 +5,15 @@ use coin_listener_storage::{
     connect_postgres, connect_redis, run_migrations,
     service_heartbeats::{run_service_heartbeat, service_heartbeat_instance_id},
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use notifier::external::ExternalNotificationSender;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
-use tokio::{net::TcpListener, signal};
+use tokio::{net::TcpListener, signal, task::JoinHandle, time};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -48,6 +52,13 @@ async fn main() -> anyhow::Result<()> {
         realtime_shutdown,
     ));
 
+    let telegram_poller_shutdown = Arc::clone(&shutdown);
+    let mut telegram_poller_handle = tokio::spawn(notifier::run_telegram_update_poller(
+        postgres.clone(),
+        ExternalNotificationSender::new(reqwest::Client::new()),
+        telegram_poller_shutdown,
+    ));
+
     let state = Arc::new(ApiState {
         postgres,
         redis: Some(redis),
@@ -56,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
         realtime: realtime_hub,
+        telegram_webhook_secret: config.notify.telegram_webhook_secret.clone(),
     });
     let app = build_router(state)
         .layer(CorsLayer::permissive())
@@ -65,12 +77,85 @@ async fn main() -> anyhow::Result<()> {
     info!(address = %listener.local_addr()?, "api server listening");
 
     let shutdown_signal = Arc::clone(&shutdown);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            if signal::ctrl_c().await.is_ok() {
-                shutdown_signal.store(true, Ordering::Relaxed);
-            }
-        })
-        .await?;
-    Ok(())
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        if signal::ctrl_c().await.is_ok() {
+            shutdown_signal.store(true, Ordering::Relaxed);
+        }
+    });
+
+    let event = tokio::select! {
+        result = server => ApiServerRuntimeEvent::Server(result.map_err(Into::into)),
+        result = &mut telegram_poller_handle => ApiServerRuntimeEvent::TelegramPoller(telegram_poller_task_result(result)),
+    };
+    shutdown.store(true, Ordering::Relaxed);
+
+    match event {
+        ApiServerRuntimeEvent::Server(result) => preserve_primary_result(
+            result,
+            wait_for_telegram_poller_shutdown(telegram_poller_handle).await,
+        ),
+        ApiServerRuntimeEvent::TelegramPoller(result) => result,
+    }
+}
+
+#[derive(Debug)]
+enum ApiServerRuntimeEvent {
+    Server(anyhow::Result<()>),
+    TelegramPoller(anyhow::Result<()>),
+}
+
+fn preserve_primary_result(
+    primary: anyhow::Result<()>,
+    secondary: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match primary {
+        Ok(()) => secondary,
+        Err(error) => Err(error),
+    }
+}
+
+fn telegram_poller_task_result(
+    result: Result<coin_listener_core::AppResult<()>, tokio::task::JoinError>,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(anyhow::anyhow!("telegram poller failed: {error}")),
+        Err(error) => Err(anyhow::anyhow!("telegram poller task failed: {error}")),
+    }
+}
+
+async fn wait_for_telegram_poller_shutdown(
+    handle: JoinHandle<coin_listener_core::AppResult<()>>,
+) -> anyhow::Result<()> {
+    match time::timeout(Duration::from_secs(10), handle).await {
+        Ok(result) => telegram_poller_task_result(result),
+        Err(_) => Err(anyhow::anyhow!(
+            "telegram poller did not stop before timeout"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn api_server_starts_telegram_update_poller() {
+        let source = include_str!("main.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+
+        assert!(production_source.contains("run_telegram_update_poller"));
+        assert!(
+            production_source.contains("ExternalNotificationSender::new(reqwest::Client::new())")
+        );
+        assert!(production_source.contains("postgres.clone()"));
+        assert!(production_source.contains("Arc::clone(&shutdown)"));
+        assert!(production_source.contains("telegram_poller_handle"));
+        assert!(production_source.contains("tokio::select!"));
+        assert!(production_source.contains("ApiServerRuntimeEvent::Server"));
+        assert!(production_source.contains("ApiServerRuntimeEvent::TelegramPoller"));
+        assert!(production_source.contains("wait_for_telegram_poller_shutdown("));
+        assert!(production_source.contains("preserve_primary_result("));
+    }
 }
