@@ -344,6 +344,10 @@ describe('frontend UI regressions', () => {
       'tableId="address-import-preview"',
       'tableId="address-import-errors"',
       'importTaskId',
+      'handleBatchChainChange',
+      "setValue('asset_ids', [])",
+      'isTerminalImportStatus',
+      "queryClient.invalidateQueries({ queryKey: ['address-import-errors', importTaskId] })",
     ]) {
       expectContains(page, expected);
     }

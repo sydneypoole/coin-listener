@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Banner, Button, Form, Popconfirm, Progress, Select, Space, Tag, Toast } from '@douyinfe/semi-ui';
+import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface';
 import { parseAddressImportInput } from '../addressImport';
 import {
   cancelWatchedAddressImport,
@@ -26,6 +27,11 @@ type ChainRow = {
   asset_ids: string[];
 };
 
+type BatchImportForm = Record<string, unknown>;
+type BatchImportFormApi = FormApi<BatchImportForm>;
+
+const terminalImportStatuses = ['completed', 'failed', 'cancelled'];
+
 let chainRowIdSequence = 0;
 
 function createChainRowId() {
@@ -38,11 +44,16 @@ function importProgress(task: { total_rows: number; processed_rows: number }) {
   return Math.round((task.processed_rows / task.total_rows) * 100);
 }
 
+function isTerminalImportStatus(status?: string) {
+  return Boolean(status) && terminalImportStatuses.includes(status ?? '');
+}
+
 export function AddressesPage() {
   const [visible, setVisible] = useState(false);
   const [batchVisible, setBatchVisible] = useState(false);
   const [batchInput, setBatchInput] = useState('');
   const [importTaskId, setImportTaskId] = useState<string | null>(null);
+  const [batchFormApi, setBatchFormApi] = useState<BatchImportFormApi | null>(null);
   const [editingAddress, setEditingAddress] = useState<WatchedAddress | null>(null);
   const [chainRows, setChainRows] = useState<ChainRow[]>([emptyChainRow()]);
   const queryClient = useQueryClient();
@@ -61,12 +72,18 @@ export function AddressesPage() {
   const importErrorsQuery = useQuery({
     queryKey: ['address-import-errors', importTaskId],
     queryFn: () => listWatchedAddressImportErrors(importTaskId ?? ''),
-    enabled: Boolean(importTaskId) && ['completed', 'failed', 'cancelled'].includes(importTaskQuery.data?.status ?? ''),
+    enabled: Boolean(importTaskId) && isTerminalImportStatus(importTaskQuery.data?.status),
   });
   const chainMap = useMemo(() => new Map((chainsQuery.data ?? []).map(chain => [chain.id, chain.name])), [chainsQuery.data]);
   const assetMap = useMemo(() => new Map((assetsQuery.data ?? []).map(asset => [asset.id, asset])), [assetsQuery.data]);
   const parsedImport = useMemo(() => parseAddressImportInput(batchInput), [batchInput]);
   const importableRows = parsedImport.rows.filter(row => !row.error);
+
+  useEffect(() => {
+    if (!importTaskId || !isTerminalImportStatus(importTaskQuery.data?.status)) return;
+    queryClient.invalidateQueries({ queryKey: ['addresses'] });
+    queryClient.invalidateQueries({ queryKey: ['address-import-errors', importTaskId] });
+  }, [importTaskId, importTaskQuery.data?.status, queryClient]);
 
   const saveMutation = useMutation({
     mutationFn: async (values: Record<string, unknown>) => {
@@ -225,6 +242,10 @@ export function AddressesPage() {
     setChainRows(rows => rows.map(row => row.id === rowId ? { ...row, ...patch } : row));
   }
 
+  function handleBatchChainChange() {
+    batchFormApi?.setValue('asset_ids', []);
+  }
+
   function basePayload(values: Record<string, unknown>) {
     return {
       address: editingAddress ? editingAddress.address : String(values.address),
@@ -358,10 +379,11 @@ export function AddressesPage() {
         {parsedImport.warnings.length > 0 ? (
           <Banner type="warning" title="导入提示" description={parsedImport.warnings.join('；')} />
         ) : null}
-        <Form<Record<string, unknown>>
+        <Form<BatchImportForm>
           onSubmit={values => createImportMutation.mutate(values)}
           labelPosition="left"
           labelWidth={130}
+          getFormApi={setBatchFormApi}
           initValues={{
             priority: 'normal',
             scan_interval_seconds: 300,
@@ -372,7 +394,7 @@ export function AddressesPage() {
         >
           {({ formState }) => (
             <>
-              <Form.Select field="chain_id" label="默认链" rules={[{ required: true, message: '请选择默认链' }]} filter>
+              <Form.Select field="chain_id" label="默认链" rules={[{ required: true, message: '请选择默认链' }]} filter onChange={handleBatchChainChange}>
                 {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}
               </Form.Select>
               <Form.Select
