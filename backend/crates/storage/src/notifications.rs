@@ -4,8 +4,10 @@ use chrono::{DateTime, Utc};
 use coin_listener_core::{
     models::{
         AddressEvent, CreateNotificationChannelRequest, CreateNotificationRuleRequest,
-        InAppNotification, InAppNotificationQuery, NotificationChannel, NotificationDelivery,
-        NotificationDeliveryListItem, NotificationDeliveryQuery, NotificationRule,
+        CreateTelegramBotRequest, InAppNotification, InAppNotificationQuery, NotificationChannel,
+        NotificationDelivery, NotificationDeliveryListItem, NotificationDeliveryQuery,
+        NotificationRule, TelegramBot, TelegramBotSecret, UpdateNotificationChannelRequest,
+        UpdateTelegramBotRequest,
     },
     AppError, AppResult,
 };
@@ -18,8 +20,12 @@ pub const DEFAULT_IN_APP_CHANNEL_NAME: &str = "Default In-App";
 const CHANNEL_TYPE_IN_APP: &str = "in_app";
 const CHANNEL_TYPE_TELEGRAM: &str = "telegram";
 const CHANNEL_TYPE_WEBHOOK: &str = "webhook";
+const CHANNEL_TYPE_EMAIL: &str = "email";
 const STATUS_ACTIVE: &str = "active";
 const STATUS_INACTIVE: &str = "inactive";
+const VERIFICATION_STATUS_UNVERIFIED: &str = "unverified";
+const VERIFICATION_STATUS_VERIFIED: &str = "verified";
+const VERIFICATION_STATUS_FAILED: &str = "failed";
 const DELIVERY_STATUS_PROCESSING: &str = "processing";
 const DELIVERY_STATUS_SENT: &str = "sent";
 const DELIVERY_STATUS_SKIPPED: &str = "skipped";
@@ -53,6 +59,69 @@ pub const UPDATE_NOTIFICATION_CHANNEL_QUERY: &str = r#"
 
 pub const DELETE_NOTIFICATION_CHANNEL_QUERY: &str =
     "DELETE FROM notification_channels WHERE id = $1 AND tenant_id = $2";
+
+const LIST_TELEGRAM_BOTS_QUERY: &str = r#"
+        SELECT id, tenant_id, name, token_preview, status, verification_status,
+               last_verified_at, last_error, created_at, updated_at
+        FROM telegram_bots
+        WHERE tenant_id = $1
+        ORDER BY created_at DESC
+        "#;
+
+const CREATE_TELEGRAM_BOT_QUERY: &str = r#"
+        INSERT INTO telegram_bots (tenant_id, name, bot_token, token_preview, status)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, tenant_id, name, token_preview, status, verification_status,
+                  last_verified_at, last_error, created_at, updated_at
+        "#;
+
+const GET_TELEGRAM_BOT_SECRET_QUERY: &str = r#"
+        SELECT id, tenant_id, name, bot_token, token_preview, status, verification_status,
+               last_verified_at, last_error, created_at, updated_at
+        FROM telegram_bots
+        WHERE id = $1
+          AND tenant_id = $2
+        "#;
+
+const UPDATE_TELEGRAM_BOT_QUERY: &str = r#"
+        UPDATE telegram_bots
+        SET name = $3,
+            bot_token = COALESCE($4, bot_token),
+            token_preview = COALESCE($5, token_preview),
+            status = $6,
+            verification_status = CASE
+                WHEN $4::text IS NULL THEN verification_status
+                ELSE 'unverified'
+            END,
+            last_verified_at = CASE
+                WHEN $4::text IS NULL THEN last_verified_at
+                ELSE NULL
+            END,
+            last_error = CASE
+                WHEN $4::text IS NULL THEN last_error
+                ELSE NULL
+            END,
+            updated_at = NOW()
+        WHERE id = $1
+          AND tenant_id = $2
+        RETURNING id, tenant_id, name, token_preview, status, verification_status,
+                  last_verified_at, last_error, created_at, updated_at
+        "#;
+
+const DELETE_TELEGRAM_BOT_QUERY: &str =
+    "DELETE FROM telegram_bots WHERE id = $1 AND tenant_id = $2";
+
+const MARK_TELEGRAM_BOT_VERIFICATION_QUERY: &str = r#"
+        UPDATE telegram_bots
+        SET verification_status = $3,
+            last_verified_at = $5,
+            last_error = $4,
+            updated_at = NOW()
+        WHERE id = $1
+          AND tenant_id = $2
+        RETURNING id, tenant_id, name, token_preview, status, verification_status,
+                  last_verified_at, last_error, created_at, updated_at
+        "#;
 
 pub const LIST_NOTIFICATION_RULES_QUERY: &str = r#"
         SELECT id, tenant_id, name, chain_id, address_id, asset_id, event_type, is_transfer,
@@ -304,18 +373,14 @@ pub fn validate_notification_channel_request(
     }
     if !matches!(
         request.channel_type.as_str(),
-        CHANNEL_TYPE_IN_APP | CHANNEL_TYPE_TELEGRAM | CHANNEL_TYPE_WEBHOOK
+        CHANNEL_TYPE_IN_APP | CHANNEL_TYPE_TELEGRAM | CHANNEL_TYPE_WEBHOOK | CHANNEL_TYPE_EMAIL
     ) {
         return Err(AppError::Validation(
-            "channel_type must be in_app, telegram, or webhook".to_string(),
+            "channel_type must be in_app, telegram, webhook, or email".to_string(),
         ));
     }
     if let Some(status) = &request.status {
-        if !matches!(status.as_str(), STATUS_ACTIVE | STATUS_INACTIVE) {
-            return Err(AppError::Validation(
-                "status must be active or inactive".to_string(),
-            ));
-        }
+        validate_status(status)?;
     }
     Ok(())
 }
@@ -373,13 +438,42 @@ pub fn validate_notification_delivery_status(status: &str) -> AppResult<()> {
 pub fn validate_notification_delivery_channel_type(channel_type: &str) -> AppResult<()> {
     if !matches!(
         channel_type,
-        CHANNEL_TYPE_IN_APP | CHANNEL_TYPE_TELEGRAM | CHANNEL_TYPE_WEBHOOK
+        CHANNEL_TYPE_IN_APP | CHANNEL_TYPE_TELEGRAM | CHANNEL_TYPE_WEBHOOK | CHANNEL_TYPE_EMAIL
     ) {
         return Err(AppError::Validation(
-            "channel_type must be in_app, telegram, or webhook".to_string(),
+            "channel_type must be in_app, telegram, webhook, or email".to_string(),
         ));
     }
     Ok(())
+}
+
+fn validate_status(status: &str) -> AppResult<()> {
+    if !matches!(status, STATUS_ACTIVE | STATUS_INACTIVE) {
+        return Err(AppError::Validation(
+            "status must be active or inactive".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_verification_status(status: &str) -> AppResult<()> {
+    if !matches!(
+        status,
+        VERIFICATION_STATUS_UNVERIFIED | VERIFICATION_STATUS_VERIFIED | VERIFICATION_STATUS_FAILED
+    ) {
+        return Err(AppError::Validation(
+            "verification_status must be unverified, verified, or failed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn telegram_token_preview(token: &str) -> String {
+    let trimmed = token.trim();
+    if trimmed.len() <= 10 {
+        return "********".to_string();
+    }
+    format!("{}...{}", &trimmed[..6], &trimmed[trimmed.len() - 4..])
 }
 
 pub fn notification_delivery_ops_limit(limit: Option<i64>) -> i64 {
@@ -480,6 +574,188 @@ pub async fn create_notification_channel(
     .fetch_one(pool)
     .await
     .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn get_notification_channel(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> AppResult<NotificationChannel> {
+    sqlx::query_as::<_, NotificationChannel>(GET_NOTIFICATION_CHANNEL_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("notification channel".to_string()))
+}
+
+pub async fn update_notification_channel(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+    request: UpdateNotificationChannelRequest,
+) -> AppResult<NotificationChannel> {
+    let validation_request = CreateNotificationChannelRequest {
+        channel_type: request.channel_type.clone(),
+        name: request.name.clone(),
+        config: request.config.clone(),
+        status: Some(request.status.clone()),
+    };
+    validate_notification_channel_request(&validation_request)?;
+    let config = request.config.unwrap_or_else(|| serde_json::json!({}));
+
+    sqlx::query_as::<_, NotificationChannel>(UPDATE_NOTIFICATION_CHANNEL_QUERY)
+        .bind(id)
+        .bind(request.channel_type)
+        .bind(request.name)
+        .bind(config)
+        .bind(request.status)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("notification channel".to_string()))
+}
+
+pub async fn delete_notification_channel(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> AppResult<()> {
+    let result = sqlx::query(DELETE_NOTIFICATION_CHANNEL_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("notification channel".to_string()));
+    }
+
+    Ok(())
+}
+
+pub async fn list_telegram_bots(pool: &PgPool, tenant_id: Uuid) -> AppResult<Vec<TelegramBot>> {
+    sqlx::query_as::<_, TelegramBot>(LIST_TELEGRAM_BOTS_QUERY)
+        .bind(tenant_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn create_telegram_bot(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    request: CreateTelegramBotRequest,
+) -> AppResult<TelegramBot> {
+    if request.name.trim().is_empty() {
+        return Err(AppError::Validation(
+            "telegram bot name is required".to_string(),
+        ));
+    }
+    let bot_token = request.bot_token.trim().to_string();
+    if bot_token.is_empty() {
+        return Err(AppError::Validation("bot_token is required".to_string()));
+    }
+    let status = request.status.unwrap_or_else(|| STATUS_ACTIVE.to_string());
+    validate_status(&status)?;
+    let token_preview = telegram_token_preview(&bot_token);
+
+    sqlx::query_as::<_, TelegramBot>(CREATE_TELEGRAM_BOT_QUERY)
+        .bind(tenant_id)
+        .bind(request.name)
+        .bind(bot_token)
+        .bind(token_preview)
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn get_telegram_bot_secret(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> AppResult<TelegramBotSecret> {
+    sqlx::query_as::<_, TelegramBotSecret>(GET_TELEGRAM_BOT_SECRET_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("telegram bot".to_string()))
+}
+
+pub async fn update_telegram_bot(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+    request: UpdateTelegramBotRequest,
+) -> AppResult<TelegramBot> {
+    if request.name.trim().is_empty() {
+        return Err(AppError::Validation(
+            "telegram bot name is required".to_string(),
+        ));
+    }
+    validate_status(&request.status)?;
+    let bot_token = request
+        .bot_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string);
+    let token_preview = bot_token.as_deref().map(telegram_token_preview);
+
+    sqlx::query_as::<_, TelegramBot>(UPDATE_TELEGRAM_BOT_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .bind(request.name)
+        .bind(bot_token)
+        .bind(token_preview)
+        .bind(request.status)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("telegram bot".to_string()))
+}
+
+pub async fn delete_telegram_bot(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> AppResult<()> {
+    let result = sqlx::query(DELETE_TELEGRAM_BOT_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("telegram bot".to_string()));
+    }
+
+    Ok(())
+}
+
+pub async fn mark_telegram_bot_verification(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+    status: &str,
+    last_error: Option<String>,
+    verified_at: DateTime<Utc>,
+) -> AppResult<TelegramBot> {
+    validate_verification_status(status)?;
+
+    sqlx::query_as::<_, TelegramBot>(MARK_TELEGRAM_BOT_VERIFICATION_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .bind(status)
+        .bind(last_error)
+        .bind(verified_at)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("telegram bot".to_string()))
 }
 
 pub async fn list_notification_rules(
@@ -1450,10 +1726,10 @@ mod tests {
 
     #[test]
     fn delivery_ops_validates_channel_type_filter() {
-        for channel_type in ["in_app", "telegram", "webhook"] {
+        for channel_type in ["in_app", "telegram", "webhook", "email"] {
             assert!(super::validate_notification_delivery_channel_type(channel_type).is_ok());
         }
-        assert!(super::validate_notification_delivery_channel_type("email").is_err());
+        assert!(super::validate_notification_delivery_channel_type("sms").is_err());
     }
 
     #[test]
