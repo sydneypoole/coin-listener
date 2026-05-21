@@ -14,11 +14,12 @@ import {
   updateNotificationRule,
 } from '../api/client';
 import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface';
-import type { CreateNotificationRuleRequest, NotificationRule } from '../api/types';
+import type { CreateNotificationRuleRequest, NotificationRule, TelegramBindingRequest } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
 import { FormModal } from '../components/FormModal';
 import { PageScaffold } from '../components/PageScaffold';
+import { TelegramBindingPanel } from '../components/TelegramBindingPanel';
 
 const eventTypeOptions = [
   { label: 'transfer', value: 'transfer' },
@@ -48,7 +49,16 @@ type RuleForm = {
   enabled?: boolean;
 };
 
+type QuickChannelForm = {
+  name?: string;
+  telegram_bot_id?: string;
+  chat_id?: string;
+  chat_alias?: string;
+  message_template?: string;
+};
+
 type RuleFormApi = FormApi<RuleForm>;
+type QuickChannelFormApi = FormApi<QuickChannelForm>;
 
 export function NotificationRulesPage() {
   const [editingRule, setEditingRule] = useState<NotificationRule | null>(null);
@@ -56,6 +66,7 @@ export function NotificationRulesPage() {
   const [quickChannelVisible, setQuickChannelVisible] = useState(false);
   const [quickCreatedChannelId, setQuickCreatedChannelId] = useState<string | null>(null);
   const [ruleFormApi, setRuleFormApi] = useState<RuleFormApi | null>(null);
+  const [quickChannelFormApi, setQuickChannelFormApi] = useState<QuickChannelFormApi | null>(null);
   const queryClient = useQueryClient();
 
   const rulesQuery = useQuery({ queryKey: ['notification-rules'], queryFn: listNotificationRules });
@@ -136,6 +147,13 @@ export function NotificationRulesPage() {
 
   function refreshChannels() {
     queryClient.invalidateQueries({ queryKey: ['notification-channels'] });
+  }
+
+  function handleQuickTelegramBound(binding: TelegramBindingRequest) {
+    const chatId = binding.chat_id ?? '';
+    const alias = binding.chat_title || binding.chat_username || chatId || '';
+    quickChannelFormApi?.setValue('chat_id', chatId);
+    quickChannelFormApi?.setValue('chat_alias', alias);
   }
 
   function handleSubmit(values: Record<string, unknown>) {
@@ -285,18 +303,28 @@ export function NotificationRulesPage() {
       </FormModal>
 
       <FormModal title="快速新建TG通知渠道" visible={quickChannelVisible} onCancel={() => setQuickChannelVisible(false)} size="large">
-        <Form onSubmit={values => quickChannelMutation.mutate(values)} labelPosition="left" labelWidth={120}>
-          <Form.Input field="name" label="渠道名称" rules={[{ required: true, message: '请输入渠道名称' }]} />
-          <Form.Select field="telegram_bot_id" label="TG机器人" filter rules={[{ required: true, message: '请选择TG机器人' }]}>
-            {(telegramBotsQuery.data ?? []).map(bot => <Form.Select.Option key={bot.id} value={bot.id}>{bot.name} / {bot.token_preview}</Form.Select.Option>)}
-          </Form.Select>
-          <Form.Input field="chat_id" label="Chat ID" rules={[{ required: true, message: '请输入 Chat ID' }]} />
-          <Form.Input field="chat_alias" label="会话别名" />
-          <Form.TextArea field="message_template" label="消息模板" autosize />
-          <Space className="form-modal-actions">
-            <Button htmlType="submit" type="primary" loading={quickChannelMutation.isPending}>创建并选择</Button>
-            <Button htmlType="button" onClick={() => setQuickChannelVisible(false)}>取消</Button>
-          </Space>
+        <Form<QuickChannelForm>
+          onSubmit={values => quickChannelMutation.mutate(values)}
+          labelPosition="left"
+          labelWidth={120}
+          getFormApi={setQuickChannelFormApi}
+        >
+          {({ formState }) => (
+            <>
+              <Form.Input field="name" label="渠道名称" rules={[{ required: true, message: '请输入渠道名称' }]} />
+              <Form.Select field="telegram_bot_id" label="TG机器人" filter rules={[{ required: true, message: '请选择TG机器人' }]}>
+                {(telegramBotsQuery.data ?? []).map(bot => <Form.Select.Option key={bot.id} value={bot.id}>{bot.name} / {bot.token_preview}</Form.Select.Option>)}
+              </Form.Select>
+              <TelegramBindingPanel telegramBotId={formState.values?.telegram_bot_id} onBound={handleQuickTelegramBound} />
+              <Form.Input field="chat_alias" label="已绑定会话" disabled rules={[{ required: true, message: '请先绑定 Telegram 会话' }]} />
+              <Form.Input field="chat_id" noLabel style={{ display: 'none' }} rules={[{ required: true, message: '请先绑定 Telegram 会话' }]} />
+              <Form.TextArea field="message_template" label="消息模板" autosize />
+              <Space className="form-modal-actions">
+                <Button htmlType="submit" type="primary" loading={quickChannelMutation.isPending}>创建并选择</Button>
+                <Button htmlType="button" onClick={() => setQuickChannelVisible(false)}>取消</Button>
+              </Space>
+            </>
+          )}
         </Form>
       </FormModal>
     </PageScaffold>

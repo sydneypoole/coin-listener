@@ -294,10 +294,16 @@ describe('frontend UI regressions', () => {
     expectContains(page, 'isPlainConfigObject');
     expectContains(page, '配置 JSON 必须是对象');
     expectContains(page, 'safeChannelConfig');
+    expectContains(page, 'TelegramBindingPanel');
+    expectContains(page, 'handleTelegramBound');
+    expectNotContains(page, 'label="Chat ID"');
     expectContains(rules, '新建渠道');
     expectContains(rules, '刷新渠道');
     expectContains(rules, 'quickCreatedChannelId');
     expectContains(rules, 'telegramBotsQuery');
+    expectContains(rules, 'TelegramBindingPanel');
+    expectContains(rules, 'handleQuickTelegramBound');
+    expectNotContains(rules, 'label="Chat ID"');
   });
 
   test('notification and telegram API contracts are exposed to frontend', () => {
