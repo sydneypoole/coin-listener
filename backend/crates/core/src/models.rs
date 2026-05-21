@@ -132,6 +132,70 @@ pub struct CreateWatchedAddressRequest {
     pub asset_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchedAddressImportDefaults {
+    pub chain_id: Uuid,
+    pub asset_ids: Vec<Uuid>,
+    pub priority: String,
+    pub scan_interval_seconds: i32,
+    pub transfer_filter_enabled: bool,
+    pub balance_change_filter_enabled: bool,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchedAddressImportRowRequest {
+    pub row_number: i32,
+    pub raw_text: String,
+    pub address: String,
+    pub label: Option<String>,
+    pub priority: Option<String>,
+    pub scan_interval_seconds: Option<i32>,
+    pub transfer_filter_enabled: Option<bool>,
+    pub balance_change_filter_enabled: Option<bool>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateWatchedAddressImportRequest {
+    pub defaults: WatchedAddressImportDefaults,
+    pub rows: Vec<WatchedAddressImportRowRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WatchedAddressImportTask {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub status: String,
+    pub chain_id: Uuid,
+    pub asset_ids: Vec<Uuid>,
+    pub priority: String,
+    pub scan_interval_seconds: i32,
+    pub transfer_filter_enabled: bool,
+    pub balance_change_filter_enabled: bool,
+    pub address_status: String,
+    pub total_rows: i32,
+    pub processed_rows: i32,
+    pub success_rows: i32,
+    pub failed_rows: i32,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub locked_by: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WatchedAddressImportErrorRow {
+    pub row_number: i32,
+    pub address: String,
+    pub raw_text: String,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct BalanceSnapshot {
     pub id: Uuid,
@@ -330,6 +394,55 @@ pub struct NotifyEventTask {
     pub enqueued_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TelegramBot {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub name: String,
+    pub token_preview: String,
+    pub status: String,
+    pub verification_status: String,
+    pub last_verified_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct TelegramBotSecret {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub name: String,
+    pub bot_token: String,
+    pub token_preview: String,
+    pub status: String,
+    pub verification_status: String,
+    pub last_verified_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateTelegramBotRequest {
+    pub name: String,
+    pub bot_token: String,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTelegramBotRequest {
+    pub name: String,
+    pub bot_token: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationResponse {
+    pub ok: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct NotificationChannel {
     pub id: Uuid,
@@ -348,6 +461,20 @@ pub struct CreateNotificationChannelRequest {
     pub name: String,
     pub config: Option<serde_json::Value>,
     pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateNotificationChannelRequest {
+    pub channel_type: String,
+    pub name: String,
+    pub config: Option<serde_json::Value>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationChannelTestResponse {
+    pub ok: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

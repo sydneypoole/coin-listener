@@ -32,6 +32,28 @@ pub const LIST_NOTIFICATION_CHANNELS_QUERY: &str = r#"
         ORDER BY created_at DESC
         "#;
 
+pub const GET_NOTIFICATION_CHANNEL_QUERY: &str = r#"
+        SELECT id, tenant_id, channel_type, name, config, status, created_at, updated_at
+        FROM notification_channels
+        WHERE id = $1
+          AND tenant_id = $2
+        "#;
+
+pub const UPDATE_NOTIFICATION_CHANNEL_QUERY: &str = r#"
+        UPDATE notification_channels
+        SET channel_type = $2,
+            name = $3,
+            config = $4,
+            status = $5,
+            updated_at = NOW()
+        WHERE id = $1
+          AND tenant_id = $6
+        RETURNING id, tenant_id, channel_type, name, config, status, created_at, updated_at
+        "#;
+
+pub const DELETE_NOTIFICATION_CHANNEL_QUERY: &str =
+    "DELETE FROM notification_channels WHERE id = $1 AND tenant_id = $2";
+
 pub const LIST_NOTIFICATION_RULES_QUERY: &str = r#"
         SELECT id, tenant_id, name, chain_id, address_id, asset_id, event_type, is_transfer,
                min_amount_raw, direction, channel_ids, enabled, created_at, updated_at
