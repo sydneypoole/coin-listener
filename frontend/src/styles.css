@@ -87,6 +87,12 @@ body {
   margin-top: 16px;
 }
 
+.rule-channel-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .login-page {
   position: relative;
   min-height: 100vh;

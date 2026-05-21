@@ -272,6 +272,27 @@ describe('frontend UI regressions', () => {
     expectContains(page, 'tableId="telegram-bots"');
   });
 
+  test('notification channel management page and rule quick actions exist', () => {
+    const app = readSource('App.tsx');
+    const page = readSource('pages/NotificationChannelsPage.tsx');
+    const rules = readSource('pages/NotificationRulesPage.tsx');
+
+    expectContains(app, "'notification-channels'");
+    expectContains(app, 'NotificationChannelsPage');
+    expectContains(app, '通知渠道');
+    expectContains(page, 'listNotificationChannels');
+    expectContains(page, 'listTelegramBots');
+    expectContains(page, 'updateNotificationChannel');
+    expectContains(page, 'deleteNotificationChannel');
+    expectContains(page, 'verifyNotificationChannel');
+    expectContains(page, 'testNotificationChannel');
+    expectContains(page, 'tableId="notification-channels"');
+    expectContains(rules, '新建渠道');
+    expectContains(rules, '刷新渠道');
+    expectContains(rules, 'quickCreatedChannelId');
+    expectContains(rules, 'telegramBotsQuery');
+  });
+
   test('notification and telegram API contracts are exposed to frontend', () => {
     const types = readSource('api/types.ts');
     const client = readSource('api/client.ts');

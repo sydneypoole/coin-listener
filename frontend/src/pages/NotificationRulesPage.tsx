@@ -1,16 +1,19 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Banner, Button, Form, Space, Tag, Toast } from '@douyinfe/semi-ui';
 import {
+  createNotificationChannel,
   createNotificationRule,
   deleteNotificationRule,
   listAssets,
   listChains,
   listNotificationChannels,
   listNotificationRules,
+  listTelegramBots,
   listWatchedAddresses,
   updateNotificationRule,
 } from '../api/client';
+import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface';
 import type { CreateNotificationRuleRequest, NotificationRule } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
@@ -45,13 +48,19 @@ type RuleForm = {
   enabled?: boolean;
 };
 
+type RuleFormApi = FormApi<RuleForm>;
+
 export function NotificationRulesPage() {
   const [editingRule, setEditingRule] = useState<NotificationRule | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
+  const [quickChannelVisible, setQuickChannelVisible] = useState(false);
+  const [quickCreatedChannelId, setQuickCreatedChannelId] = useState<string | null>(null);
+  const [ruleFormApi, setRuleFormApi] = useState<RuleFormApi | null>(null);
   const queryClient = useQueryClient();
 
   const rulesQuery = useQuery({ queryKey: ['notification-rules'], queryFn: listNotificationRules });
   const channelsQuery = useQuery({ queryKey: ['notification-channels'], queryFn: listNotificationChannels });
+  const telegramBotsQuery = useQuery({ queryKey: ['telegram-bots'], queryFn: listTelegramBots });
   const chainsQuery = useQuery({ queryKey: ['chains'], queryFn: listChains });
   const assetsQuery = useQuery({ queryKey: ['assets'], queryFn: listAssets });
   const addressesQuery = useQuery({ queryKey: ['addresses'], queryFn: listWatchedAddresses });
@@ -60,6 +69,15 @@ export function NotificationRulesPage() {
   const assetMap = useMemo(() => new Map((assetsQuery.data ?? []).map(asset => [asset.id, asset.symbol])), [assetsQuery.data]);
   const addressMap = useMemo(() => new Map((addressesQuery.data ?? []).map(address => [address.id, address])), [addressesQuery.data]);
   const channelMap = useMemo(() => new Map((channelsQuery.data ?? []).map(channel => [channel.id, channel.name])), [channelsQuery.data]);
+
+  useEffect(() => {
+    if (!quickCreatedChannelId || !ruleFormApi) return;
+    const currentValue = ruleFormApi.getValue('channel_ids');
+    const channelIds = Array.isArray(currentValue) ? currentValue.map(String) : [];
+    if (!channelIds.includes(quickCreatedChannelId)) {
+      ruleFormApi.setValue('channel_ids', [...channelIds, quickCreatedChannelId]);
+    }
+  }, [quickCreatedChannelId, ruleFormApi]);
 
   const saveMutation = useMutation({
     mutationFn: (payload: CreateNotificationRuleRequest) => (
@@ -83,14 +101,41 @@ export function NotificationRulesPage() {
     onError: error => Toast.error(error instanceof Error ? error.message : '通知规则删除失败'),
   });
 
+  const quickChannelMutation = useMutation({
+    mutationFn: (values: Record<string, unknown>) => createNotificationChannel({
+      channel_type: 'telegram',
+      name: String(values.name),
+      status: 'active',
+      config: {
+        telegram_bot_id: String(values.telegram_bot_id),
+        chat_id: String(values.chat_id),
+        chat_alias: values.chat_alias ? String(values.chat_alias) : undefined,
+        message_template: values.message_template ? String(values.message_template) : undefined,
+      },
+    }),
+    onSuccess: channel => {
+      Toast.success('通知渠道已创建');
+      setQuickCreatedChannelId(channel.id);
+      setQuickChannelVisible(false);
+      queryClient.invalidateQueries({ queryKey: ['notification-channels'] });
+    },
+    onError: error => Toast.error(error instanceof Error ? error.message : '通知渠道创建失败'),
+  });
+
   function openCreateModal() {
     setEditingRule(null);
+    setQuickCreatedChannelId(null);
     setModalVisible(true);
   }
 
   function openEditModal(rule: NotificationRule) {
     setEditingRule(rule);
+    setQuickCreatedChannelId(null);
     setModalVisible(true);
+  }
+
+  function refreshChannels() {
+    queryClient.invalidateQueries({ queryKey: ['notification-channels'] });
   }
 
   function handleSubmit(values: Record<string, unknown>) {
@@ -196,7 +241,13 @@ export function NotificationRulesPage() {
         }}
         size="large"
       >
-        <Form<RuleForm> initValues={initialValues()} onSubmit={handleSubmit} labelPosition="left" labelWidth={110}>
+        <Form<RuleForm>
+          initValues={initialValues()}
+          onSubmit={handleSubmit}
+          labelPosition="left"
+          labelWidth={110}
+          getFormApi={setRuleFormApi}
+        >
           <Form.Input field="name" label="名称" rules={[{ required: true, message: '请输入规则名称' }]} />
           <Form.Select field="chain_id" label="链" showClear placeholder="不过滤链" filter>
             {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}
@@ -216,13 +267,35 @@ export function NotificationRulesPage() {
             <Form.Select.Option value="false">否</Form.Select.Option>
           </Form.Select>
           <Form.Input field="min_amount_raw" label="最小金额 raw" placeholder="留空表示不过滤金额" />
-          <Form.Select field="channel_ids" label="渠道" multiple showClear placeholder="留空使用默认站内渠道" filter>
-            {(channelsQuery.data ?? []).map(channel => <Form.Select.Option key={channel.id} value={channel.id}>{channel.name} / {channel.channel_type}</Form.Select.Option>)}
-          </Form.Select>
+          <div className="rule-channel-actions">
+            <Form.Select field="channel_ids" label="渠道" multiple showClear placeholder="留空使用默认站内渠道" filter style={{ flex: 1 }}>
+              {(channelsQuery.data ?? []).map(channel => <Form.Select.Option key={channel.id} value={channel.id}>{channel.name} / {channel.channel_type}</Form.Select.Option>)}
+            </Form.Select>
+            <Space>
+              <Button htmlType="button" onClick={() => setQuickChannelVisible(true)}>新建渠道</Button>
+              <Button htmlType="button" onClick={refreshChannels} loading={channelsQuery.isFetching}>刷新渠道</Button>
+            </Space>
+          </div>
           <Form.Switch field="enabled" label="启用" />
           <Space className="form-modal-actions">
             <Button htmlType="submit" type="primary" loading={saveMutation.isPending}>保存</Button>
             <Button onClick={() => setModalVisible(false)}>取消</Button>
+          </Space>
+        </Form>
+      </FormModal>
+
+      <FormModal title="快速新建TG通知渠道" visible={quickChannelVisible} onCancel={() => setQuickChannelVisible(false)} size="large">
+        <Form onSubmit={values => quickChannelMutation.mutate(values)} labelPosition="left" labelWidth={120}>
+          <Form.Input field="name" label="渠道名称" rules={[{ required: true, message: '请输入渠道名称' }]} />
+          <Form.Select field="telegram_bot_id" label="TG机器人" filter rules={[{ required: true, message: '请选择TG机器人' }]}>
+            {(telegramBotsQuery.data ?? []).map(bot => <Form.Select.Option key={bot.id} value={bot.id}>{bot.name} / {bot.token_preview}</Form.Select.Option>)}
+          </Form.Select>
+          <Form.Input field="chat_id" label="Chat ID" rules={[{ required: true, message: '请输入 Chat ID' }]} />
+          <Form.Input field="chat_alias" label="会话别名" />
+          <Form.TextArea field="message_template" label="消息模板" autosize />
+          <Space className="form-modal-actions">
+            <Button htmlType="submit" type="primary" loading={quickChannelMutation.isPending}>创建并选择</Button>
+            <Button htmlType="button" onClick={() => setQuickChannelVisible(false)}>取消</Button>
           </Space>
         </Form>
       </FormModal>
