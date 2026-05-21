@@ -28,6 +28,12 @@ pub fn validate_binding_status(status: &str) -> AppResult<()> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct TelegramUpdateOffsetClaim {
+    pub last_update_id: i64,
+    pub locked_at: DateTime<Utc>,
+}
+
 pub const CREATE_BINDING_REQUEST_QUERY: &str = r#"
     INSERT INTO telegram_binding_requests (
         tenant_id, telegram_bot_id, bind_token, short_code, deep_link_url, expires_at
@@ -52,6 +58,16 @@ pub const GET_BINDING_REQUEST_QUERY: &str = r#"
     FROM telegram_binding_requests
     WHERE id = $1
       AND tenant_id = $2
+    "#;
+
+pub const EXPIRE_BINDING_REQUEST_IF_DUE_QUERY: &str = r#"
+    UPDATE telegram_binding_requests
+    SET status = 'expired',
+        updated_at = NOW()
+    WHERE id = $1
+      AND tenant_id = $2
+      AND status = 'pending'
+      AND expires_at <= $3
     "#;
 
 pub const CANCEL_BINDING_REQUEST_QUERY: &str = r#"
@@ -90,6 +106,15 @@ pub const BIND_PENDING_REQUEST_QUERY: &str = r#"
               expires_at, bound_at, created_at, updated_at
     "#;
 
+pub const UPDATE_BINDING_CONFIRMATION_ERROR_QUERY: &str = r#"
+    UPDATE telegram_binding_requests
+    SET confirmation_error = $3,
+        updated_at = NOW()
+    WHERE id = $1
+      AND tenant_id = $2
+      AND status = 'bound'
+    "#;
+
 pub const GET_TELEGRAM_UPDATE_OFFSET_QUERY: &str = r#"
     SELECT last_update_id
     FROM telegram_bot_update_offsets
@@ -106,6 +131,26 @@ pub const UPSERT_TELEGRAM_UPDATE_OFFSET_QUERY: &str = r#"
             EXCLUDED.last_update_id
         ),
         updated_at = NOW()
+    "#;
+
+pub const CLAIM_TELEGRAM_UPDATE_OFFSET_QUERY: &str = r#"
+    INSERT INTO telegram_bot_update_offsets (tenant_id, telegram_bot_id, last_update_id, locked_at)
+    VALUES ($1, $2, 0, $3)
+    ON CONFLICT (tenant_id, telegram_bot_id)
+    DO UPDATE SET locked_at = EXCLUDED.locked_at,
+                  updated_at = NOW()
+    WHERE telegram_bot_update_offsets.locked_at IS NULL
+       OR telegram_bot_update_offsets.locked_at < $4
+    RETURNING last_update_id, locked_at
+    "#;
+
+pub const RELEASE_TELEGRAM_UPDATE_OFFSET_LOCK_QUERY: &str = r#"
+    UPDATE telegram_bot_update_offsets
+    SET locked_at = NULL,
+        updated_at = NOW()
+    WHERE tenant_id = $1
+      AND telegram_bot_id = $2
+      AND locked_at = $3
     "#;
 
 pub async fn create_binding_request(
@@ -137,6 +182,8 @@ pub async fn get_binding_request(
     tenant_id: Uuid,
     id: Uuid,
 ) -> AppResult<TelegramBindingRequest> {
+    expire_binding_request_if_due(pool, tenant_id, id, Utc::now()).await?;
+
     sqlx::query_as::<_, TelegramBindingRequest>(GET_BINDING_REQUEST_QUERY)
         .bind(id)
         .bind(tenant_id)
@@ -144,6 +191,23 @@ pub async fn get_binding_request(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
         .ok_or_else(|| AppError::NotFound("telegram binding request".to_string()))
+}
+
+pub async fn expire_binding_request_if_due(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    sqlx::query(EXPIRE_BINDING_REQUEST_IF_DUE_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(())
 }
 
 pub async fn cancel_binding_request(
@@ -181,6 +245,22 @@ pub async fn bind_pending_request(
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
+pub async fn update_binding_confirmation_error(
+    pool: &PgPool,
+    binding: &TelegramBindingRequest,
+    confirmation_error: String,
+) -> AppResult<()> {
+    sqlx::query(UPDATE_BINDING_CONFIRMATION_ERROR_QUERY)
+        .bind(binding.id)
+        .bind(binding.tenant_id)
+        .bind(confirmation_error)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(())
+}
+
 pub async fn get_telegram_update_offset(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -193,6 +273,40 @@ pub async fn get_telegram_update_offset(
         .await
         .map_err(|error| AppError::Database(error.to_string()))
         .map(|offset| offset.unwrap_or(0))
+}
+
+pub async fn claim_telegram_update_offset(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    telegram_bot_id: Uuid,
+    locked_at: DateTime<Utc>,
+    stale_before: DateTime<Utc>,
+) -> AppResult<Option<TelegramUpdateOffsetClaim>> {
+    sqlx::query_as::<_, TelegramUpdateOffsetClaim>(CLAIM_TELEGRAM_UPDATE_OFFSET_QUERY)
+        .bind(tenant_id)
+        .bind(telegram_bot_id)
+        .bind(locked_at)
+        .bind(stale_before)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn release_telegram_update_offset_lock(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    telegram_bot_id: Uuid,
+    locked_at: DateTime<Utc>,
+) -> AppResult<()> {
+    sqlx::query(RELEASE_TELEGRAM_UPDATE_OFFSET_LOCK_QUERY)
+        .bind(tenant_id)
+        .bind(telegram_bot_id)
+        .bind(locked_at)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(())
 }
 
 pub async fn upsert_telegram_update_offset(
@@ -252,10 +366,58 @@ mod tests {
     }
 
     #[test]
+    fn expired_binding_requests_are_materialized_before_read() {
+        assert!(EXPIRE_BINDING_REQUEST_IF_DUE_QUERY.contains("status = 'expired'"));
+        assert!(EXPIRE_BINDING_REQUEST_IF_DUE_QUERY.contains("status = 'pending'"));
+        assert!(EXPIRE_BINDING_REQUEST_IF_DUE_QUERY.contains("expires_at <= $3"));
+        assert!(GET_BINDING_REQUEST_QUERY.contains("status, bind_token"));
+
+        let source = include_str!("telegram_bindings.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+        let get_function = production_source
+            .split("pub async fn get_binding_request")
+            .nth(1)
+            .expect("get function exists");
+
+        assert!(get_function.contains("expire_binding_request_if_due"));
+    }
+
+    #[test]
+    fn binding_confirmation_error_can_be_persisted() {
+        assert!(UPDATE_BINDING_CONFIRMATION_ERROR_QUERY.contains("confirmation_error = $3"));
+        assert!(UPDATE_BINDING_CONFIRMATION_ERROR_QUERY.contains("status = 'bound'"));
+        assert!(UPDATE_BINDING_CONFIRMATION_ERROR_QUERY.contains("WHERE id = $1"));
+
+        let source = include_str!("telegram_bindings.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+        assert!(production_source.contains("pub async fn update_binding_confirmation_error"));
+    }
+
+    #[test]
     fn offset_queries_are_scoped_to_bot_and_tenant() {
         assert!(GET_TELEGRAM_UPDATE_OFFSET_QUERY.contains("tenant_id = $1"));
         assert!(GET_TELEGRAM_UPDATE_OFFSET_QUERY.contains("telegram_bot_id = $2"));
         assert!(UPSERT_TELEGRAM_UPDATE_OFFSET_QUERY
             .contains("ON CONFLICT (tenant_id, telegram_bot_id)"));
+    }
+
+    #[test]
+    fn update_offset_claim_uses_locked_at_lease() {
+        assert!(CLAIM_TELEGRAM_UPDATE_OFFSET_QUERY.contains("locked_at"));
+        assert!(
+            CLAIM_TELEGRAM_UPDATE_OFFSET_QUERY.contains("ON CONFLICT (tenant_id, telegram_bot_id)")
+        );
+        assert!(CLAIM_TELEGRAM_UPDATE_OFFSET_QUERY
+            .contains("telegram_bot_update_offsets.locked_at IS NULL"));
+        assert!(CLAIM_TELEGRAM_UPDATE_OFFSET_QUERY
+            .contains("telegram_bot_update_offsets.locked_at < $4"));
+        assert!(CLAIM_TELEGRAM_UPDATE_OFFSET_QUERY.contains("RETURNING last_update_id, locked_at"));
+        assert!(RELEASE_TELEGRAM_UPDATE_OFFSET_LOCK_QUERY.contains("locked_at = $3"));
     }
 }

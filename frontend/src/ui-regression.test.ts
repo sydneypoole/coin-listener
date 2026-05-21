@@ -359,6 +359,8 @@ describe('frontend UI regressions', () => {
       '群聊',
       'short_code',
       'deep_link_url',
+      "binding.status === 'expired'",
+      '绑定码已过期',
     ]) {
       expectContains(combined, expected);
     }

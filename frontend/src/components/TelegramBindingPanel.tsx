@@ -124,6 +124,16 @@ export function TelegramBindingPanel({ telegramBotId, onBound }: TelegramBinding
               />
             ) : null}
 
+            {binding.status === 'expired' ? (
+              <Banner
+                fullMode={false}
+                type="warning"
+                bordered
+                title="绑定码已过期"
+                description="请重新生成绑定码后再次发送 Telegram 验证消息。"
+              />
+            ) : null}
+
             <div className="telegram-binding-steps">
               <div className="telegram-binding-step">
                 <Text strong>私聊通知</Text>

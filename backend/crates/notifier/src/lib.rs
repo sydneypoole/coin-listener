@@ -144,10 +144,21 @@ pub async fn process_telegram_binding_update(
         .await;
 
     if !outcome.is_sent() {
+        let confirmation_error = outcome
+            .metadata()
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "telegram binding confirmation was not sent".to_string());
+        coin_listener_storage::telegram_bindings::update_binding_confirmation_error(
+            pool,
+            &binding,
+            confirmation_error.clone(),
+        )
+        .await?;
         warn!(
             telegram_bot_id = %telegram_bot_id,
             update_id = update.update_id,
-            error = ?outcome.metadata().last_error,
+            error = %confirmation_error,
             "telegram binding confirmation was not sent"
         );
     }
@@ -898,17 +909,29 @@ pub async fn run_telegram_update_poller(
     shutdown: Arc<AtomicBool>,
 ) -> AppResult<()> {
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    const LOCK_TTL: chrono::Duration = chrono::Duration::seconds(30);
 
     while !notifier_shutdown_requested(&shutdown) {
         let bots = notifications::list_active_verified_telegram_bot_secrets(&pool).await?;
         for bot in bots {
-            let offset = coin_listener_storage::telegram_bindings::get_telegram_update_offset(
-                &pool,
-                bot.tenant_id,
-                bot.id,
-            )
-            .await?;
-            let updates = match sender.get_telegram_updates(&bot.bot_token, offset).await {
+            let locked_at = Utc::now();
+            let Some(offset_claim) =
+                coin_listener_storage::telegram_bindings::claim_telegram_update_offset(
+                    &pool,
+                    bot.tenant_id,
+                    bot.id,
+                    locked_at,
+                    locked_at - LOCK_TTL,
+                )
+                .await?
+            else {
+                continue;
+            };
+
+            let updates = match sender
+                .get_telegram_updates(&bot.bot_token, offset_claim.last_update_id)
+                .await
+            {
                 Ok(updates) => updates,
                 Err(outcome) => {
                     warn!(
@@ -916,6 +939,13 @@ pub async fn run_telegram_update_poller(
                         last_error = ?outcome.metadata().last_error,
                         "telegram getUpdates failed"
                     );
+                    coin_listener_storage::telegram_bindings::release_telegram_update_offset_lock(
+                        &pool,
+                        bot.tenant_id,
+                        bot.id,
+                        offset_claim.locked_at,
+                    )
+                    .await?;
                     continue;
                 }
             };
@@ -938,6 +968,14 @@ pub async fn run_telegram_update_poller(
                 )
                 .await?;
             }
+
+            coin_listener_storage::telegram_bindings::release_telegram_update_offset_lock(
+                &pool,
+                bot.tenant_id,
+                bot.id,
+                offset_claim.locked_at,
+            )
+            .await?;
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -1116,6 +1154,22 @@ mod tests {
     }
 
     #[test]
+    fn binding_processor_persists_confirmation_send_failure() {
+        let source = include_str!("lib.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+        let processor = production_source
+            .split("pub async fn process_telegram_binding_update")
+            .nth(1)
+            .expect("binding processor exists");
+
+        assert!(processor.contains("update_binding_confirmation_error"));
+        assert!(processor.contains("outcome.metadata().last_error"));
+    }
+
+    #[test]
     fn rule_matches_when_all_filters_match() {
         assert!(notification_rule_matches_event(&rule(), &event()));
     }
@@ -1197,7 +1251,8 @@ mod tests {
             .expect("poller runtime is present in production source");
         let poller_source = &production_source[poller_start..];
 
-        assert!(poller_source.contains("get_telegram_update_offset"));
+        assert!(poller_source.contains("claim_telegram_update_offset"));
+        assert!(poller_source.contains("release_telegram_update_offset_lock"));
         assert!(poller_source.contains("get_telegram_updates"));
         assert!(poller_source.contains("process_telegram_binding_update"));
         assert!(poller_source.contains("upsert_telegram_update_offset"));
