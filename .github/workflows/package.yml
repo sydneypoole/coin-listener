@@ -28,11 +28,52 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Print frontend diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Runner context"
+          echo "runner_os=${RUNNER_OS}"
+          echo "runner_arch=${RUNNER_ARCH}"
+          echo "github_ref=${GITHUB_REF}"
+          echo "github_sha=${GITHUB_SHA}"
+          uname -a
+          df -h
+          echo "::endgroup::"
+
+          echo "::group::Node and npm context"
+          node --version
+          npm --version
+          echo "npm_registry=$(npm config get registry)"
+          echo "::endgroup::"
+
+          echo "::group::Frontend lockfile context"
+          sha256sum frontend/package-lock.json
+          if grep -n "registry.npmmirror.com" frontend/package-lock.json; then
+            echo "Unexpected npmmirror registry URLs in frontend/package-lock.json" >&2
+            exit 1
+          fi
+          echo "No npmmirror registry URLs found"
+          echo "::endgroup::"
+
       - name: Install frontend dependencies
-        run: npm ci --prefix frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::npm registry reachability"
+          npm ping --registry=https://registry.npmjs.org/ || true
+          echo "::endgroup::"
+          npm ci --prefix frontend --loglevel=verbose
 
       - name: Build frontend
-        run: npm run build --prefix frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build --prefix frontend
+          echo "::group::Frontend dist files"
+          ls -lah frontend/dist
+          ls -lah frontend/dist/assets
+          echo "::endgroup::"
 
       - name: Verify frontend lockfile is unchanged
         run: git diff --exit-code -- frontend/package.json frontend/package-lock.json
@@ -61,19 +102,52 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Print backend diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Runner context"
+          echo "runner_os=${RUNNER_OS}"
+          echo "runner_arch=${RUNNER_ARCH}"
+          echo "github_ref=${GITHUB_REF}"
+          echo "github_sha=${GITHUB_SHA}"
+          uname -a
+          df -h
+          echo "::endgroup::"
+
+          echo "::group::Rust context"
+          rustc --version
+          cargo --version
+          rustup show
+          sha256sum backend/Cargo.lock
+          echo "::endgroup::"
+
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend -> target
 
       - name: Build all-in-one backend executable
-        run: cargo build --locked --release --manifest-path backend/Cargo.toml --bin all-in-one
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path backend/Cargo.toml --bin all-in-one --verbose
 
       - name: Verify backend executable exists
-        run: test -x backend/target/release/all-in-one
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x backend/target/release/all-in-one
+          ls -lah backend/target/release/all-in-one
+          file backend/target/release/all-in-one
 
       - name: Package backend executable
-        run: tar -czf "coin-listener-all-in-one-linux-amd64-${GITHUB_SHA}.tar.gz" -C backend/target/release all-in-one
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="coin-listener-all-in-one-linux-amd64-${GITHUB_SHA}.tar.gz"
+          tar -czf "${archive}" -C backend/target/release all-in-one
+          ls -lah "${archive}"
 
       - name: Upload backend executable artifact
         uses: actions/upload-artifact@v6
@@ -94,6 +168,7 @@ jobs:
         id: docker-meta
         shell: bash
         run: |
+          set -euo pipefail
           repo="${GITHUB_REPOSITORY,,}"
           image="ghcr.io/${repo}-all-in-one"
           short_sha="${GITHUB_SHA::12}"
@@ -106,12 +181,41 @@ jobs:
             echo "archive=${archive}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Build all-in-one Docker image
+          echo "::group::Docker metadata"
+          echo "image=${image}"
+          echo "local_tag=coin-listener-all-in-one:${GITHUB_SHA}"
+          echo "short_sha=${short_sha}"
+          echo "archive=${archive}"
+          echo "::endgroup::"
+
+      - name: Print Docker diagnostics
+        shell: bash
         run: |
-          docker build \
+          set -euo pipefail
+          echo "::group::Runner context"
+          echo "runner_os=${RUNNER_OS}"
+          echo "runner_arch=${RUNNER_ARCH}"
+          echo "github_ref=${GITHUB_REF}"
+          echo "github_sha=${GITHUB_SHA}"
+          uname -a
+          df -h
+          echo "::endgroup::"
+
+          echo "::group::Docker context"
+          docker version
+          docker info
+          docker buildx version || true
+          echo "::endgroup::"
+
+      - name: Build all-in-one Docker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --progress=plain \
             -f docker/all-in-one.Dockerfile \
             -t "${{ steps.docker-meta.outputs.local_tag }}" \
             .
+          docker image inspect "${{ steps.docker-meta.outputs.local_tag }}" --format 'image_id={{.Id}} size={{.Size}}'
 
       - name: Export Docker image artifact
         shell: bash
@@ -119,6 +223,7 @@ jobs:
           set -euo pipefail
           docker save "${{ steps.docker-meta.outputs.local_tag }}" | gzip -c > "${{ steps.docker-meta.outputs.archive }}"
           test -s "${{ steps.docker-meta.outputs.archive }}"
+          ls -lah "${{ steps.docker-meta.outputs.archive }}"
 
       - name: Upload Docker image artifact
         uses: actions/upload-artifact@v6
@@ -146,6 +251,7 @@ jobs:
         id: docker-meta
         shell: bash
         run: |
+          set -euo pipefail
           repo="${GITHUB_REPOSITORY,,}"
           image="ghcr.io/${repo}-all-in-one"
           short_sha="${GITHUB_SHA::12}"
@@ -158,11 +264,41 @@ jobs:
             echo "archive=${archive}"
           } >> "${GITHUB_OUTPUT}"
 
+          echo "::group::Docker push metadata"
+          echo "image=${image}"
+          echo "local_tag=coin-listener-all-in-one:${GITHUB_SHA}"
+          echo "short_sha=${short_sha}"
+          echo "archive=${archive}"
+          echo "::endgroup::"
+
+      - name: Print Docker push diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Runner context"
+          echo "runner_os=${RUNNER_OS}"
+          echo "runner_arch=${RUNNER_ARCH}"
+          echo "github_ref=${GITHUB_REF}"
+          echo "github_ref_type=${GITHUB_REF_TYPE}"
+          echo "github_ref_name=${GITHUB_REF_NAME}"
+          echo "github_sha=${GITHUB_SHA}"
+          uname -a
+          df -h
+          echo "::endgroup::"
+
+          echo "::group::Docker context"
+          docker version
+          docker info
+          ls -lah
+          echo "::endgroup::"
+
       - name: Load Docker image artifact
         shell: bash
         run: |
           set -euo pipefail
+          ls -lah "${{ steps.docker-meta.outputs.archive }}"
           gzip -dc "${{ steps.docker-meta.outputs.archive }}" | docker load
+          docker image inspect "${{ steps.docker-meta.outputs.local_tag }}" --format 'image_id={{.Id}} size={{.Size}}'
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -195,7 +331,12 @@ jobs:
             fi
           fi
 
+          echo "::group::Docker tags"
+          printf '%s\n' "${tags[@]}"
+          echo "::endgroup::"
+
           for tag in "${tags[@]}"; do
+            echo "Pushing ${tag}"
             docker tag "${local_tag}" "${tag}"
             docker push "${tag}"
           done
