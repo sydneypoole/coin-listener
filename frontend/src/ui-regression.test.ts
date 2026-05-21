@@ -255,6 +255,23 @@ describe('frontend UI regressions', () => {
     expectContains(notificationRulesPage, 'size="large"');
   });
 
+  test('telegram bot management page is wired into navigation', () => {
+    const app = readSource('App.tsx');
+    const page = readSource('pages/TelegramBotsPage.tsx');
+
+    expectContains(app, "'telegram-bots'");
+    expectContains(app, 'TelegramBotsPage');
+    expectContains(app, 'TG机器人');
+    expectContains(page, 'listTelegramBots');
+    expectContains(page, 'createTelegramBot');
+    expectContains(page, 'updateTelegramBot');
+    expectContains(page, 'deleteTelegramBot');
+    expectContains(page, 'verifyTelegramBot');
+    expectContains(page, 'token_preview');
+    expectContains(page, 'DataTable');
+    expectContains(page, 'tableId="telegram-bots"');
+  });
+
   test('notification and telegram API contracts are exposed to frontend', () => {
     const types = readSource('api/types.ts');
     const client = readSource('api/client.ts');

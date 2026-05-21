@@ -18,6 +18,7 @@ import { InAppNotificationsPage } from './pages/InAppNotificationsPage';
 import { LoginPage } from './pages/LoginPage';
 import { NotificationOperationsPage } from './pages/NotificationOperationsPage';
 import { NotificationRulesPage } from './pages/NotificationRulesPage';
+import { TelegramBotsPage } from './pages/TelegramBotsPage';
 import { ProvidersPage } from './pages/ProvidersPage';
 import { SystemStatusPage } from './pages/SystemStatusPage';
 import { connectRealtimeNotifications } from './realtime/notifications';
@@ -34,6 +35,7 @@ type PageKey =
   | 'addresses'
   | 'events'
   | 'notification-rules'
+  | 'telegram-bots'
   | 'notification-operations'
   | 'in-app-notifications';
 
@@ -133,6 +135,7 @@ export function App() {
     { itemKey: 'addresses', text: '监听地址', icon: <IconUser /> },
     { itemKey: 'events', text: '事件中心', icon: <IconBell /> },
     { itemKey: 'notification-rules', text: '通知规则', icon: <IconBell /> },
+    { itemKey: 'telegram-bots', text: 'TG机器人', icon: <IconBell /> },
     { itemKey: 'notification-operations', text: '通知运维', icon: <IconBell /> },
     {
       itemKey: 'in-app-notifications',
@@ -174,6 +177,7 @@ function renderPage(
   if (page === 'addresses') return <AddressesPage />;
   if (page === 'events') return <EventsPage />;
   if (page === 'notification-rules') return <NotificationRulesPage />;
+  if (page === 'telegram-bots') return <TelegramBotsPage />;
   if (page === 'notification-operations') return <NotificationOperationsPage />;
   if (page === 'in-app-notifications') {
     return <InAppNotificationsPage onUnreadSettled={setRealtimeUnreadCount} />;
