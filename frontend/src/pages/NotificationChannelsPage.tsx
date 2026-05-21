@@ -31,9 +31,21 @@ type ChannelForm = {
   config_json?: string;
 };
 
+function isPlainConfigObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 function parseConfigJson(value?: string) {
   if (!value?.trim()) return {};
-  return JSON.parse(value) as Record<string, unknown>;
+  const parsed = JSON.parse(value) as unknown;
+  if (!isPlainConfigObject(parsed)) {
+    throw new Error('配置 JSON 必须是对象');
+  }
+  return parsed;
+}
+
+function safeChannelConfig(channel: NotificationChannel) {
+  return isPlainConfigObject(channel.config) ? channel.config : {};
 }
 
 function channelPayload(values: ChannelForm): CreateNotificationChannelRequest | UpdateNotificationChannelRequest {
@@ -58,7 +70,7 @@ function channelPayload(values: ChannelForm): CreateNotificationChannelRequest |
 
 function initialChannelValues(channel: NotificationChannel | null): ChannelForm {
   if (!channel) return { channel_type: 'telegram', status: 'active' };
-  const config = channel.config ?? {};
+  const config = safeChannelConfig(channel);
   return {
     name: channel.name,
     channel_type: channel.channel_type,
@@ -72,14 +84,15 @@ function initialChannelValues(channel: NotificationChannel | null): ChannelForm 
 }
 
 function destinationSummary(channel: NotificationChannel) {
+  const config = safeChannelConfig(channel);
   if (channel.channel_type === 'telegram') {
-    const chatId = typeof channel.config.chat_id === 'string' ? channel.config.chat_id : '-';
-    const alias = typeof channel.config.chat_alias === 'string' ? channel.config.chat_alias : '';
+    const chatId = typeof config.chat_id === 'string' ? config.chat_id : '-';
+    const alias = typeof config.chat_alias === 'string' ? config.chat_alias : '';
     return alias ? `${alias} / ${chatId}` : chatId;
   }
-  if (channel.channel_type === 'email') return String(channel.config.email ?? channel.config.recipient ?? '-');
-  if (channel.channel_type === 'webhook') return String(channel.config.url ?? '-');
-  return JSON.stringify(channel.config);
+  if (channel.channel_type === 'email') return String(config.email ?? config.recipient ?? '-');
+  if (channel.channel_type === 'webhook') return String(config.url ?? '-');
+  return JSON.stringify(config);
 }
 
 export function NotificationChannelsPage() {
@@ -92,7 +105,12 @@ export function NotificationChannelsPage() {
 
   const saveMutation = useMutation({
     mutationFn: (values: ChannelForm) => {
-      const payload = channelPayload(values);
+      let payload: CreateNotificationChannelRequest | UpdateNotificationChannelRequest;
+      try {
+        payload = channelPayload(values);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       return editingChannel
         ? updateNotificationChannel(editingChannel.id, payload as UpdateNotificationChannelRequest)
         : createNotificationChannel(payload as CreateNotificationChannelRequest);
@@ -176,7 +194,8 @@ export function NotificationChannelsPage() {
               dataIndex: 'config',
               width: 180,
               render: (_, channel) => {
-                const botId = typeof channel.config.telegram_bot_id === 'string' ? channel.config.telegram_bot_id : '';
+                const config = safeChannelConfig(channel);
+                const botId = typeof config.telegram_bot_id === 'string' ? config.telegram_bot_id : '';
                 return botId ? botMap.get(botId) ?? botId : '-';
               },
             },

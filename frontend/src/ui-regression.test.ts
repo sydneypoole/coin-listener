@@ -287,6 +287,9 @@ describe('frontend UI regressions', () => {
     expectContains(page, 'verifyNotificationChannel');
     expectContains(page, 'testNotificationChannel');
     expectContains(page, 'tableId="notification-channels"');
+    expectContains(page, 'isPlainConfigObject');
+    expectContains(page, '配置 JSON 必须是对象');
+    expectContains(page, 'safeChannelConfig');
     expectContains(rules, '新建渠道');
     expectContains(rules, '刷新渠道');
     expectContains(rules, 'quickCreatedChannelId');
