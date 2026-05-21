@@ -1,0 +1,204 @@
+use chrono::{DateTime, Duration, Utc};
+use coin_listener_core::{
+    models::{TelegramBindingRequest, TelegramChatBinding},
+    AppError, AppResult,
+};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+pub const BINDING_EXPIRY_MINUTES: i64 = 15;
+pub const BINDING_STATUS_PENDING: &str = "pending";
+pub const BINDING_STATUS_BOUND: &str = "bound";
+pub const BINDING_STATUS_CANCELLED: &str = "cancelled";
+pub const BINDING_STATUS_EXPIRED: &str = "expired";
+
+pub fn normalize_short_code(value: &str) -> String {
+    value.trim().to_ascii_uppercase()
+}
+
+pub fn validate_binding_status(status: &str) -> AppResult<()> {
+    match status {
+        BINDING_STATUS_PENDING
+        | BINDING_STATUS_BOUND
+        | BINDING_STATUS_CANCELLED
+        | BINDING_STATUS_EXPIRED => Ok(()),
+        _ => Err(AppError::Validation(
+            "telegram binding status must be pending, bound, expired, or cancelled".to_string(),
+        )),
+    }
+}
+
+pub const CREATE_BINDING_REQUEST_QUERY: &str = r#"
+    INSERT INTO telegram_binding_requests (
+        tenant_id, telegram_bot_id, bind_token, short_code, deep_link_url, expires_at
+    )
+    SELECT $1, $2, $3, $4, $5, $6
+    WHERE EXISTS (
+        SELECT 1 FROM telegram_bots
+        WHERE id = $2
+          AND tenant_id = $1
+          AND status = 'active'
+          AND verification_status = 'verified'
+    )
+    RETURNING id, tenant_id, telegram_bot_id, status, bind_token, short_code, deep_link_url,
+              chat_id, chat_type, chat_title, chat_username, confirmation_error,
+              expires_at, bound_at, created_at, updated_at
+    "#;
+
+pub const GET_BINDING_REQUEST_QUERY: &str = r#"
+    SELECT id, tenant_id, telegram_bot_id, status, bind_token, short_code, deep_link_url,
+           chat_id, chat_type, chat_title, chat_username, confirmation_error,
+           expires_at, bound_at, created_at, updated_at
+    FROM telegram_binding_requests
+    WHERE id = $1
+      AND tenant_id = $2
+    "#;
+
+pub const CANCEL_BINDING_REQUEST_QUERY: &str = r#"
+    UPDATE telegram_binding_requests
+    SET status = 'cancelled', updated_at = NOW()
+    WHERE id = $1
+      AND tenant_id = $2
+      AND status = 'pending'
+    RETURNING id, tenant_id, telegram_bot_id, status, bind_token, short_code, deep_link_url,
+              chat_id, chat_type, chat_title, chat_username, confirmation_error,
+              expires_at, bound_at, created_at, updated_at
+    "#;
+
+pub const BIND_PENDING_REQUEST_QUERY: &str = r#"
+    UPDATE telegram_binding_requests
+    SET status = 'bound',
+        chat_id = $2,
+        chat_type = $3,
+        chat_title = $4,
+        chat_username = $6,
+        bound_at = $5,
+        updated_at = NOW()
+    WHERE id = (
+        SELECT id
+        FROM telegram_binding_requests
+        WHERE telegram_bot_id = $1
+          AND status = 'pending'
+          AND expires_at > $5
+          AND (bind_token = $7 OR short_code = $8)
+        ORDER BY created_at ASC
+        LIMIT 1
+        FOR UPDATE
+    )
+    RETURNING id, tenant_id, telegram_bot_id, status, bind_token, short_code, deep_link_url,
+              chat_id, chat_type, chat_title, chat_username, confirmation_error,
+              expires_at, bound_at, created_at, updated_at
+    "#;
+
+pub async fn create_binding_request(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    telegram_bot_id: Uuid,
+    bind_token: String,
+    short_code: String,
+    deep_link_url: Option<String>,
+    now: DateTime<Utc>,
+) -> AppResult<TelegramBindingRequest> {
+    let expires_at = now + Duration::minutes(BINDING_EXPIRY_MINUTES);
+
+    sqlx::query_as::<_, TelegramBindingRequest>(CREATE_BINDING_REQUEST_QUERY)
+        .bind(tenant_id)
+        .bind(telegram_bot_id)
+        .bind(bind_token)
+        .bind(normalize_short_code(&short_code))
+        .bind(deep_link_url)
+        .bind(expires_at)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::Validation("telegram bot must be active and verified".to_string()))
+}
+
+pub async fn get_binding_request(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> AppResult<TelegramBindingRequest> {
+    sqlx::query_as::<_, TelegramBindingRequest>(GET_BINDING_REQUEST_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("telegram binding request".to_string()))
+}
+
+pub async fn cancel_binding_request(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> AppResult<TelegramBindingRequest> {
+    sqlx::query_as::<_, TelegramBindingRequest>(CANCEL_BINDING_REQUEST_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("pending telegram binding request".to_string()))
+}
+
+pub async fn bind_pending_request(
+    pool: &PgPool,
+    telegram_bot_id: Uuid,
+    code: &str,
+    chat: TelegramChatBinding,
+    now: DateTime<Utc>,
+) -> AppResult<Option<TelegramBindingRequest>> {
+    sqlx::query_as::<_, TelegramBindingRequest>(BIND_PENDING_REQUEST_QUERY)
+        .bind(telegram_bot_id)
+        .bind(chat.chat_id)
+        .bind(chat.chat_type)
+        .bind(chat.chat_title)
+        .bind(now)
+        .bind(chat.chat_username)
+        .bind(code)
+        .bind(normalize_short_code(code))
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coin_listener_core::AppError;
+
+    #[test]
+    fn normalizes_short_codes_for_matching() {
+        assert_eq!(normalize_short_code(" cl-7k2p9q "), "CL-7K2P9Q");
+    }
+
+    #[test]
+    fn validates_known_binding_statuses() {
+        for status in [
+            BINDING_STATUS_PENDING,
+            BINDING_STATUS_BOUND,
+            BINDING_STATUS_CANCELLED,
+            BINDING_STATUS_EXPIRED,
+        ] {
+            validate_binding_status(status).expect("known status");
+        }
+        assert!(matches!(
+            validate_binding_status("failed"),
+            Err(AppError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn create_binding_query_requires_verified_active_bot() {
+        assert!(CREATE_BINDING_REQUEST_QUERY.contains("verification_status = 'verified'"));
+        assert!(CREATE_BINDING_REQUEST_QUERY.contains("status = 'active'"));
+    }
+
+    #[test]
+    fn bind_query_only_binds_pending_non_expired_request_once() {
+        assert!(BIND_PENDING_REQUEST_QUERY.contains("status = 'pending'"));
+        assert!(BIND_PENDING_REQUEST_QUERY.contains("expires_at > $5"));
+        assert!(BIND_PENDING_REQUEST_QUERY.contains("FOR UPDATE"));
+    }
+}
