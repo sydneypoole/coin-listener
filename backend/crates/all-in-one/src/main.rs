@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
         realtime: realtime_hub,
+        telegram_webhook_secret: config.notify.telegram_webhook_secret.clone(),
     });
     let api_router = build_router(api_state)
         .layer(CorsLayer::permissive())

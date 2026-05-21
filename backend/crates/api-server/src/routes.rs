@@ -4,7 +4,7 @@ use crate::{
 };
 use axum::{
     extract::{ws::WebSocketUpgrade, Extension, FromRequestParts, Path, Query, Request, State},
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -15,9 +15,9 @@ use coin_listener_chain_providers::evm::EvmRpcClient;
 use coin_listener_core::{
     models::{
         CreateNotificationChannelRequest, CreateNotificationRuleRequest, CreateProviderRequest,
-        CreateTelegramBotRequest, CreateWatchedAddressImportRequest, CreateWatchedAddressRequest,
-        EventQuery, InAppNotificationQuery, LoginRequest, LoginResponse,
-        NotificationChannelTestResponse, NotificationDeliveryListResponse,
+        CreateTelegramBindingRequest, CreateTelegramBotRequest, CreateWatchedAddressImportRequest,
+        CreateWatchedAddressRequest, EventQuery, InAppNotificationQuery, LoginRequest,
+        LoginResponse, NotificationChannelTestResponse, NotificationDeliveryListResponse,
         NotificationDeliveryQuery, NotificationOutboxListResponse, NotificationOutboxQuery,
         QueueStatus, RetryNotificationOutboxResponse, SystemStatus,
         UpdateNotificationChannelRequest, UpdateTelegramBotRequest, UserSummary,
@@ -46,6 +46,7 @@ pub struct ApiState {
     pub enable_dev_routes: bool,
     pub auth: TokenSettings,
     pub realtime: RealtimeHub,
+    pub telegram_webhook_secret: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,6 +100,12 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
             put(update_telegram_bot).delete(delete_telegram_bot),
         )
         .route("/api/telegram-bots/:id/verify", post(verify_telegram_bot))
+        .route("/api/telegram-bindings", post(create_telegram_binding))
+        .route("/api/telegram-bindings/:id", get(get_telegram_binding))
+        .route(
+            "/api/telegram-bindings/:id/cancel",
+            post(cancel_telegram_binding),
+        )
         .route(
             "/api/notification-channels",
             get(list_notification_channels).post(create_notification_channel),
@@ -153,6 +160,7 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route("/health", get(health))
         .route("/api/auth/login", post(login))
         .route("/api/realtime/notifications", get(realtime_notifications))
+        .route("/api/telegram/webhook/:bot_id", post(telegram_webhook))
         .merge(protected)
         .with_state(state)
 }
@@ -525,17 +533,127 @@ async fn verify_telegram_bot(
     let message = external_outcome_message(&outcome, "telegram bot verified");
     let status = if ok { "verified" } else { "failed" };
     let last_error = (!ok).then(|| message.clone());
+    let username = outcome
+        .metadata()
+        .provider_response
+        .as_deref()
+        .and_then(|body| notifier::external::parse_telegram_verify_username(200, body));
     notifications::mark_telegram_bot_verification(
         &state.postgres,
         auth.tenant_id,
         id,
         status,
+        username,
         last_error,
         Utc::now(),
     )
     .await?;
 
     Ok(Json(VerificationResponse { ok, message }).into_response())
+}
+
+async fn create_telegram_binding(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<CreateTelegramBindingRequest>,
+) -> Result<Response, ApiError> {
+    let bot = notifications::get_telegram_bot_secret(
+        &state.postgres,
+        auth.tenant_id,
+        request.telegram_bot_id,
+    )
+    .await?;
+    let bind_token = format!("bind_{}", Uuid::new_v4().simple());
+    let short_code = format!(
+        "CL-{}",
+        Uuid::new_v4().simple().to_string()[..6].to_ascii_uppercase()
+    );
+    let deep_link_url = telegram_deep_link(bot.username.as_deref(), &bind_token);
+    let binding = coin_listener_storage::telegram_bindings::create_binding_request(
+        &state.postgres,
+        auth.tenant_id,
+        request.telegram_bot_id,
+        bind_token,
+        short_code,
+        deep_link_url,
+        Utc::now(),
+    )
+    .await?;
+
+    Ok((StatusCode::CREATED, Json(binding)).into_response())
+}
+
+async fn get_telegram_binding(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let binding = coin_listener_storage::telegram_bindings::get_binding_request(
+        &state.postgres,
+        auth.tenant_id,
+        id,
+    )
+    .await?;
+
+    Ok(Json(binding).into_response())
+}
+
+async fn cancel_telegram_binding(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let binding = coin_listener_storage::telegram_bindings::cancel_binding_request(
+        &state.postgres,
+        auth.tenant_id,
+        id,
+    )
+    .await?;
+
+    Ok(Json(binding).into_response())
+}
+
+async fn telegram_webhook(
+    State(state): State<Arc<ApiState>>,
+    Path(bot_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(update): Json<notifier::telegram_updates::TelegramUpdate>,
+) -> Result<Response, ApiError> {
+    let header_secret = headers
+        .get("X-Telegram-Bot-Api-Secret-Token")
+        .and_then(|value| value.to_str().ok());
+    if !telegram_webhook_secret_matches(state.telegram_webhook_secret.as_deref(), header_secret) {
+        return Err(AppError::Unauthorized.into());
+    }
+
+    let bot = notifications::telegram_bot_secret_by_id_any_tenant(&state.postgres, bot_id).await?;
+    let sender = notifier::external::ExternalNotificationSender::new(reqwest::Client::new());
+    notifier::process_telegram_binding_update(
+        &state.postgres,
+        &sender,
+        bot_id,
+        &bot.bot_token,
+        &update,
+        Utc::now(),
+    )
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+fn telegram_webhook_secret_matches(configured: Option<&str>, header: Option<&str>) -> bool {
+    match configured {
+        Some(secret) => header == Some(secret),
+        None => true,
+    }
+}
+
+fn telegram_deep_link(bot_username: Option<&str>, bind_token: &str) -> Option<String> {
+    let username = bot_username?.trim_start_matches('@');
+    if username.is_empty() || username.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(format!("https://t.me/{username}?start={bind_token}"))
 }
 
 async fn update_notification_channel(
@@ -833,7 +951,45 @@ mod tests {
                 ttl: Duration::seconds(3600),
             },
             realtime: RealtimeHub::new(16),
+            telegram_webhook_secret: None,
         })
+    }
+
+    #[test]
+    fn telegram_webhook_secret_is_optional_but_enforced_when_configured() {
+        assert!(super::telegram_webhook_secret_matches(None, None));
+        assert!(super::telegram_webhook_secret_matches(None, Some("wrong")));
+        assert!(!super::telegram_webhook_secret_matches(
+            Some("secret"),
+            None
+        ));
+        assert!(!super::telegram_webhook_secret_matches(
+            Some("secret"),
+            Some("wrong")
+        ));
+        assert!(super::telegram_webhook_secret_matches(
+            Some("secret"),
+            Some("secret")
+        ));
+    }
+
+    #[test]
+    fn telegram_deep_link_requires_verified_username_shape() {
+        assert_eq!(
+            super::telegram_deep_link(Some("coin_listener_bot"), "bind_abc").as_deref(),
+            Some("https://t.me/coin_listener_bot?start=bind_abc")
+        );
+        assert_eq!(
+            super::telegram_deep_link(Some("@coin_listener_bot"), "bind_abc").as_deref(),
+            Some("https://t.me/coin_listener_bot?start=bind_abc")
+        );
+        assert_eq!(super::telegram_deep_link(None, "bind_abc"), None);
+        assert_eq!(super::telegram_deep_link(Some(""), "bind_abc"), None);
+        assert_eq!(super::telegram_deep_link(Some("Ops Bot"), "bind_abc"), None);
+        assert_eq!(
+            super::telegram_deep_link(Some(" coin_listener_bot "), "bind_abc"),
+            None
+        );
     }
 
     #[test]
@@ -842,6 +998,49 @@ mod tests {
             super::ApiError::from(coin_listener_core::AppError::Forbidden).into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn production_source() -> &'static str {
+        include_str!("routes.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is present")
+    }
+
+    #[test]
+    fn telegram_binding_routes_are_registered() {
+        let source = production_source();
+
+        for route in [
+            "/api/telegram-bindings",
+            "/api/telegram-bindings/:id",
+            "/api/telegram-bindings/:id/cancel",
+            "/api/telegram/webhook/:bot_id",
+        ] {
+            assert!(source.contains(route), "missing route {route}");
+        }
+    }
+
+    #[test]
+    fn telegram_webhook_route_is_not_under_auth_layer() {
+        let source = production_source();
+        let webhook_index = source
+            .find("/api/telegram/webhook/:bot_id")
+            .expect("webhook route is registered");
+        let auth_layer_index = source
+            .find("route_layer(middleware::from_fn_with_state")
+            .expect("auth route layer is registered");
+
+        assert!(webhook_index > auth_layer_index);
+    }
+
+    #[test]
+    fn telegram_webhook_uses_bot_id_without_token_path() {
+        let source = production_source();
+
+        assert!(source.contains("telegram_bot_secret_by_id_any_tenant"));
+        assert!(source.contains("/api/telegram/webhook/:bot_id"));
+        assert!(!source.contains("/api/telegram/webhook/:bot_token"));
     }
 
     #[tokio::test]

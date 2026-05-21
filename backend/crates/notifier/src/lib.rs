@@ -1107,6 +1107,7 @@ mod tests {
             outbox_max_attempts: 7,
             outbox_stale_lock_seconds: 120,
             outbox_idle_sleep_ms: 250,
+            telegram_webhook_secret: None,
         };
 
         let config = NotificationOutboxDispatcherConfig::from_notify_config(&notify);

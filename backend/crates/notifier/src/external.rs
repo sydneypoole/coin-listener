@@ -446,6 +446,22 @@ pub fn telegram_get_updates_body_read_error(
     })
 }
 
+pub fn parse_telegram_verify_username(status_code: u16, body: &str) -> Option<String> {
+    if !matches!(status_code, 200..=299) {
+        return None;
+    }
+    let parsed_body = serde_json::from_str::<Value>(body).ok()?;
+    if parsed_body.get("ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let username = parsed_body
+        .get("result")
+        .and_then(|result| result.get("username"))
+        .and_then(Value::as_str)?;
+    (!username.is_empty() && !username.chars().any(char::is_whitespace))
+        .then(|| username.to_string())
+}
+
 pub fn classify_telegram_verify_response(status_code: u16, body: &str) -> ExternalSendOutcome {
     let parsed_body = serde_json::from_str::<Value>(body).ok();
     let telegram_success = parsed_body
@@ -708,8 +724,8 @@ mod tests {
     use crate::external::{
         build_webhook_request_parts, classify_telegram_response, classify_telegram_verify_response,
         classify_webhook_response, notification_idempotency_key,
-        parse_telegram_get_updates_response, redact_telegram_url, redact_webhook_url,
-        telegram_get_updates_body_read_error, telegram_network_error_message,
+        parse_telegram_get_updates_response, parse_telegram_verify_username, redact_telegram_url,
+        redact_webhook_url, telegram_get_updates_body_read_error, telegram_network_error_message,
         truncate_provider_response, webhook_network_error_message, webhook_signature,
         TelegramChannelConfig, WebhookChannelConfig, PROVIDER_RESPONSE_MAX_BYTES,
     };
@@ -1031,6 +1047,24 @@ mod tests {
         assert!(outcome.is_sent());
         assert_eq!(outcome.metadata().provider_message_id, None);
         assert_eq!(outcome.metadata().provider_status_code, Some(200));
+    }
+
+    #[test]
+    fn telegram_verify_username_parser_extracts_username() {
+        let body = r#"{
+            "ok": true,
+            "result": { "id": 123, "is_bot": true, "username": "coin_listener_bot" }
+        }"#;
+
+        assert_eq!(
+            parse_telegram_verify_username(200, body).as_deref(),
+            Some("coin_listener_bot")
+        );
+        assert_eq!(parse_telegram_verify_username(401, body), None);
+        assert_eq!(
+            parse_telegram_verify_username(200, r#"{"ok":true,"result":{"username":"bad name"}}"#),
+            None
+        );
     }
 
     #[test]

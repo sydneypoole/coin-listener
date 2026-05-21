@@ -399,6 +399,7 @@ pub struct TelegramBot {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
+    pub username: Option<String>,
     pub token_preview: String,
     pub status: String,
     pub verification_status: String,
@@ -413,6 +414,7 @@ pub struct TelegramBotSecret {
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub name: String,
+    pub username: Option<String>,
     pub bot_token: String,
     pub token_preview: String,
     pub status: String,
@@ -802,6 +804,14 @@ mod tests {
         assert!(migration.contains("status IN ('pending', 'bound', 'expired', 'cancelled')"));
         assert!(migration.contains("idx_telegram_bots_id_tenant"));
         assert!(migration.contains("FOREIGN KEY (telegram_bot_id, tenant_id)"));
+    }
+
+    #[test]
+    fn telegram_bot_username_migration_upgrades_existing_tables() {
+        let migration = include_str!("../../storage/migrations/0016_telegram_bot_username.sql");
+
+        assert!(migration.contains("ALTER TABLE telegram_bots"));
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS username TEXT"));
     }
 
     #[test]
