@@ -83,14 +83,35 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    tokio::select! {
-        result = server => result?,
-        result = &mut telegram_poller_handle => telegram_poller_task_result(result)?,
-    }
+    let event = tokio::select! {
+        result = server => ApiServerRuntimeEvent::Server(result.map_err(Into::into)),
+        result = &mut telegram_poller_handle => ApiServerRuntimeEvent::TelegramPoller(telegram_poller_task_result(result)),
+    };
     shutdown.store(true, Ordering::Relaxed);
-    wait_for_telegram_poller_shutdown(telegram_poller_handle).await?;
 
-    Ok(())
+    match event {
+        ApiServerRuntimeEvent::Server(result) => preserve_primary_result(
+            result,
+            wait_for_telegram_poller_shutdown(telegram_poller_handle).await,
+        ),
+        ApiServerRuntimeEvent::TelegramPoller(result) => result,
+    }
+}
+
+#[derive(Debug)]
+enum ApiServerRuntimeEvent {
+    Server(anyhow::Result<()>),
+    TelegramPoller(anyhow::Result<()>),
+}
+
+fn preserve_primary_result(
+    primary: anyhow::Result<()>,
+    secondary: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match primary {
+        Ok(()) => secondary,
+        Err(error) => Err(error),
+    }
 }
 
 fn telegram_poller_task_result(
@@ -132,6 +153,9 @@ mod tests {
         assert!(production_source.contains("Arc::clone(&shutdown)"));
         assert!(production_source.contains("telegram_poller_handle"));
         assert!(production_source.contains("tokio::select!"));
+        assert!(production_source.contains("ApiServerRuntimeEvent::Server"));
+        assert!(production_source.contains("ApiServerRuntimeEvent::TelegramPoller"));
         assert!(production_source.contains("wait_for_telegram_poller_shutdown("));
+        assert!(production_source.contains("preserve_primary_result("));
     }
 }
