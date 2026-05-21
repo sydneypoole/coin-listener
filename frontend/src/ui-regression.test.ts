@@ -280,7 +280,7 @@ describe('frontend UI regressions', () => {
     const lineResult = parseAddressImportInput('0x0000000000000000000000000000000000000001\n\n0x0000000000000000000000000000000000000002');
     if (lineResult.rows.length !== 2) throw new Error('line input should produce two rows');
     if (lineResult.rows[0].row_number !== 1) throw new Error('first line row number mismatch');
-    if (lineResult.rows[1].row_number !== 2) throw new Error('second line row number mismatch');
+    if (lineResult.rows[1].row_number !== 3) throw new Error('second line row number mismatch');
     if (lineResult.rows[0].address !== '0x0000000000000000000000000000000000000001') throw new Error('line address mismatch');
 
     const csvResult = parseAddressImportInput('address,label,priority\n0x0000000000000000000000000000000000000003,Hot,critical');

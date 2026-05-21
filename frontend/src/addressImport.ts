@@ -30,8 +30,8 @@ export function parseAddressImportInput(input: string): ParsedAddressImport {
   const headers = splitCsvLine(lines[0].text).map(header => header.trim().toLowerCase());
   if (headers.includes('address')) return parseCsv(lines, headers);
 
-  return markDuplicateRows(lines.map((line, index) => ({
-    row_number: index + 1,
+  return markDuplicateRows(lines.map(line => ({
+    row_number: line.lineNumber,
     raw_text: line.text,
     address: line.text,
   })));
