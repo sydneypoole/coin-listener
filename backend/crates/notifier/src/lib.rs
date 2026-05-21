@@ -551,21 +551,57 @@ async fn process_external_channel_delivery(
                     return Ok(());
                 }
             };
-            let bot_token = match std::env::var(&config.bot_token_env) {
-                Ok(token) => token,
-                Err(_) => {
-                    let message = format!("telegram token env {} is not set", config.bot_token_env);
-                    notifications::mark_external_notification_delivery_failed(
-                        pool,
-                        task.tenant_id,
-                        delivery_id,
-                        attempt_count,
-                        &message,
-                        None,
-                        None,
-                    )
-                    .await?;
-                    return Ok(());
+            let bot_token = if let Some(bot_id) = config.telegram_bot_id {
+                match notifications::get_telegram_bot_secret(pool, task.tenant_id, bot_id).await {
+                    Ok(bot) if bot.status == "active" => bot.bot_token,
+                    Ok(_) => {
+                        notifications::mark_external_notification_delivery_failed(
+                            pool,
+                            task.tenant_id,
+                            delivery_id,
+                            attempt_count,
+                            "telegram bot is inactive",
+                            None,
+                            None,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        notifications::mark_external_notification_delivery_failed(
+                            pool,
+                            task.tenant_id,
+                            delivery_id,
+                            attempt_count,
+                            &message,
+                            None,
+                            None,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                match config
+                    .bot_token_env
+                    .as_deref()
+                    .and_then(|name| std::env::var(name).ok())
+                {
+                    Some(token) => token,
+                    None => {
+                        notifications::mark_external_notification_delivery_failed(
+                            pool,
+                            task.tenant_id,
+                            delivery_id,
+                            attempt_count,
+                            "telegram token env is not set",
+                            None,
+                            None,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
                 }
             };
             sender

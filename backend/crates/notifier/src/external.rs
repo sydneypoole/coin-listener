@@ -37,16 +37,23 @@ impl ExternalConfigError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramChannelConfig {
-    pub bot_token_env: String,
+    pub telegram_bot_id: Option<Uuid>,
+    pub bot_token_env: Option<String>,
     pub chat_id: String,
 }
 
 impl TelegramChannelConfig {
     pub fn parse(value: &Value) -> Result<Self, ExternalConfigError> {
-        let bot_token_env =
-            required_string(value, "bot_token_env", "telegram bot_token_env is required")?;
+        let telegram_bot_id = optional_uuid(value, "telegram_bot_id")?;
+        let bot_token_env = optional_string(value, "bot_token_env");
+        if telegram_bot_id.is_none() && bot_token_env.is_none() {
+            return Err(ExternalConfigError::new(
+                "telegram telegram_bot_id or bot_token_env is required",
+            ));
+        }
         let chat_id = required_string(value, "chat_id", "telegram chat_id is required")?;
         Ok(Self {
+            telegram_bot_id,
             bot_token_env,
             chat_id,
         })
@@ -115,7 +122,7 @@ impl ExternalNotificationSender {
     }
 
     #[cfg(test)]
-    pub fn with_telegram_api_base_url(client: Client, telegram_api_base_url: String) -> Self {
+    fn with_telegram_api_base_url(client: Client, telegram_api_base_url: String) -> Self {
         Self {
             client,
             telegram_api_base_url,
@@ -128,11 +135,7 @@ impl ExternalNotificationSender {
         bot_token: &str,
         text: &str,
     ) -> ExternalSendOutcome {
-        let url = format!(
-            "{}/bot{}/sendMessage",
-            self.telegram_api_base_url.trim_end_matches('/'),
-            bot_token
-        );
+        let url = self.telegram_bot_method_url(bot_token, "sendMessage");
         let response = self
             .client
             .post(&url)
@@ -157,6 +160,39 @@ impl ExternalNotificationSender {
                 provider_response: None,
             }),
         }
+    }
+
+    pub async fn verify_telegram_bot(&self, bot_token: &str) -> ExternalSendOutcome {
+        let url = self.telegram_bot_method_url(bot_token, "getMe");
+        let response = self
+            .client
+            .get(&url)
+            .timeout(Duration::from_millis(5000))
+            .send()
+            .await;
+
+        match response {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let body = read_provider_response_prefix(response).await;
+                classify_telegram_verify_response(status, &body)
+            }
+            Err(error) => ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+                last_error: Some(telegram_network_error_message(&url, &error.to_string())),
+                provider_message_id: None,
+                provider_status_code: None,
+                provider_response: None,
+            }),
+        }
+    }
+
+    fn telegram_bot_method_url(&self, bot_token: &str, method: &str) -> String {
+        format!(
+            "{}/bot{}/{}",
+            self.telegram_api_base_url.trim_end_matches('/'),
+            bot_token,
+            method
+        )
     }
 
     pub async fn send_webhook(&self, parts: WebhookRequestParts) -> ExternalSendOutcome {
@@ -341,6 +377,26 @@ pub fn classify_webhook_response(status_code: u16, body: &str) -> ExternalSendOu
     }
 }
 
+pub fn classify_telegram_verify_response(status_code: u16, body: &str) -> ExternalSendOutcome {
+    let parsed_body = serde_json::from_str::<Value>(body).ok();
+    let telegram_success = parsed_body
+        .as_ref()
+        .and_then(|value| value.get("ok"))
+        .and_then(Value::as_bool)
+        == Some(true);
+
+    if matches!(status_code, 200..=299) && telegram_success {
+        return ExternalSendOutcome::Sent(ExternalSendMetadata {
+            last_error: None,
+            provider_message_id: None,
+            provider_status_code: Some(status_code as i32),
+            provider_response: Some(truncate_provider_response(body)),
+        });
+    }
+
+    classify_telegram_response(status_code, body)
+}
+
 pub fn classify_telegram_response(status_code: u16, body: &str) -> ExternalSendOutcome {
     let parsed_body = serde_json::from_str::<Value>(body).ok();
     let provider_message_id = parsed_body
@@ -514,6 +570,21 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn optional_uuid(value: &Value, key: &str) -> Result<Option<Uuid>, ExternalConfigError> {
+    let Some(raw_value) = value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    Uuid::parse_str(raw_value)
+        .map(Some)
+        .map_err(|_| ExternalConfigError::new(format!("telegram {key} must be a valid uuid")))
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -522,10 +593,11 @@ mod tests {
     use uuid::Uuid;
 
     use crate::external::{
-        build_webhook_request_parts, classify_telegram_response, classify_webhook_response,
-        notification_idempotency_key, redact_telegram_url, redact_webhook_url,
-        telegram_network_error_message, truncate_provider_response, webhook_network_error_message,
-        webhook_signature, TelegramChannelConfig, WebhookChannelConfig,
+        build_webhook_request_parts, classify_telegram_response, classify_telegram_verify_response,
+        classify_webhook_response, notification_idempotency_key, redact_telegram_url,
+        redact_webhook_url, telegram_network_error_message, truncate_provider_response,
+        webhook_network_error_message, webhook_signature, TelegramChannelConfig,
+        WebhookChannelConfig,
     };
 
     fn uuid(value: u128) -> Uuid {
@@ -561,15 +633,32 @@ mod tests {
     }
 
     #[test]
-    fn telegram_channel_config_requires_token_env_and_chat_id() {
+    fn telegram_channel_config_requires_token_reference_and_chat_id() {
         let missing_token = TelegramChannelConfig::parse(&json!({"chat_id": "123"}))
-            .expect_err("missing bot_token_env should fail");
+            .expect_err("missing telegram_bot_id and bot_token_env should fail");
         let missing_chat =
             TelegramChannelConfig::parse(&json!({"bot_token_env": "TELEGRAM_BOT_TOKEN"}))
                 .expect_err("missing chat_id should fail");
 
-        assert_eq!(missing_token.message, "telegram bot_token_env is required");
+        assert_eq!(
+            missing_token.message,
+            "telegram telegram_bot_id or bot_token_env is required"
+        );
         assert_eq!(missing_chat.message, "telegram chat_id is required");
+    }
+
+    #[test]
+    fn telegram_channel_config_accepts_bot_id_without_token_env() {
+        let bot_id = uuid(42);
+        let config = TelegramChannelConfig::parse(&json!({
+            "telegram_bot_id": bot_id,
+            "chat_id": "123"
+        }))
+        .expect("valid bot-id telegram config");
+
+        assert_eq!(config.telegram_bot_id, Some(bot_id));
+        assert_eq!(config.bot_token_env, None);
+        assert_eq!(config.chat_id, "123");
     }
 
     #[test]
@@ -804,6 +893,29 @@ mod tests {
             outcome.metadata().provider_message_id.as_deref(),
             Some("123")
         );
+        assert_eq!(outcome.metadata().provider_status_code, Some(200));
+    }
+
+    #[test]
+    fn telegram_verify_success_uses_get_me_ok_response() {
+        let sender = crate::external::ExternalNotificationSender::with_telegram_api_base_url(
+            reqwest::Client::new(),
+            "https://telegram.example.test".to_string(),
+        );
+        let outcome = classify_telegram_verify_response(
+            200,
+            r#"{
+                "ok" : true,
+                "result" : { "id" : 123, "is_bot" : true }
+            }"#,
+        );
+
+        assert_eq!(
+            sender.telegram_bot_method_url("123:secret", "getMe"),
+            "https://telegram.example.test/bot123:secret/getMe"
+        );
+        assert!(outcome.is_sent());
+        assert_eq!(outcome.metadata().provider_message_id, None);
         assert_eq!(outcome.metadata().provider_status_code, Some(200));
     }
 

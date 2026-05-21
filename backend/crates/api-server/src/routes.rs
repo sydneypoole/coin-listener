@@ -15,12 +15,14 @@ use coin_listener_chain_providers::evm::EvmRpcClient;
 use coin_listener_core::{
     models::{
         CreateNotificationChannelRequest, CreateNotificationRuleRequest, CreateProviderRequest,
-        CreateWatchedAddressRequest, EventQuery, InAppNotificationQuery, LoginRequest,
-        LoginResponse, NotificationDeliveryListResponse, NotificationDeliveryQuery,
+        CreateTelegramBotRequest, CreateWatchedAddressRequest, EventQuery, InAppNotificationQuery,
+        LoginRequest, LoginResponse, NotificationChannelTestResponse,
+        NotificationDeliveryListResponse, NotificationDeliveryQuery,
         NotificationOutboxListResponse, NotificationOutboxQuery, QueueStatus,
-        RetryNotificationOutboxResponse, SystemStatus, UserSummary,
+        RetryNotificationOutboxResponse, SystemStatus, UpdateNotificationChannelRequest,
+        UpdateTelegramBotRequest, UserSummary, VerificationResponse,
     },
-    AppError,
+    AppError, AppResult,
 };
 use coin_listener_storage::{
     notifications,
@@ -78,8 +80,29 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         )
         .route("/api/events", get(list_events))
         .route(
+            "/api/telegram-bots",
+            get(list_telegram_bots).post(create_telegram_bot),
+        )
+        .route(
+            "/api/telegram-bots/:id",
+            put(update_telegram_bot).delete(delete_telegram_bot),
+        )
+        .route("/api/telegram-bots/:id/verify", post(verify_telegram_bot))
+        .route(
             "/api/notification-channels",
             get(list_notification_channels).post(create_notification_channel),
+        )
+        .route(
+            "/api/notification-channels/:id",
+            put(update_notification_channel).delete(delete_notification_channel),
+        )
+        .route(
+            "/api/notification-channels/:id/verify",
+            post(verify_notification_channel),
+        )
+        .route(
+            "/api/notification-channels/:id/test",
+            post(test_notification_channel),
         )
         .route(
             "/api/notification-rules",
@@ -383,6 +406,172 @@ async fn create_notification_channel(
         notifications::create_notification_channel(&state.postgres, auth.tenant_id, request)
             .await?;
     Ok((StatusCode::CREATED, Json(channel)).into_response())
+}
+
+async fn list_telegram_bots(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
+    let bots = notifications::list_telegram_bots(&state.postgres, auth.tenant_id).await?;
+    Ok(Json(bots).into_response())
+}
+
+async fn create_telegram_bot(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<CreateTelegramBotRequest>,
+) -> Result<Response, ApiError> {
+    let bot = notifications::create_telegram_bot(&state.postgres, auth.tenant_id, request).await?;
+    Ok((StatusCode::CREATED, Json(bot)).into_response())
+}
+
+async fn update_telegram_bot(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<UpdateTelegramBotRequest>,
+) -> Result<Response, ApiError> {
+    let bot =
+        notifications::update_telegram_bot(&state.postgres, auth.tenant_id, id, request).await?;
+    Ok(Json(bot).into_response())
+}
+
+async fn delete_telegram_bot(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    notifications::delete_telegram_bot(&state.postgres, auth.tenant_id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn verify_telegram_bot(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let bot = notifications::get_telegram_bot_secret(&state.postgres, auth.tenant_id, id).await?;
+    let outcome = notifier::external::ExternalNotificationSender::new(reqwest::Client::new())
+        .verify_telegram_bot(&bot.bot_token)
+        .await;
+    let ok = outcome.is_sent();
+    let message = external_outcome_message(&outcome, "telegram bot verified");
+    let status = if ok { "verified" } else { "failed" };
+    let last_error = (!ok).then(|| message.clone());
+    notifications::mark_telegram_bot_verification(
+        &state.postgres,
+        auth.tenant_id,
+        id,
+        status,
+        last_error,
+        Utc::now(),
+    )
+    .await?;
+
+    Ok(Json(VerificationResponse { ok, message }).into_response())
+}
+
+async fn update_notification_channel(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<UpdateNotificationChannelRequest>,
+) -> Result<Response, ApiError> {
+    let channel =
+        notifications::update_notification_channel(&state.postgres, auth.tenant_id, id, request)
+            .await?;
+    Ok(Json(channel).into_response())
+}
+
+async fn delete_notification_channel(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    notifications::delete_notification_channel(&state.postgres, auth.tenant_id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn telegram_channel_bot_token(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    channel_id: Uuid,
+    verify_mode: bool,
+) -> AppResult<(notifier::external::TelegramChannelConfig, String)> {
+    let channel = notifications::get_notification_channel(pool, tenant_id, channel_id).await?;
+    if channel.channel_type != "telegram" {
+        return Err(AppError::Validation(
+            "only telegram channels can be verified or tested".to_string(),
+        ));
+    }
+    if channel.status != "active" {
+        return Err(AppError::Validation(
+            "notification channel is inactive".to_string(),
+        ));
+    }
+
+    let config = notifier::external::TelegramChannelConfig::parse(&channel.config)
+        .map_err(|error| AppError::Validation(error.message))?;
+    let bot_id = config.telegram_bot_id.ok_or_else(|| {
+        let action = if verify_mode { "verified" } else { "tested" };
+        AppError::Validation(format!("telegram_bot_id is required for channel {action}"))
+    })?;
+    let bot = notifications::get_telegram_bot_secret(pool, tenant_id, bot_id).await?;
+    if bot.status != "active" {
+        return Err(AppError::Validation("telegram bot is inactive".to_string()));
+    }
+
+    Ok((config, bot.bot_token))
+}
+
+async fn verify_notification_channel(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (config, bot_token) =
+        telegram_channel_bot_token(&state.postgres, auth.tenant_id, id, true).await?;
+    let outcome = notifier::external::ExternalNotificationSender::new(reqwest::Client::new())
+        .send_telegram(
+            &config,
+            &bot_token,
+            "Coin Listener Telegram channel verification",
+        )
+        .await;
+    let ok = outcome.is_sent();
+    let message = external_outcome_message(&outcome, "telegram channel verified");
+
+    Ok(Json(VerificationResponse { ok, message }).into_response())
+}
+
+async fn test_notification_channel(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (config, bot_token) =
+        telegram_channel_bot_token(&state.postgres, auth.tenant_id, id, false).await?;
+    let outcome = notifier::external::ExternalNotificationSender::new(reqwest::Client::new())
+        .send_telegram(&config, &bot_token, "Coin Listener test notification")
+        .await;
+    let ok = outcome.is_sent();
+    let message = external_outcome_message(&outcome, "telegram channel test sent");
+
+    Ok(Json(NotificationChannelTestResponse { ok, message }).into_response())
+}
+
+fn external_outcome_message(
+    outcome: &notifier::external::ExternalSendOutcome,
+    success: &str,
+) -> String {
+    if outcome.is_sent() {
+        return success.to_string();
+    }
+    outcome
+        .metadata()
+        .last_error
+        .clone()
+        .unwrap_or_else(|| "external notification failed".to_string())
 }
 
 async fn list_notification_rules(
@@ -849,16 +1038,8 @@ mod tests {
         let app = build_router(test_state());
 
         for (method, uri, status) in [
-            (
-                Method::GET,
-                "/api/telegram-bots",
-                StatusCode::UNAUTHORIZED,
-            ),
-            (
-                Method::POST,
-                "/api/telegram-bots",
-                StatusCode::UNAUTHORIZED,
-            ),
+            (Method::GET, "/api/telegram-bots", StatusCode::UNAUTHORIZED),
+            (Method::POST, "/api/telegram-bots", StatusCode::UNAUTHORIZED),
             (
                 Method::PUT,
                 "/api/telegram-bots/not-a-uuid",

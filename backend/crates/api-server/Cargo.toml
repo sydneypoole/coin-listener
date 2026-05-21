@@ -10,10 +10,12 @@ argon2.workspace = true
 coin-listener-chain-providers = { path = "../chain-providers" }
 coin-listener-core = { path = "../core" }
 coin-listener-storage = { path = "../storage" }
+notifier = { path = "../notifier" }
 axum.workspace = true
 jsonwebtoken.workspace = true
 chrono.workspace = true
 redis.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
