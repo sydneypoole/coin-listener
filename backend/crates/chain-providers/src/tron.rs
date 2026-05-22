@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{str::FromStr, time::Duration};
 
+pub const TRON_CONNECTIVITY_PROBE_ADDRESS: &str = "TJmmqjb1DK9TTZbQXzRQ2AuA94z4gKAPFh";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TronBalance {
     pub balance_raw: String,
@@ -296,6 +298,14 @@ pub fn account_transactions_query(
     query
 }
 
+pub fn account_transactions_connectivity_query() -> Vec<(&'static str, String)> {
+    vec![
+        ("only_confirmed", "true".to_string()),
+        ("limit", "1".to_string()),
+        ("min_timestamp", "0".to_string()),
+    ]
+}
+
 pub fn account_trc20_transfers_query(
     contract_address: String,
     min_timestamp: i64,
@@ -337,6 +347,16 @@ impl TronClient {
     pub fn account_trc20_path(&self, address: &str) -> AppResult<String> {
         let address = normalize_tron_address(address)?;
         Ok(format!("/v1/accounts/{address}/transactions/trc20"))
+    }
+
+    pub async fn test_connectivity(&self) -> AppResult<()> {
+        let path = self.account_transactions_path(TRON_CONNECTIVITY_PROBE_ADDRESS)?;
+        let query = account_transactions_connectivity_query();
+        let body = self
+            .get_json_body("connectivity probe", &path, &query)
+            .await?;
+        parse_tron_page(body, "connectivity probe")?;
+        Ok(())
     }
 
     pub async fn account_transactions(
@@ -697,6 +717,38 @@ mod tests {
             .iter()
             .any(|(key, _)| *key == "fingerprint"));
         assert!(with_fingerprint.contains(&("fingerprint", "fingerprint-2".to_string())));
+    }
+
+    #[test]
+    fn tron_connectivity_query_uses_probe_address_and_minimal_limit() {
+        let query = super::account_transactions_connectivity_query();
+
+        assert_eq!(
+            super::TRON_CONNECTIVITY_PROBE_ADDRESS,
+            "TJmmqjb1DK9TTZbQXzRQ2AuA94z4gKAPFh"
+        );
+        assert!(query.contains(&("only_confirmed", "true".to_string())));
+        assert!(query.contains(&("limit", "1".to_string())));
+        assert!(query.contains(&("min_timestamp", "0".to_string())));
+        assert!(!query.iter().any(|(key, _)| *key == "fingerprint"));
+    }
+
+    #[test]
+    fn tron_connectivity_method_uses_account_transactions_probe() {
+        let source = include_str!("tron.rs");
+        let start = source
+            .find("pub async fn test_connectivity(&self)")
+            .expect("test_connectivity exists");
+        let end = source[start..]
+            .find("pub async fn account_transactions(")
+            .expect("account_transactions follows connectivity method")
+            + start;
+        let method = &source[start..end];
+
+        assert!(method.contains("TRON_CONNECTIVITY_PROBE_ADDRESS"));
+        assert!(method.contains("account_transactions_path"));
+        assert!(method.contains("account_transactions_connectivity_query()"));
+        assert!(method.contains("parse_tron_page(body, \"connectivity probe\")"));
     }
 
     #[test]
