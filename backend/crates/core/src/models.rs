@@ -140,10 +140,18 @@ pub struct CreateWatchedAddressRequest {
     pub asset_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatchedAddressImportChainConfig {
+    pub chain_id: Uuid,
+    pub asset_ids: Vec<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchedAddressImportDefaults {
     pub chain_id: Uuid,
     pub asset_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub chain_configs: Vec<WatchedAddressImportChainConfig>,
     pub priority: String,
     pub scan_interval_seconds: i32,
     pub transfer_filter_enabled: bool,
@@ -177,6 +185,8 @@ pub struct WatchedAddressImportTask {
     pub status: String,
     pub chain_id: Uuid,
     pub asset_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub chain_configs: Vec<WatchedAddressImportChainConfig>,
     pub priority: String,
     pub scan_interval_seconds: i32,
     pub transfer_filter_enabled: bool,
@@ -200,6 +210,8 @@ pub struct WatchedAddressImportErrorRow {
     pub row_number: i32,
     pub address: String,
     pub raw_text: String,
+    pub chain_id: Uuid,
+    pub chain_name: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
 }
@@ -779,7 +791,8 @@ mod tests {
         ProviderChainStatus, ProviderHealthStatus, ProviderStatus, ProviderStatusItem, QueueStatus,
         RetryNotificationOutboxResponse, ScanAddressTask, ScanCursor, ScanStatus,
         ServiceHealthStatus, ServiceHeartbeatStatusItem, SystemStatus, TelegramBindingRequest,
-        UpdateTelegramBotRequest, WatchedAddressResponse,
+        UpdateTelegramBotRequest, WatchedAddressImportChainConfig, WatchedAddressImportDefaults,
+        WatchedAddressImportErrorRow, WatchedAddressImportTask, WatchedAddressResponse,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
@@ -912,6 +925,128 @@ mod tests {
         assert_eq!(request.rows.len(), 1);
         assert_eq!(request.rows[0].row_number, 1);
         assert_eq!(request.rows[0].priority.as_deref(), Some("critical"));
+    }
+
+    #[test]
+    fn address_import_create_request_accepts_chain_configs() {
+        let payload = r#"{
+            "defaults": {
+                "chain_id":"00000000-0000-0000-0000-000000000002",
+                "asset_ids":["00000000-0000-0000-0000-000000000101"],
+                "chain_configs":[
+                    {
+                        "chain_id":"00000000-0000-0000-0000-000000000002",
+                        "asset_ids":["00000000-0000-0000-0000-000000000101"]
+                    },
+                    {
+                        "chain_id":"00000000-0000-0000-0000-000000000003",
+                        "asset_ids":[
+                            "00000000-0000-0000-0000-000000000201",
+                            "00000000-0000-0000-0000-000000000202"
+                        ]
+                    }
+                ],
+                "priority":"normal",
+                "scan_interval_seconds":300,
+                "transfer_filter_enabled":true,
+                "balance_change_filter_enabled":true,
+                "status":"active"
+            },
+            "rows": []
+        }"#;
+
+        let request: CreateWatchedAddressImportRequest = serde_json::from_str(payload).unwrap();
+        let defaults: &WatchedAddressImportDefaults = &request.defaults;
+
+        assert_eq!(defaults.chain_configs.len(), 2);
+        assert_eq!(defaults.chain_configs[0].chain_id, Uuid::from_u128(2));
+        assert_eq!(
+            defaults.chain_configs[0].asset_ids,
+            vec![Uuid::from_u128(0x101)]
+        );
+        assert_eq!(defaults.chain_configs[1].chain_id, Uuid::from_u128(3));
+        assert_eq!(
+            defaults.chain_configs[1].asset_ids,
+            vec![Uuid::from_u128(0x201), Uuid::from_u128(0x202)]
+        );
+        assert_eq!(defaults.chain_id, defaults.chain_configs[0].chain_id);
+        assert_eq!(defaults.asset_ids, defaults.chain_configs[0].asset_ids);
+    }
+
+    #[test]
+    fn address_import_create_request_keeps_legacy_defaults_compatible() {
+        let payload = r#"{
+            "defaults": {
+                "chain_id":"00000000-0000-0000-0000-000000000002",
+                "asset_ids":["00000000-0000-0000-0000-000000000101"],
+                "priority":"normal",
+                "scan_interval_seconds":300,
+                "transfer_filter_enabled":true,
+                "balance_change_filter_enabled":true,
+                "status":"active"
+            },
+            "rows": []
+        }"#;
+
+        let request: CreateWatchedAddressImportRequest = serde_json::from_str(payload).unwrap();
+
+        assert!(request.defaults.chain_configs.is_empty());
+        assert_eq!(request.defaults.chain_id, Uuid::from_u128(2));
+        assert_eq!(request.defaults.asset_ids, vec![Uuid::from_u128(0x101)]);
+    }
+
+    #[test]
+    fn address_import_task_serializes_chain_configs_and_error_chain_context() {
+        let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
+        let task = WatchedAddressImportTask {
+            id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            status: "pending".to_string(),
+            chain_id: Uuid::from_u128(3),
+            asset_ids: vec![Uuid::from_u128(0x101)],
+            chain_configs: vec![
+                WatchedAddressImportChainConfig {
+                    chain_id: Uuid::from_u128(3),
+                    asset_ids: vec![Uuid::from_u128(0x101)],
+                },
+                WatchedAddressImportChainConfig {
+                    chain_id: Uuid::from_u128(4),
+                    asset_ids: vec![Uuid::from_u128(0x201), Uuid::from_u128(0x202)],
+                },
+            ],
+            priority: "normal".to_string(),
+            scan_interval_seconds: 300,
+            transfer_filter_enabled: true,
+            balance_change_filter_enabled: true,
+            address_status: "active".to_string(),
+            total_rows: 2,
+            processed_rows: 1,
+            success_rows: 1,
+            failed_rows: 1,
+            locked_at: None,
+            locked_by: None,
+            started_at: Some(now),
+            completed_at: None,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let error = WatchedAddressImportErrorRow {
+            row_number: 2,
+            address: "0x0000000000000000000000000000000000000002".to_string(),
+            raw_text: "0x0000000000000000000000000000000000000002".to_string(),
+            chain_id: Uuid::from_u128(4),
+            chain_name: Some("Base".to_string()),
+            error_code: Some("invalid_address".to_string()),
+            error_message: Some("invalid address".to_string()),
+        };
+
+        let payload =
+            serde_json::to_string(&(task, error)).expect("serialize import task and error");
+
+        assert!(payload.contains("\"chain_configs\""));
+        assert!(payload.contains("00000000-0000-0000-0000-000000000004"));
+        assert!(payload.contains("\"chain_name\":\"Base\""));
     }
 
     #[test]
