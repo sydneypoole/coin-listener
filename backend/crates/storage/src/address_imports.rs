@@ -3,12 +3,13 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use coin_listener_core::{
     models::{
-        CreateWatchedAddressImportRequest, WatchedAddressImportErrorRow,
-        WatchedAddressImportRowRequest, WatchedAddressImportTask,
+        CreateWatchedAddressImportRequest, WatchedAddressImportChainConfig,
+        WatchedAddressImportDefaults, WatchedAddressImportErrorRow, WatchedAddressImportRowRequest,
+        WatchedAddressImportTask,
     },
     AppError, AppResult,
 };
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{types::Json, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 pub const CLAIM_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
@@ -44,8 +45,9 @@ SET status = 'running',
 FROM next_task
 WHERE task.id = next_task.id
 RETURNING task.id, task.tenant_id, task.status, task.chain_id, task.asset_ids,
-          task.priority, task.scan_interval_seconds, task.transfer_filter_enabled,
-          task.balance_change_filter_enabled, task.address_status, task.total_rows,
+          task.chain_configs, task.priority, task.scan_interval_seconds,
+          task.transfer_filter_enabled, task.balance_change_filter_enabled,
+          task.address_status, task.total_rows,
           task.processed_rows, task.success_rows, task.failed_rows, task.locked_at,
           task.locked_by, task.started_at, task.completed_at, task.last_error,
           task.created_at, task.updated_at
@@ -104,8 +106,9 @@ FROM (
 WHERE task.id = $1
   AND task.tenant_id = $2
 RETURNING task.id, task.tenant_id, task.status, task.chain_id, task.asset_ids,
-          task.priority, task.scan_interval_seconds, task.transfer_filter_enabled,
-          task.balance_change_filter_enabled, task.address_status, task.total_rows,
+          task.chain_configs, task.priority, task.scan_interval_seconds,
+          task.transfer_filter_enabled, task.balance_change_filter_enabled,
+          task.address_status, task.total_rows,
           task.processed_rows, task.success_rows, task.failed_rows, task.locked_at,
           task.locked_by, task.started_at, task.completed_at, task.last_error,
           task.created_at, task.updated_at
@@ -121,22 +124,22 @@ SET status = $3,
 WHERE id = $1
   AND tenant_id = $2
   AND status = 'running'
-RETURNING id, tenant_id, status, chain_id, asset_ids, priority, scan_interval_seconds,
-          transfer_filter_enabled, balance_change_filter_enabled, address_status,
-          total_rows, processed_rows, success_rows, failed_rows, locked_at, locked_by,
-          started_at, completed_at, last_error, created_at, updated_at
+RETURNING id, tenant_id, status, chain_id, asset_ids, chain_configs, priority,
+          scan_interval_seconds, transfer_filter_enabled, balance_change_filter_enabled,
+          address_status, total_rows, processed_rows, success_rows, failed_rows,
+          locked_at, locked_by, started_at, completed_at, last_error, created_at, updated_at
 "#;
 
-const CREATE_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
+pub const CREATE_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
 INSERT INTO watched_address_import_tasks (
-    tenant_id, chain_id, asset_ids, priority, scan_interval_seconds,
+    tenant_id, chain_id, asset_ids, chain_configs, priority, scan_interval_seconds,
     transfer_filter_enabled, balance_change_filter_enabled, address_status, total_rows
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, tenant_id, status, chain_id, asset_ids, priority, scan_interval_seconds,
-          transfer_filter_enabled, balance_change_filter_enabled, address_status,
-          total_rows, processed_rows, success_rows, failed_rows, locked_at, locked_by,
-          started_at, completed_at, last_error, created_at, updated_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, tenant_id, status, chain_id, asset_ids, chain_configs, priority,
+          scan_interval_seconds, transfer_filter_enabled, balance_change_filter_enabled,
+          address_status, total_rows, processed_rows, success_rows, failed_rows,
+          locked_at, locked_by, started_at, completed_at, last_error, created_at, updated_at
 "#;
 
 const INSERT_IMPORT_ROW_QUERY: &str = r#"
@@ -148,8 +151,15 @@ INSERT INTO watched_address_import_rows (
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 "#;
 
+pub const INSERT_IMPORT_ATTEMPT_QUERY: &str = r#"
+INSERT INTO watched_address_import_attempts (
+    import_task_id, tenant_id, row_number, chain_id, asset_ids
+)
+VALUES ($1, $2, $3, $4, $5)
+"#;
+
 const GET_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
-SELECT id, tenant_id, status, chain_id, asset_ids, priority, scan_interval_seconds,
+SELECT id, tenant_id, status, chain_id, asset_ids, chain_configs, priority, scan_interval_seconds,
        transfer_filter_enabled, balance_change_filter_enabled, address_status,
        total_rows, processed_rows, success_rows, failed_rows, locked_at, locked_by,
        started_at, completed_at, last_error, created_at, updated_at
@@ -207,12 +217,68 @@ WHERE task.id = $1
   AND task.tenant_id = $2
   AND task.status IN ('pending', 'running')
 RETURNING task.id, task.tenant_id, task.status, task.chain_id, task.asset_ids,
-          task.priority, task.scan_interval_seconds, task.transfer_filter_enabled,
-          task.balance_change_filter_enabled, task.address_status, task.total_rows,
+          task.chain_configs, task.priority, task.scan_interval_seconds,
+          task.transfer_filter_enabled, task.balance_change_filter_enabled,
+          task.address_status, task.total_rows,
           task.processed_rows, task.success_rows, task.failed_rows, task.locked_at,
           task.locked_by, task.started_at, task.completed_at, task.last_error,
           task.created_at, task.updated_at
 "#;
+
+#[derive(Debug, sqlx::FromRow)]
+struct WatchedAddressImportTaskRecord {
+    id: Uuid,
+    tenant_id: Uuid,
+    status: String,
+    chain_id: Uuid,
+    asset_ids: Vec<Uuid>,
+    chain_configs: Json<Vec<WatchedAddressImportChainConfig>>,
+    priority: String,
+    scan_interval_seconds: i32,
+    transfer_filter_enabled: bool,
+    balance_change_filter_enabled: bool,
+    address_status: String,
+    total_rows: i32,
+    processed_rows: i32,
+    success_rows: i32,
+    failed_rows: i32,
+    locked_at: Option<DateTime<Utc>>,
+    locked_by: Option<String>,
+    started_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    last_error: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<WatchedAddressImportTaskRecord> for WatchedAddressImportTask {
+    fn from(record: WatchedAddressImportTaskRecord) -> Self {
+        Self {
+            id: record.id,
+            tenant_id: record.tenant_id,
+            status: record.status,
+            chain_id: record.chain_id,
+            asset_ids: record.asset_ids,
+            chain_configs: record.chain_configs.0,
+            priority: record.priority,
+            scan_interval_seconds: record.scan_interval_seconds,
+            transfer_filter_enabled: record.transfer_filter_enabled,
+            balance_change_filter_enabled: record.balance_change_filter_enabled,
+            address_status: record.address_status,
+            total_rows: record.total_rows,
+            processed_rows: record.processed_rows,
+            success_rows: record.success_rows,
+            failed_rows: record.failed_rows,
+            locked_at: record.locked_at,
+            locked_by: record.locked_by,
+            started_at: record.started_at,
+            completed_at: record.completed_at,
+            last_error: record.last_error,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
 
 #[derive(Debug, sqlx::FromRow)]
 struct WatchedAddressImportRow {
@@ -243,15 +309,55 @@ impl From<WatchedAddressImportRow> for WatchedAddressImportRowRequest {
     }
 }
 
+pub fn effective_import_chain_configs(
+    defaults: &WatchedAddressImportDefaults,
+) -> Vec<WatchedAddressImportChainConfig> {
+    if defaults.chain_configs.is_empty() {
+        return vec![WatchedAddressImportChainConfig {
+            chain_id: defaults.chain_id,
+            asset_ids: defaults.asset_ids.clone(),
+        }];
+    }
+
+    defaults.chain_configs.clone()
+}
+
+fn import_attempt_count(row_count: usize, chain_config_count: usize) -> AppResult<i32> {
+    row_count
+        .checked_mul(chain_config_count)
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| AppError::Validation("import attempt count exceeds i32 range".to_string()))
+}
+
 pub fn validate_import_create_request(
     request: &CreateWatchedAddressImportRequest,
 ) -> AppResult<()> {
     if request.rows.is_empty() {
         return Err(AppError::Validation("import rows are required".to_string()));
     }
-    if request.defaults.asset_ids.is_empty() {
-        return Err(AppError::Validation("asset_ids are required".to_string()));
+
+    let chain_configs = effective_import_chain_configs(&request.defaults);
+    if chain_configs.is_empty() {
+        return Err(AppError::Validation(
+            "chain_configs are required".to_string(),
+        ));
     }
+
+    let mut chain_ids = HashSet::new();
+    for config in &chain_configs {
+        if config.asset_ids.is_empty() {
+            return Err(AppError::Validation(
+                "asset_ids are required for every chain config".to_string(),
+            ));
+        }
+        if !chain_ids.insert(config.chain_id) {
+            return Err(AppError::Validation(
+                "chain_id must be unique within an import".to_string(),
+            ));
+        }
+    }
+
+    import_attempt_count(request.rows.len(), chain_configs.len())?;
 
     let mut row_numbers = HashSet::new();
     let mut addresses = HashSet::new();
@@ -288,27 +394,36 @@ pub async fn create_watched_address_import(
     validate_import_create_request(&request)?;
     let defaults = request.defaults;
     let rows = request.rows;
+    let chain_configs = effective_import_chain_configs(&defaults);
+    let first_config = chain_configs
+        .first()
+        .ok_or_else(|| AppError::Validation("chain_configs are required".to_string()))?;
+    let total_rows = import_attempt_count(rows.len(), chain_configs.len())?;
 
     let mut transaction = pool
         .begin()
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    let task = sqlx::query_as::<_, WatchedAddressImportTask>(CREATE_WATCHED_ADDRESS_IMPORT_QUERY)
-        .bind(tenant_id)
-        .bind(defaults.chain_id)
-        .bind(&defaults.asset_ids)
-        .bind(defaults.priority)
-        .bind(defaults.scan_interval_seconds)
-        .bind(defaults.transfer_filter_enabled)
-        .bind(defaults.balance_change_filter_enabled)
-        .bind(defaults.status)
-        .bind(rows.len() as i32)
-        .fetch_one(transaction.as_mut())
-        .await
-        .map_err(|error| AppError::Database(error.to_string()))?;
+    let task_record =
+        sqlx::query_as::<_, WatchedAddressImportTaskRecord>(CREATE_WATCHED_ADDRESS_IMPORT_QUERY)
+            .bind(tenant_id)
+            .bind(first_config.chain_id)
+            .bind(&first_config.asset_ids)
+            .bind(Json(chain_configs.clone()))
+            .bind(defaults.priority)
+            .bind(defaults.scan_interval_seconds)
+            .bind(defaults.transfer_filter_enabled)
+            .bind(defaults.balance_change_filter_enabled)
+            .bind(defaults.status)
+            .bind(total_rows)
+            .fetch_one(transaction.as_mut())
+            .await
+            .map_err(|error| AppError::Database(error.to_string()))?;
+    let task = WatchedAddressImportTask::from(task_record);
 
     insert_import_rows(&mut transaction, tenant_id, task.id, &rows).await?;
+    insert_import_attempts(&mut transaction, tenant_id, task.id, &rows, &chain_configs).await?;
     transaction
         .commit()
         .await
@@ -343,17 +458,41 @@ async fn insert_import_rows(
     Ok(())
 }
 
+async fn insert_import_attempts(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    task_id: Uuid,
+    rows: &[WatchedAddressImportRowRequest],
+    chain_configs: &[WatchedAddressImportChainConfig],
+) -> AppResult<()> {
+    for row in rows {
+        for config in chain_configs {
+            sqlx::query(INSERT_IMPORT_ATTEMPT_QUERY)
+                .bind(task_id)
+                .bind(tenant_id)
+                .bind(row.row_number)
+                .bind(config.chain_id)
+                .bind(&config.asset_ids)
+                .execute(transaction.as_mut())
+                .await
+                .map_err(|error| AppError::Database(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn get_watched_address_import(
     pool: &PgPool,
     tenant_id: Uuid,
     id: Uuid,
 ) -> AppResult<WatchedAddressImportTask> {
-    sqlx::query_as::<_, WatchedAddressImportTask>(GET_WATCHED_ADDRESS_IMPORT_QUERY)
+    sqlx::query_as::<_, WatchedAddressImportTaskRecord>(GET_WATCHED_ADDRESS_IMPORT_QUERY)
         .bind(id)
         .bind(tenant_id)
         .fetch_optional(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
+        .map(WatchedAddressImportTask::from)
         .ok_or_else(|| AppError::NotFound("watched address import".to_string()))
 }
 
@@ -387,13 +526,15 @@ pub async fn cancel_watched_address_import(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    let task = sqlx::query_as::<_, WatchedAddressImportTask>(CANCEL_WATCHED_ADDRESS_IMPORT_QUERY)
-        .bind(id)
-        .bind(tenant_id)
-        .fetch_optional(transaction.as_mut())
-        .await
-        .map_err(|error| AppError::Database(error.to_string()))?
-        .ok_or_else(|| AppError::NotFound("watched address import".to_string()))?;
+    let task =
+        sqlx::query_as::<_, WatchedAddressImportTaskRecord>(CANCEL_WATCHED_ADDRESS_IMPORT_QUERY)
+            .bind(id)
+            .bind(tenant_id)
+            .fetch_optional(transaction.as_mut())
+            .await
+            .map_err(|error| AppError::Database(error.to_string()))?
+            .map(WatchedAddressImportTask::from)
+            .ok_or_else(|| AppError::NotFound("watched address import".to_string()))?;
 
     transaction
         .commit()
@@ -408,11 +549,12 @@ pub async fn claim_next_watched_address_import(
     now: DateTime<Utc>,
     worker_id: &str,
 ) -> AppResult<Option<WatchedAddressImportTask>> {
-    sqlx::query_as::<_, WatchedAddressImportTask>(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY)
+    sqlx::query_as::<_, WatchedAddressImportTaskRecord>(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY)
         .bind(now)
         .bind(worker_id)
         .fetch_optional(pool)
         .await
+        .map(|task| task.map(WatchedAddressImportTask::from))
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
@@ -482,12 +624,13 @@ pub async fn refresh_import_task_counts(
     tenant_id: Uuid,
     task_id: Uuid,
 ) -> AppResult<WatchedAddressImportTask> {
-    sqlx::query_as::<_, WatchedAddressImportTask>(REFRESH_IMPORT_TASK_COUNTS_QUERY)
+    sqlx::query_as::<_, WatchedAddressImportTaskRecord>(REFRESH_IMPORT_TASK_COUNTS_QUERY)
         .bind(task_id)
         .bind(tenant_id)
         .fetch_optional(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
+        .map(WatchedAddressImportTask::from)
         .ok_or_else(|| AppError::NotFound("watched address import".to_string()))
 }
 
@@ -511,7 +654,7 @@ pub async fn complete_import_if_finished(
         "completed"
     };
 
-    sqlx::query_as::<_, WatchedAddressImportTask>(COMPLETE_IMPORT_IF_FINISHED_QUERY)
+    sqlx::query_as::<_, WatchedAddressImportTaskRecord>(COMPLETE_IMPORT_IF_FINISHED_QUERY)
         .bind(task_id)
         .bind(tenant_id)
         .bind(next_status)
@@ -519,6 +662,7 @@ pub async fn complete_import_if_finished(
         .fetch_optional(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
+        .map(WatchedAddressImportTask::from)
         .map_or(Ok(task), Ok)
 }
 
@@ -533,21 +677,22 @@ fn ensure_import_row_updated(rows_affected: u64) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_import_create_request, CLAIM_WATCHED_ADDRESS_IMPORT_QUERY,
-        MARK_IMPORT_ROW_FAILED_QUERY, MARK_IMPORT_ROW_SUCCESS_QUERY, PENDING_IMPORT_ROWS_QUERY,
-        REFRESH_IMPORT_TASK_COUNTS_QUERY,
+        effective_import_chain_configs, validate_import_create_request,
+        CLAIM_WATCHED_ADDRESS_IMPORT_QUERY, CREATE_WATCHED_ADDRESS_IMPORT_QUERY,
+        INSERT_IMPORT_ATTEMPT_QUERY, MARK_IMPORT_ROW_FAILED_QUERY, MARK_IMPORT_ROW_SUCCESS_QUERY,
+        PENDING_IMPORT_ROWS_QUERY, REFRESH_IMPORT_TASK_COUNTS_QUERY,
     };
     use coin_listener_core::models::{
-        CreateWatchedAddressImportRequest, WatchedAddressImportDefaults,
-        WatchedAddressImportRowRequest,
+        CreateWatchedAddressImportRequest, WatchedAddressImportChainConfig,
+        WatchedAddressImportDefaults, WatchedAddressImportRowRequest,
     };
     use uuid::Uuid;
 
     fn request_with_rows(
         rows: Vec<WatchedAddressImportRowRequest>,
     ) -> CreateWatchedAddressImportRequest {
-        CreateWatchedAddressImportRequest {
-            defaults: WatchedAddressImportDefaults {
+        request_with_defaults(
+            WatchedAddressImportDefaults {
                 chain_id: Uuid::from_u128(2),
                 asset_ids: vec![Uuid::from_u128(101)],
                 chain_configs: Vec::new(),
@@ -558,6 +703,20 @@ mod tests {
                 status: "active".to_string(),
             },
             rows,
+        )
+    }
+
+    fn request_with_defaults(
+        defaults: WatchedAddressImportDefaults,
+        rows: Vec<WatchedAddressImportRowRequest>,
+    ) -> CreateWatchedAddressImportRequest {
+        CreateWatchedAddressImportRequest { defaults, rows }
+    }
+
+    fn chain_config(chain_id: u128, asset_ids: Vec<u128>) -> WatchedAddressImportChainConfig {
+        WatchedAddressImportChainConfig {
+            chain_id: Uuid::from_u128(chain_id),
+            asset_ids: asset_ids.into_iter().map(Uuid::from_u128).collect(),
         }
     }
 
@@ -588,6 +747,95 @@ mod tests {
             error.to_string(),
             "validation error: addresses must be unique within an import"
         );
+    }
+
+    #[test]
+    fn import_validation_derives_legacy_single_chain_config() {
+        let request = request_with_rows(vec![row(1, "0x0000000000000000000000000000000000000001")]);
+
+        validate_import_create_request(&request).unwrap();
+        let configs = effective_import_chain_configs(&request.defaults);
+
+        assert_eq!(configs, vec![chain_config(2, vec![101])]);
+    }
+
+    #[test]
+    fn import_validation_rejects_empty_effective_assets() {
+        let mut request =
+            request_with_rows(vec![row(1, "0x0000000000000000000000000000000000000001")]);
+        request.defaults.asset_ids = Vec::new();
+
+        let error = validate_import_create_request(&request).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "validation error: asset_ids are required for every chain config"
+        );
+    }
+
+    #[test]
+    fn import_validation_rejects_empty_chain_config_assets() {
+        let defaults = WatchedAddressImportDefaults {
+            chain_id: Uuid::from_u128(2),
+            asset_ids: vec![Uuid::from_u128(101)],
+            chain_configs: vec![chain_config(2, Vec::new())],
+            priority: "normal".to_string(),
+            scan_interval_seconds: 300,
+            transfer_filter_enabled: true,
+            balance_change_filter_enabled: true,
+            status: "active".to_string(),
+        };
+        let request = request_with_defaults(
+            defaults,
+            vec![row(1, "0x0000000000000000000000000000000000000001")],
+        );
+
+        let error = validate_import_create_request(&request).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "validation error: asset_ids are required for every chain config"
+        );
+    }
+
+    #[test]
+    fn import_validation_rejects_duplicate_chain_configs() {
+        let defaults = WatchedAddressImportDefaults {
+            chain_id: Uuid::from_u128(2),
+            asset_ids: vec![Uuid::from_u128(101)],
+            chain_configs: vec![chain_config(2, vec![101]), chain_config(2, vec![102])],
+            priority: "normal".to_string(),
+            scan_interval_seconds: 300,
+            transfer_filter_enabled: true,
+            balance_change_filter_enabled: true,
+            status: "active".to_string(),
+        };
+        let request = request_with_defaults(
+            defaults,
+            vec![row(1, "0x0000000000000000000000000000000000000001")],
+        );
+
+        let error = validate_import_create_request(&request).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "validation error: chain_id must be unique within an import"
+        );
+    }
+
+    #[test]
+    fn create_import_query_persists_chain_configs_and_attempt_total() {
+        assert!(CREATE_WATCHED_ADDRESS_IMPORT_QUERY.contains("chain_configs"));
+        assert!(CREATE_WATCHED_ADDRESS_IMPORT_QUERY.contains("total_rows"));
+        assert!(CREATE_WATCHED_ADDRESS_IMPORT_QUERY
+            .contains("VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"));
+    }
+
+    #[test]
+    fn insert_attempt_query_uses_each_row_chain_pair() {
+        assert!(INSERT_IMPORT_ATTEMPT_QUERY.contains("watched_address_import_attempts"));
+        assert!(INSERT_IMPORT_ATTEMPT_QUERY.contains("row_number, chain_id, asset_ids"));
+        assert!(INSERT_IMPORT_ATTEMPT_QUERY.contains("VALUES ($1, $2, $3, $4, $5)"));
     }
 
     #[test]
