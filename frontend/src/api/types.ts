@@ -213,9 +213,15 @@ export type NotificationChannelTestResponse = {
   message: string;
 };
 
+export type WatchedAddressImportChainConfig = {
+  chain_id: string;
+  asset_ids: string[];
+};
+
 export type WatchedAddressImportDefaults = {
   chain_id: string;
   asset_ids: string[];
+  chain_configs: WatchedAddressImportChainConfig[];
   priority: string;
   scan_interval_seconds: number;
   transfer_filter_enabled: boolean;
@@ -246,6 +252,7 @@ export type WatchedAddressImportTask = {
   status: string;
   chain_id: string;
   asset_ids: string[];
+  chain_configs: WatchedAddressImportChainConfig[];
   priority: string;
   scan_interval_seconds: number;
   transfer_filter_enabled: boolean;
@@ -268,6 +275,8 @@ export type WatchedAddressImportErrorRow = {
   row_number: number;
   address: string;
   raw_text: string;
+  chain_id: string;
+  chain_name?: string | null;
   error_code?: string | null;
   error_message?: string | null;
 };

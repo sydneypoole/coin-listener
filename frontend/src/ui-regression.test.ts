@@ -380,9 +380,12 @@ describe('frontend UI regressions', () => {
       'export type CreateTelegramBotRequest',
       'export type UpdateTelegramBotRequest',
       'export type NotificationChannelTestResponse',
+      'export type WatchedAddressImportChainConfig',
       'export type WatchedAddressImportTask',
       'export type CreateWatchedAddressImportRequest',
       'export type WatchedAddressImportErrorRow',
+      'chain_configs: WatchedAddressImportChainConfig[]',
+      'chain_name?: string | null',
     ]) {
       expectContains(types, expected);
     }
@@ -444,13 +447,25 @@ describe('frontend UI regressions', () => {
       'tableId="address-import-preview"',
       'tableId="address-import-errors"',
       'importTaskId',
-      'handleBatchChainChange',
-      "setValue('asset_ids', [])",
-      'isTerminalImportStatus',
+      'batchChainRows',
+      'addBatchChainRow',
+      'removeBatchChainRow',
+      'updateBatchChainRow',
+      'normalizedBatchChainConfigs',
+      'chain_configs',
+      '不能重复选择链',
+      '预计创建尝试',
+      '导入进度（按地址-链尝试计数）',
+      '总尝试',
+      'chain_name',
+      '`${row.row_number}-${row.chain_id}`',
       "queryClient.invalidateQueries({ queryKey: ['address-import-errors', importTaskId] })",
     ]) {
       expectContains(page, expected);
     }
+
+    expectNotContains(page, 'handleBatchChainChange');
+    expectNotContains(page, "setValue('asset_ids', [])");
   });
 
   test('address import parser supports line and CSV input', async () => {
@@ -475,5 +490,8 @@ describe('frontend UI regressions', () => {
 
     if (!result.warnings.some(warning => warning.includes('unknown'))) throw new Error('unknown CSV field warning missing');
     if (!result.rows.some(row => row.error === '重复地址')) throw new Error('duplicate row error missing');
+
+    const chainFieldResult = parseAddressImportInput('address,chain_id\n0x0000000000000000000000000000000000000005,base');
+    if (!chainFieldResult.warnings.some(warning => warning.includes('chain_id'))) throw new Error('chain_id CSV field should remain unknown');
   });
 });

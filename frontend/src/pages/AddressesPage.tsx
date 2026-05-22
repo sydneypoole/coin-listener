@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Banner, Button, Form, Popconfirm, Progress, Select, Space, Tag, Toast } from '@douyinfe/semi-ui';
-import type { FormApi } from '@douyinfe/semi-ui/lib/es/form/interface';
 import { parseAddressImportInput } from '../addressImport';
 import {
   cancelWatchedAddressImport,
@@ -15,7 +14,7 @@ import {
   listWatchedAddresses,
   updateWatchedAddress,
 } from '../api/client';
-import type { Asset, CreateWatchedAddressRequest, WatchedAddress } from '../api/types';
+import type { Asset, CreateWatchedAddressRequest, WatchedAddress, WatchedAddressImportErrorRow } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
 import { FormModal } from '../components/FormModal';
@@ -28,7 +27,6 @@ type ChainRow = {
 };
 
 type BatchImportForm = Record<string, unknown>;
-type BatchImportFormApi = FormApi<BatchImportForm>;
 
 const terminalImportStatuses = ['completed', 'failed', 'cancelled'];
 
@@ -53,9 +51,9 @@ export function AddressesPage() {
   const [batchVisible, setBatchVisible] = useState(false);
   const [batchInput, setBatchInput] = useState('');
   const [importTaskId, setImportTaskId] = useState<string | null>(null);
-  const [batchFormApi, setBatchFormApi] = useState<BatchImportFormApi | null>(null);
   const [editingAddress, setEditingAddress] = useState<WatchedAddress | null>(null);
   const [chainRows, setChainRows] = useState<ChainRow[]>([emptyChainRow()]);
+  const [batchChainRows, setBatchChainRows] = useState<ChainRow[]>([emptyChainRow()]);
   const queryClient = useQueryClient();
   const addressesQuery = useQuery({ queryKey: ['addresses'], queryFn: listWatchedAddresses });
   const chainsQuery = useQuery({ queryKey: ['chains'], queryFn: listChains });
@@ -78,6 +76,8 @@ export function AddressesPage() {
   const assetMap = useMemo(() => new Map((assetsQuery.data ?? []).map(asset => [asset.id, asset])), [assetsQuery.data]);
   const parsedImport = useMemo(() => parseAddressImportInput(batchInput), [batchInput]);
   const importableRows = parsedImport.rows.filter(row => !row.error);
+  const selectedBatchChainCount = batchChainRows.filter(row => row.chain_id && row.asset_ids.length > 0).length;
+  const batchAttemptCount = importableRows.length * selectedBatchChainCount;
 
   useEffect(() => {
     if (!importTaskId || !isTerminalImportStatus(importTaskQuery.data?.status)) return;
@@ -132,28 +132,36 @@ export function AddressesPage() {
   });
 
   const createImportMutation = useMutation({
-    mutationFn: (values: Record<string, unknown>) => createWatchedAddressImport({
-      defaults: {
-        chain_id: String(values.chain_id),
-        asset_ids: Array.isArray(values.asset_ids) ? values.asset_ids.map(String) : [],
-        priority: String(values.priority),
-        scan_interval_seconds: Number(values.scan_interval_seconds),
-        transfer_filter_enabled: Boolean(values.transfer_filter_enabled),
-        balance_change_filter_enabled: Boolean(values.balance_change_filter_enabled),
-        status: String(values.status),
-      },
-      rows: importableRows.map(row => ({
-        row_number: row.row_number,
-        raw_text: row.raw_text,
-        address: row.address,
-        label: row.label ?? null,
-        priority: row.priority ?? null,
-        scan_interval_seconds: row.scan_interval_seconds ?? null,
-        transfer_filter_enabled: row.transfer_filter_enabled ?? null,
-        balance_change_filter_enabled: row.balance_change_filter_enabled ?? null,
-        status: row.status ?? null,
-      })),
-    }),
+    mutationFn: (values: Record<string, unknown>) => {
+      const chainConfigs = normalizedBatchChainConfigs();
+      const firstConfig = chainConfigs[0];
+      if (!firstConfig) {
+        throw new Error('至少添加一条链配置');
+      }
+      return createWatchedAddressImport({
+        defaults: {
+          chain_id: firstConfig.chain_id,
+          asset_ids: firstConfig.asset_ids,
+          chain_configs: chainConfigs,
+          priority: String(values.priority),
+          scan_interval_seconds: Number(values.scan_interval_seconds),
+          transfer_filter_enabled: Boolean(values.transfer_filter_enabled),
+          balance_change_filter_enabled: Boolean(values.balance_change_filter_enabled),
+          status: String(values.status),
+        },
+        rows: importableRows.map(row => ({
+          row_number: row.row_number,
+          raw_text: row.raw_text,
+          address: row.address,
+          label: row.label ?? null,
+          priority: row.priority ?? null,
+          scan_interval_seconds: row.scan_interval_seconds ?? null,
+          transfer_filter_enabled: row.transfer_filter_enabled ?? null,
+          balance_change_filter_enabled: row.balance_change_filter_enabled ?? null,
+          status: row.status ?? null,
+        })),
+      });
+    },
     onSuccess: task => {
       Toast.success('导入任务已创建');
       setImportTaskId(task.id);
@@ -226,6 +234,13 @@ export function AddressesPage() {
     resetCreateForm();
   }
 
+  function openBatchModal() {
+    setBatchInput('');
+    setImportTaskId(null);
+    setBatchChainRows([emptyChainRow()]);
+    setBatchVisible(true);
+  }
+
   function closeBatchModal() {
     setBatchVisible(false);
   }
@@ -242,8 +257,36 @@ export function AddressesPage() {
     setChainRows(rows => rows.map(row => row.id === rowId ? { ...row, ...patch } : row));
   }
 
-  function handleBatchChainChange() {
-    batchFormApi?.setValue('asset_ids', []);
+  function addBatchChainRow() {
+    setBatchChainRows(rows => [...rows, emptyChainRow()]);
+  }
+
+  function removeBatchChainRow(rowId: string) {
+    setBatchChainRows(rows => rows.length === 1 ? rows : rows.filter(row => row.id !== rowId));
+  }
+
+  function updateBatchChainRow(rowId: string, patch: Partial<Pick<ChainRow, 'chain_id' | 'asset_ids'>>) {
+    setBatchChainRows(rows => rows.map(row => row.id === rowId ? { ...row, ...patch } : row));
+  }
+
+  function normalizedBatchChainConfigs() {
+    if (batchChainRows.length === 0) {
+      throw new Error('至少添加一条链配置');
+    }
+    const seen = new Set<string>();
+    return batchChainRows.map(row => {
+      if (!row.chain_id) {
+        throw new Error('请选择链');
+      }
+      if (!row.asset_ids.length) {
+        throw new Error('每条链至少选择一个资产');
+      }
+      if (seen.has(row.chain_id)) {
+        throw new Error('不能重复选择链');
+      }
+      seen.add(row.chain_id);
+      return { chain_id: row.chain_id, asset_ids: row.asset_ids };
+    });
   }
 
   function basePayload(values: Record<string, unknown>) {
@@ -265,7 +308,7 @@ export function AddressesPage() {
   return (
     <PageScaffold title="监听地址" actions={(
       <Space>
-        <Button onClick={() => setBatchVisible(true)}>批量添加</Button>
+        <Button onClick={openBatchModal}>批量添加</Button>
         <Button onClick={openCreateModal}>新增地址</Button>
       </Space>
     )}>
@@ -383,7 +426,6 @@ export function AddressesPage() {
           onSubmit={values => createImportMutation.mutate(values)}
           labelPosition="left"
           labelWidth={130}
-          getFormApi={setBatchFormApi}
           initValues={{
             priority: 'normal',
             scan_interval_seconds: 300,
@@ -392,19 +434,42 @@ export function AddressesPage() {
             status: 'active',
           }}
         >
-          {({ formState }) => (
+          {() => (
             <>
-              <Form.Select field="chain_id" label="默认链" rules={[{ required: true, message: '请选择默认链' }]} filter onChange={handleBatchChainChange}>
-                {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}
-              </Form.Select>
-              <Form.Select
-                field="asset_ids"
-                label="监听资产"
-                multiple
-                filter
-                rules={[{ required: true, message: '请选择监听资产' }]}
-                optionList={assetOptionsForChain(String(formState.values?.chain_id ?? ''))}
-              />
+              <div className="address-chain-rows">
+                {batchChainRows.map((row, index) => (
+                  <Space key={row.id} align="start" style={{ width: '100%', marginBottom: 12 }}>
+                    <div style={{ width: 180 }}>
+                      <div style={{ marginBottom: 4 }}>{index === 0 ? '链配置' : '\u00a0'}</div>
+                      <Select
+                        value={row.chain_id}
+                        placeholder="选择链"
+                        style={{ width: '100%' }}
+                        onChange={value => updateBatchChainRow(row.id, {
+                          chain_id: typeof value === 'string' ? value : '',
+                          asset_ids: [],
+                        })}
+                      >
+                        {(chainsQuery.data ?? []).map(chain => <Select.Option key={chain.id} value={chain.id}>{chain.name}</Select.Option>)}
+                      </Select>
+                    </div>
+                    <div style={{ width: 260 }}>
+                      <div style={{ marginBottom: 4 }}>资产</div>
+                      <Select
+                        multiple
+                        filter
+                        value={row.asset_ids}
+                        placeholder="选择资产"
+                        optionList={assetOptionsForChain(row.chain_id)}
+                        style={{ width: '100%' }}
+                        onChange={value => updateBatchChainRow(row.id, { asset_ids: Array.isArray(value) ? value.map(String) : [] })}
+                      />
+                    </div>
+                    <Button htmlType="button" onClick={() => removeBatchChainRow(row.id)} disabled={batchChainRows.length === 1}>移除</Button>
+                  </Space>
+                ))}
+              </div>
+              <Button htmlType="button" onClick={addBatchChainRow} theme="borderless">新增链配置</Button>
               <Form.Select field="priority" label="默认优先级">
                 <Form.Select.Option value="normal">normal</Form.Select.Option>
                 <Form.Select.Option value="high">high</Form.Select.Option>
@@ -424,6 +489,11 @@ export function AddressesPage() {
                 placeholder="每行一个地址，或粘贴 address,label,priority CSV"
                 onChange={value => setBatchInput(String(value))}
               />
+              <Space wrap className="address-import-summary">
+                <Tag>有效地址 {importableRows.length}</Tag>
+                <Tag color="blue">链配置 {selectedBatchChainCount}</Tag>
+                <Tag color="green">预计创建尝试 {batchAttemptCount}</Tag>
+              </Space>
               <div className="address-import-section">
                 <DataTable
                   tableId="address-import-preview"
@@ -442,10 +512,10 @@ export function AddressesPage() {
               </div>
               {importTaskQuery.data ? (
                 <div className="address-import-progress">
-                  <div className="address-import-progress-title">导入进度</div>
+                  <div className="address-import-progress-title">导入进度（按地址-链尝试计数）</div>
                   <Progress percent={importProgress(importTaskQuery.data)} />
                   <Space wrap>
-                    <Tag>总数 {importTaskQuery.data.total_rows}</Tag>
+                    <Tag>总尝试 {importTaskQuery.data.total_rows}</Tag>
                     <Tag color="blue">已处理 {importTaskQuery.data.processed_rows}</Tag>
                     <Tag color="green">成功 {importTaskQuery.data.success_rows}</Tag>
                     <Tag color="red">失败 {importTaskQuery.data.failed_rows}</Tag>
@@ -454,14 +524,15 @@ export function AddressesPage() {
                 </div>
               ) : null}
               <div className="address-import-section">
-                <DataTable
+                <DataTable<WatchedAddressImportErrorRow>
                   tableId="address-import-errors"
                   dataSource={importErrorsQuery.data ?? []}
-                  rowKey="row_number"
+                  rowKey={row => row ? `${row.row_number}-${row.chain_id}` : ''}
                   pagination={{ pageSize: 10 }}
-                  scroll={{ x: 900 }}
+                  scroll={{ x: 1050 }}
                   columns={[
                     { title: '行号', dataIndex: 'row_number', width: 80 },
+                    { title: '链', dataIndex: 'chain_id', width: 160, render: (_, record) => record.chain_name ?? chainMap.get(String(record.chain_id)) ?? String(record.chain_id) },
                     { title: '地址', dataIndex: 'address', width: 320, className: 'table-cell-mono', ellipsis: { showTitle: true } },
                     { title: '原始内容', dataIndex: 'raw_text', width: 260, ellipsis: { showTitle: true } },
                     { title: '错误', dataIndex: 'error_message', width: 260, ellipsis: { showTitle: true } },
