@@ -16,18 +16,18 @@ pub const CLAIM_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
 WITH next_task AS (
     SELECT task.id
     FROM watched_address_import_tasks task
-    WHERE task.status = 'pending'
+    WHERE (task.status = 'pending'
        OR (
            task.status = 'running'
            AND task.locked_by = $2
-           AND EXISTS (
-               SELECT 1
-               FROM watched_address_import_rows import_row
-               WHERE import_row.import_task_id = task.id
-                 AND import_row.tenant_id = task.tenant_id
-                 AND import_row.status = 'pending'
-           )
-       )
+       ))
+      AND EXISTS (
+          SELECT 1
+          FROM watched_address_import_attempts attempt
+          WHERE attempt.import_task_id = task.id
+            AND attempt.tenant_id = task.tenant_id
+            AND attempt.status = 'pending'
+      )
     ORDER BY CASE
         WHEN task.status = 'running' AND task.locked_by = $2 THEN 0
         ELSE 1
@@ -47,10 +47,35 @@ WHERE task.id = next_task.id
 RETURNING task.id, task.tenant_id, task.status, task.chain_id, task.asset_ids,
           task.chain_configs, task.priority, task.scan_interval_seconds,
           task.transfer_filter_enabled, task.balance_change_filter_enabled,
-          task.address_status, task.total_rows,
-          task.processed_rows, task.success_rows, task.failed_rows, task.locked_at,
-          task.locked_by, task.started_at, task.completed_at, task.last_error,
-          task.created_at, task.updated_at
+          task.address_status, task.total_rows, task.processed_rows,
+          task.success_rows, task.failed_rows, task.locked_at, task.locked_by,
+          task.started_at, task.completed_at, task.last_error, task.created_at,
+          task.updated_at
+"#;
+
+pub const PENDING_IMPORT_ATTEMPTS_QUERY: &str = r#"
+SELECT attempt.id AS attempt_id,
+       attempt.row_number,
+       import_row.raw_text,
+       import_row.address,
+       import_row.label,
+       import_row.priority,
+       import_row.scan_interval_seconds,
+       import_row.transfer_filter_enabled,
+       import_row.balance_change_filter_enabled,
+       import_row.address_status AS status,
+       attempt.chain_id,
+       attempt.asset_ids
+FROM watched_address_import_attempts attempt
+JOIN watched_address_import_rows import_row
+  ON import_row.import_task_id = attempt.import_task_id
+ AND import_row.tenant_id = attempt.tenant_id
+ AND import_row.row_number = attempt.row_number
+WHERE attempt.import_task_id = $1
+  AND attempt.tenant_id = $2
+  AND attempt.status = 'pending'
+ORDER BY attempt.row_number ASC, attempt.chain_id ASC
+LIMIT $3
 "#;
 
 pub const PENDING_IMPORT_ROWS_QUERY: &str = r#"
@@ -62,6 +87,29 @@ WHERE import_task_id = $1
   AND status = 'pending'
 ORDER BY row_number ASC
 LIMIT $3
+"#;
+
+pub const MARK_IMPORT_ATTEMPT_SUCCESS_QUERY: &str = r#"
+UPDATE watched_address_import_attempts
+SET status = 'success',
+    watched_address_id = $3,
+    error_code = NULL,
+    error_message = NULL,
+    updated_at = NOW()
+WHERE id = $1
+  AND tenant_id = $2
+  AND status = 'pending'
+"#;
+
+pub const MARK_IMPORT_ATTEMPT_FAILED_QUERY: &str = r#"
+UPDATE watched_address_import_attempts
+SET status = 'failed',
+    error_code = $3,
+    error_message = $4,
+    updated_at = NOW()
+WHERE id = $1
+  AND tenant_id = $2
+  AND status = 'pending'
 "#;
 
 pub const MARK_IMPORT_ROW_SUCCESS_QUERY: &str = r#"
@@ -99,7 +147,7 @@ FROM (
     SELECT COUNT(*) FILTER (WHERE status IN ('success', 'failed', 'skipped'))::int AS processed_rows,
            COUNT(*) FILTER (WHERE status = 'success')::int AS success_rows,
            COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_rows
-    FROM watched_address_import_rows
+    FROM watched_address_import_attempts
     WHERE import_task_id = $1
       AND tenant_id = $2
 ) counts
@@ -108,10 +156,10 @@ WHERE task.id = $1
 RETURNING task.id, task.tenant_id, task.status, task.chain_id, task.asset_ids,
           task.chain_configs, task.priority, task.scan_interval_seconds,
           task.transfer_filter_enabled, task.balance_change_filter_enabled,
-          task.address_status, task.total_rows,
-          task.processed_rows, task.success_rows, task.failed_rows, task.locked_at,
-          task.locked_by, task.started_at, task.completed_at, task.last_error,
-          task.created_at, task.updated_at
+          task.address_status, task.total_rows, task.processed_rows,
+          task.success_rows, task.failed_rows, task.locked_at, task.locked_by,
+          task.started_at, task.completed_at, task.last_error, task.created_at,
+          task.updated_at
 "#;
 
 pub const COMPLETE_IMPORT_IF_FINISHED_QUERY: &str = r#"
@@ -127,7 +175,8 @@ WHERE id = $1
 RETURNING id, tenant_id, status, chain_id, asset_ids, chain_configs, priority,
           scan_interval_seconds, transfer_filter_enabled, balance_change_filter_enabled,
           address_status, total_rows, processed_rows, success_rows, failed_rows,
-          locked_at, locked_by, started_at, completed_at, last_error, created_at, updated_at
+          locked_at, locked_by, started_at, completed_at, last_error, created_at,
+          updated_at
 "#;
 
 pub const CREATE_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
@@ -159,43 +208,56 @@ VALUES ($1, $2, $3, $4, $5)
 "#;
 
 const GET_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
-SELECT id, tenant_id, status, chain_id, asset_ids, chain_configs, priority, scan_interval_seconds,
-       transfer_filter_enabled, balance_change_filter_enabled, address_status,
-       total_rows, processed_rows, success_rows, failed_rows, locked_at, locked_by,
-       started_at, completed_at, last_error, created_at, updated_at
+SELECT id, tenant_id, status, chain_id, asset_ids, chain_configs, priority,
+       scan_interval_seconds, transfer_filter_enabled, balance_change_filter_enabled,
+       address_status, total_rows, processed_rows, success_rows, failed_rows,
+       locked_at, locked_by, started_at, completed_at, last_error, created_at,
+       updated_at
 FROM watched_address_import_tasks
 WHERE id = $1
   AND tenant_id = $2
 "#;
 
-const LIST_WATCHED_ADDRESS_IMPORT_ERRORS_QUERY: &str = r#"
-SELECT row_number, address, raw_text, error_code, error_message
-FROM watched_address_import_rows
-WHERE import_task_id = $1
-  AND tenant_id = $2
-  AND status = 'failed'
-ORDER BY row_number ASC
+pub const LIST_WATCHED_ADDRESS_IMPORT_ERRORS_QUERY: &str = r#"
+SELECT attempt.row_number,
+       import_row.address,
+       import_row.raw_text,
+       attempt.chain_id,
+       chain.name AS chain_name,
+       attempt.error_code,
+       attempt.error_message
+FROM watched_address_import_attempts attempt
+JOIN watched_address_import_rows import_row
+  ON import_row.import_task_id = attempt.import_task_id
+ AND import_row.tenant_id = attempt.tenant_id
+ AND import_row.row_number = attempt.row_number
+LEFT JOIN chains chain
+  ON chain.id = attempt.chain_id
+WHERE attempt.import_task_id = $1
+  AND attempt.tenant_id = $2
+  AND attempt.status = 'failed'
+ORDER BY attempt.row_number ASC, chain.name ASC, attempt.chain_id ASC
 "#;
 
-const CANCEL_WATCHED_ADDRESS_IMPORT_ROWS_QUERY: &str = r#"
-UPDATE watched_address_import_rows import_row
+pub const CANCEL_WATCHED_ADDRESS_IMPORT_ATTEMPTS_QUERY: &str = r#"
+UPDATE watched_address_import_attempts attempt
 SET status = 'skipped',
     error_code = 'cancelled',
     error_message = 'import task cancelled',
     updated_at = NOW()
-WHERE import_row.import_task_id = $1
-  AND import_row.tenant_id = $2
-  AND import_row.status = 'pending'
+WHERE attempt.import_task_id = $1
+  AND attempt.tenant_id = $2
+  AND attempt.status = 'pending'
   AND EXISTS (
       SELECT 1
       FROM watched_address_import_tasks task
-      WHERE task.id = import_row.import_task_id
-        AND task.tenant_id = import_row.tenant_id
+      WHERE task.id = attempt.import_task_id
+        AND task.tenant_id = attempt.tenant_id
         AND task.status IN ('pending', 'running')
   )
 "#;
 
-const CANCEL_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
+pub const CANCEL_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
 UPDATE watched_address_import_tasks task
 SET status = 'cancelled',
     processed_rows = counts.processed_rows,
@@ -209,7 +271,7 @@ FROM (
     SELECT COUNT(*) FILTER (WHERE status IN ('success', 'failed', 'skipped'))::int AS processed_rows,
            COUNT(*) FILTER (WHERE status = 'success')::int AS success_rows,
            COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_rows
-    FROM watched_address_import_rows
+    FROM watched_address_import_attempts
     WHERE import_task_id = $1
       AND tenant_id = $2
 ) counts
@@ -219,10 +281,20 @@ WHERE task.id = $1
 RETURNING task.id, task.tenant_id, task.status, task.chain_id, task.asset_ids,
           task.chain_configs, task.priority, task.scan_interval_seconds,
           task.transfer_filter_enabled, task.balance_change_filter_enabled,
-          task.address_status, task.total_rows,
-          task.processed_rows, task.success_rows, task.failed_rows, task.locked_at,
-          task.locked_by, task.started_at, task.completed_at, task.last_error,
-          task.created_at, task.updated_at
+          task.address_status, task.total_rows, task.processed_rows,
+          task.success_rows, task.failed_rows, task.locked_at, task.locked_by,
+          task.started_at, task.completed_at, task.last_error, task.created_at,
+          task.updated_at
+"#;
+
+const PENDING_IMPORT_ATTEMPT_EXISTS_QUERY: &str = r#"
+SELECT EXISTS (
+    SELECT 1
+    FROM watched_address_import_attempts
+    WHERE import_task_id = $1
+      AND tenant_id = $2
+      AND status = 'pending'
+)
 "#;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -291,6 +363,22 @@ struct WatchedAddressImportRow {
     transfer_filter_enabled: Option<bool>,
     balance_change_filter_enabled: Option<bool>,
     status: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct WatchedAddressImportAttempt {
+    pub attempt_id: Uuid,
+    pub row_number: i32,
+    pub raw_text: String,
+    pub address: String,
+    pub label: Option<String>,
+    pub priority: Option<String>,
+    pub scan_interval_seconds: Option<i32>,
+    pub transfer_filter_enabled: Option<bool>,
+    pub balance_change_filter_enabled: Option<bool>,
+    pub status: Option<String>,
+    pub chain_id: Uuid,
+    pub asset_ids: Vec<Uuid>,
 }
 
 impl From<WatchedAddressImportRow> for WatchedAddressImportRowRequest {
@@ -555,7 +643,7 @@ pub async fn cancel_watched_address_import(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    sqlx::query(CANCEL_WATCHED_ADDRESS_IMPORT_ROWS_QUERY)
+    sqlx::query(CANCEL_WATCHED_ADDRESS_IMPORT_ATTEMPTS_QUERY)
         .bind(id)
         .bind(tenant_id)
         .execute(transaction.as_mut())
@@ -594,6 +682,25 @@ pub async fn claim_next_watched_address_import(
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
+pub async fn pending_import_attempts(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    task_id: Uuid,
+    limit: i64,
+) -> AppResult<Vec<WatchedAddressImportAttempt>> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+
+    sqlx::query_as::<_, WatchedAddressImportAttempt>(PENDING_IMPORT_ATTEMPTS_QUERY)
+        .bind(task_id)
+        .bind(tenant_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
 pub async fn pending_import_rows(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -613,6 +720,42 @@ pub async fn pending_import_rows(
         .map_err(|error| AppError::Database(error.to_string()))?;
 
     Ok(rows.into_iter().map(Into::into).collect())
+}
+
+pub async fn mark_import_attempt_success(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    attempt_id: Uuid,
+    watched_address_id: Uuid,
+) -> AppResult<()> {
+    let result = sqlx::query(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY)
+        .bind(attempt_id)
+        .bind(tenant_id)
+        .bind(watched_address_id)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    ensure_import_attempt_updated(result.rows_affected())
+}
+
+pub async fn mark_import_attempt_failed(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    attempt_id: Uuid,
+    error_code: &str,
+    error_message: &str,
+) -> AppResult<()> {
+    let result = sqlx::query(MARK_IMPORT_ATTEMPT_FAILED_QUERY)
+        .bind(attempt_id)
+        .bind(tenant_id)
+        .bind(error_code)
+        .bind(error_message)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    ensure_import_attempt_updated(result.rows_affected())
 }
 
 pub async fn mark_import_row_success(
@@ -677,10 +820,17 @@ pub async fn complete_import_if_finished(
     now: DateTime<Utc>,
 ) -> AppResult<WatchedAddressImportTask> {
     let task = refresh_import_task_counts(pool, tenant_id, task_id).await?;
-    if task.status == "cancelled"
-        || task.processed_rows < task.total_rows
-        || task.status != "running"
-    {
+    if task.status == "cancelled" || task.status != "running" {
+        return Ok(task);
+    }
+
+    let has_pending_attempts = sqlx::query_scalar::<_, bool>(PENDING_IMPORT_ATTEMPT_EXISTS_QUERY)
+        .bind(task_id)
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    if has_pending_attempts {
         return Ok(task);
     }
 
@@ -702,6 +852,16 @@ pub async fn complete_import_if_finished(
         .map_or(Ok(task), Ok)
 }
 
+fn ensure_import_attempt_updated(rows_affected: u64) -> AppResult<()> {
+    if rows_affected == 0 {
+        return Err(AppError::NotFound(
+            "watched address import attempt".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn ensure_import_row_updated(rows_affected: u64) -> AppResult<()> {
     if rows_affected == 0 {
         return Err(AppError::NotFound("watched address import row".to_string()));
@@ -714,9 +874,12 @@ fn ensure_import_row_updated(rows_affected: u64) -> AppResult<()> {
 mod tests {
     use super::{
         effective_import_chain_configs, import_create_plan, validate_import_create_request,
-        ImportAttemptSeed, CLAIM_WATCHED_ADDRESS_IMPORT_QUERY, CREATE_WATCHED_ADDRESS_IMPORT_QUERY,
-        INSERT_IMPORT_ATTEMPT_QUERY, MARK_IMPORT_ROW_FAILED_QUERY, MARK_IMPORT_ROW_SUCCESS_QUERY,
-        PENDING_IMPORT_ROWS_QUERY, REFRESH_IMPORT_TASK_COUNTS_QUERY,
+        ImportAttemptSeed, CANCEL_WATCHED_ADDRESS_IMPORT_ATTEMPTS_QUERY,
+        CANCEL_WATCHED_ADDRESS_IMPORT_QUERY, CLAIM_WATCHED_ADDRESS_IMPORT_QUERY,
+        CREATE_WATCHED_ADDRESS_IMPORT_QUERY, INSERT_IMPORT_ATTEMPT_QUERY,
+        LIST_WATCHED_ADDRESS_IMPORT_ERRORS_QUERY, MARK_IMPORT_ATTEMPT_FAILED_QUERY,
+        MARK_IMPORT_ATTEMPT_SUCCESS_QUERY, PENDING_IMPORT_ATTEMPTS_QUERY,
+        REFRESH_IMPORT_TASK_COUNTS_QUERY,
     };
     use coin_listener_core::models::{
         CreateWatchedAddressImportRequest, WatchedAddressImportChainConfig,
@@ -966,27 +1129,57 @@ mod tests {
     }
 
     #[test]
-    fn claim_query_uses_skip_locked() {
-        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("FOR UPDATE SKIP LOCKED"));
-        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("status = 'pending'"));
-    }
-
-    #[test]
-    fn claim_query_resumes_running_tasks_for_same_worker() {
-        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("status = 'running'"));
+    fn claim_query_resumes_running_tasks_from_pending_attempts() {
+        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("watched_address_import_attempts"));
+        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("attempt.status = 'pending'"));
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("locked_by = $2"));
-        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("EXISTS"));
+        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("FOR UPDATE SKIP LOCKED"));
     }
 
     #[test]
-    fn row_processing_queries_are_tenant_scoped() {
+    fn attempt_processing_queries_are_tenant_scoped() {
         for query in [
-            PENDING_IMPORT_ROWS_QUERY,
-            MARK_IMPORT_ROW_SUCCESS_QUERY,
-            MARK_IMPORT_ROW_FAILED_QUERY,
+            PENDING_IMPORT_ATTEMPTS_QUERY,
+            MARK_IMPORT_ATTEMPT_SUCCESS_QUERY,
+            MARK_IMPORT_ATTEMPT_FAILED_QUERY,
             REFRESH_IMPORT_TASK_COUNTS_QUERY,
         ] {
             assert!(query.contains("tenant_id = $2"), "{query}");
         }
+    }
+
+    #[test]
+    fn pending_attempts_join_source_rows_for_row_metadata() {
+        assert!(PENDING_IMPORT_ATTEMPTS_QUERY.contains("watched_address_import_attempts attempt"));
+        assert!(
+            PENDING_IMPORT_ATTEMPTS_QUERY.contains("JOIN watched_address_import_rows import_row")
+        );
+        assert!(PENDING_IMPORT_ATTEMPTS_QUERY.contains("attempt.chain_id"));
+        assert!(PENDING_IMPORT_ATTEMPTS_QUERY.contains("attempt.asset_ids"));
+    }
+
+    #[test]
+    fn progress_counts_are_refreshed_from_attempts() {
+        assert!(REFRESH_IMPORT_TASK_COUNTS_QUERY.contains("FROM watched_address_import_attempts"));
+        assert!(
+            REFRESH_IMPORT_TASK_COUNTS_QUERY.contains("status IN ('success', 'failed', 'skipped')")
+        );
+    }
+
+    #[test]
+    fn error_query_returns_chain_context() {
+        assert!(LIST_WATCHED_ADDRESS_IMPORT_ERRORS_QUERY.contains("attempt.chain_id"));
+        assert!(LIST_WATCHED_ADDRESS_IMPORT_ERRORS_QUERY.contains("chain.name AS chain_name"));
+        assert!(LIST_WATCHED_ADDRESS_IMPORT_ERRORS_QUERY.contains("LEFT JOIN chains chain"));
+    }
+
+    #[test]
+    fn cancel_query_marks_pending_attempts_skipped() {
+        assert!(CANCEL_WATCHED_ADDRESS_IMPORT_ATTEMPTS_QUERY
+            .contains("watched_address_import_attempts"));
+        assert!(CANCEL_WATCHED_ADDRESS_IMPORT_ATTEMPTS_QUERY.contains("status = 'skipped'"));
+        assert!(
+            CANCEL_WATCHED_ADDRESS_IMPORT_QUERY.contains("FROM watched_address_import_attempts")
+        );
     }
 }
