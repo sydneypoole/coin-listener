@@ -139,6 +139,38 @@ impl BtcClient {
         }
     }
 
+    pub fn tip_height_path(&self) -> &'static str {
+        "/blocks/tip/height"
+    }
+
+    pub async fn tip_height(&self) -> AppResult<i64> {
+        let path = self.tip_height_path();
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
+        let response = self.client.get(&url).send().await.map_err(|error| {
+            AppError::Config(format_btc_request_error(
+                "tip height",
+                &self.base_url,
+                &error.without_url().to_string(),
+            ))
+        })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|error| {
+            AppError::Config(format!(
+                "BTC tip height response body failed: {}",
+                error.without_url()
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(AppError::Config(format_btc_status_error(
+                "tip height",
+                &self.base_url,
+                status,
+                &body,
+            )));
+        }
+        parse_btc_tip_height(&body)
+    }
+
     pub async fn address_balance(&self, address: &str) -> AppResult<BtcBalance> {
         let path = self.address_path(address)?;
         let body = self.get_json_body("address balance", &path).await?;
@@ -208,6 +240,18 @@ pub fn decode_btc_transaction_page(body: Value) -> AppResult<BtcTransactionPage>
         transactions,
         next_last_seen_txid,
     })
+}
+
+pub fn parse_btc_tip_height(payload: &str) -> AppResult<i64> {
+    let value = payload.trim().parse::<i64>().map_err(|error| {
+        AppError::Validation(format!("invalid BTC tip height {payload:?}: {error}"))
+    })?;
+    if value < 0 {
+        return Err(AppError::Validation(format!(
+            "invalid BTC tip height {payload:?}: must be non-negative"
+        )));
+    }
+    Ok(value)
 }
 
 pub fn format_btc_request_error(operation: &str, base_url: &str, error: &str) -> String {
@@ -491,6 +535,35 @@ mod tests {
             client.address_txs_path(address).unwrap(),
             format!("/address/{address}/txs/chain")
         );
+    }
+
+    #[test]
+    fn btc_tip_height_path_targets_esplora_tip_height() {
+        let client = super::BtcClient::new(
+            "https://mempool.space/api/".to_string(),
+            std::time::Duration::from_secs(5),
+        );
+
+        assert_eq!(client.tip_height_path(), "/blocks/tip/height");
+    }
+
+    #[test]
+    fn btc_tip_height_parser_accepts_non_negative_integer_text() {
+        assert_eq!(super::parse_btc_tip_height("840000").unwrap(), 840000);
+        assert_eq!(super::parse_btc_tip_height(" 0\n").unwrap(), 0);
+    }
+
+    #[test]
+    fn btc_tip_height_parser_rejects_invalid_or_negative_text() {
+        for payload in ["", "not-a-number", "-1", "1.2"] {
+            let error = super::parse_btc_tip_height(payload)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("invalid BTC tip height"),
+                "{payload}: {error}"
+            );
+        }
     }
 
     #[test]
