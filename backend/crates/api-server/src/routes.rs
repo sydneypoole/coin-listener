@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{Duration, Utc};
-use coin_listener_chain_providers::evm::EvmRpcClient;
+use coin_listener_chain_providers::{btc::BtcClient, evm::EvmRpcClient, tron::TronClient};
 use coin_listener_core::{
     models::{
         CreateNotificationChannelRequest, CreateNotificationRuleRequest, CreateProviderRequest,
@@ -65,6 +65,38 @@ pub struct ProviderTestResponse {
     pub ok: bool,
     pub message: String,
     pub latest_block: Option<i64>,
+    pub chain_type: String,
+    pub provider_type: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderTestKind {
+    EvmRpc,
+    TronRest,
+    BtcRest,
+}
+
+pub fn provider_test_kind(chain_type: &str, provider_type: &str) -> AppResult<ProviderTestKind> {
+    match (chain_type, provider_type) {
+        (_, "websocket") => Err(AppError::Validation(
+            "provider connectivity test does not support websocket providers".to_string(),
+        )),
+        ("evm", "rpc") => Ok(ProviderTestKind::EvmRpc),
+        ("tron", "rest_api" | "rpc") => Ok(ProviderTestKind::TronRest),
+        ("utxo", "rest_api") => Ok(ProviderTestKind::BtcRest),
+        ("evm", other) => Err(AppError::Validation(format!(
+            "provider connectivity test does not support {other} providers for evm chains"
+        ))),
+        ("tron", other) => Err(AppError::Validation(format!(
+            "provider connectivity test does not support {other} providers for tron chains"
+        ))),
+        ("utxo", other) => Err(AppError::Validation(format!(
+            "provider connectivity test does not support {other} providers for utxo chains"
+        ))),
+        (chain_type, _) => Err(AppError::Validation(format!(
+            "provider connectivity test does not support {chain_type} chains"
+        ))),
+    }
 }
 
 pub fn build_router(state: Arc<ApiState>) -> Router {
@@ -327,10 +359,6 @@ async fn test_provider(
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let provider = repositories::get_provider(&state.postgres, id).await?;
-    if provider.provider_type != "rpc" {
-        return Err(AppError::Validation("only rpc providers can be tested".to_string()).into());
-    }
-
     let timeout_ms = u64::try_from(provider.timeout_ms)
         .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
     if timeout_ms == 0 {
@@ -338,19 +366,36 @@ async fn test_provider(
     }
 
     let chain = repositories::chain_by_id(&state.postgres, provider.chain_id).await?;
-    if chain.chain_type != "evm" {
-        return Err(AppError::Validation(
-            "provider connectivity test currently supports EVM RPC only".to_string(),
-        )
-        .into());
-    }
+    let timeout = StdDuration::from_millis(timeout_ms);
+    let kind = provider_test_kind(&chain.chain_type, &provider.provider_type)?;
 
-    let client = EvmRpcClient::new(provider.base_url, StdDuration::from_millis(timeout_ms));
-    let latest_block = client.eth_block_number().await?;
+    let (message, latest_block) = match kind {
+        ProviderTestKind::EvmRpc => {
+            let client = EvmRpcClient::new(provider.base_url.clone(), timeout);
+            let latest_block = client.eth_block_number().await?;
+            ("EVM RPC reachable".to_string(), Some(latest_block))
+        }
+        ProviderTestKind::TronRest => {
+            let client = TronClient::new(provider.base_url.clone(), timeout);
+            client.test_connectivity().await?;
+            ("TRON REST provider reachable".to_string(), None)
+        }
+        ProviderTestKind::BtcRest => {
+            let client = BtcClient::new(provider.base_url.clone(), timeout);
+            let latest_block = client.tip_height().await?;
+            (
+                "BTC REST provider reachable".to_string(),
+                Some(latest_block),
+            )
+        }
+    };
+
     Ok(Json(ProviderTestResponse {
         ok: true,
-        message: "provider rpc reachable".to_string(),
-        latest_block: Some(latest_block),
+        message,
+        latest_block,
+        chain_type: chain.chain_type,
+        provider_type: provider.provider_type,
     })
     .into_response())
 }
@@ -1040,6 +1085,72 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production source is present")
+    }
+
+    #[test]
+    fn provider_test_response_includes_chain_and_provider_type() {
+        let response = super::ProviderTestResponse {
+            ok: true,
+            message: "TRON REST provider reachable".to_string(),
+            latest_block: None,
+            chain_type: "tron".to_string(),
+            provider_type: "rest_api".to_string(),
+        };
+        let json = serde_json::to_value(response).unwrap();
+
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["message"], "TRON REST provider reachable");
+        assert!(json["latest_block"].is_null());
+        assert_eq!(json["chain_type"], "tron");
+        assert_eq!(json["provider_type"], "rest_api");
+    }
+
+    #[test]
+    fn provider_test_dispatch_supports_evm_tron_and_utxo_only() {
+        assert_eq!(
+            super::provider_test_kind("evm", "rpc").unwrap(),
+            super::ProviderTestKind::EvmRpc
+        );
+        assert_eq!(
+            super::provider_test_kind("tron", "rest_api").unwrap(),
+            super::ProviderTestKind::TronRest
+        );
+        assert_eq!(
+            super::provider_test_kind("tron", "rpc").unwrap(),
+            super::ProviderTestKind::TronRest
+        );
+        assert_eq!(
+            super::provider_test_kind("utxo", "rest_api").unwrap(),
+            super::ProviderTestKind::BtcRest
+        );
+
+        let websocket = super::provider_test_kind("evm", "websocket")
+            .unwrap_err()
+            .to_string();
+        assert!(websocket.contains("websocket providers"));
+
+        let utxo_rpc = super::provider_test_kind("utxo", "rpc")
+            .unwrap_err()
+            .to_string();
+        assert!(utxo_rpc.contains("rpc providers for utxo chains"));
+
+        let evm_rest = super::provider_test_kind("evm", "rest_api")
+            .unwrap_err()
+            .to_string();
+        assert!(evm_rest.contains("rest_api providers for evm chains"));
+    }
+
+    #[test]
+    fn provider_test_handler_source_uses_all_supported_clients() {
+        let source = include_str!("routes.rs");
+        assert!(source.contains("BtcClient"));
+        assert!(source.contains("TronClient"));
+        assert!(source.contains("ProviderTestKind::EvmRpc"));
+        assert!(source.contains("ProviderTestKind::TronRest"));
+        assert!(source.contains("ProviderTestKind::BtcRest"));
+        assert!(source.contains("eth_block_number().await"));
+        assert!(source.contains("test_connectivity().await"));
+        assert!(source.contains("tip_height().await"));
     }
 
     #[test]
