@@ -591,6 +591,25 @@ mod tests {
     }
 
     #[test]
+    fn multi_chain_import_migration_defines_attempt_storage() {
+        let migration = include_str!("../migrations/0018_multi_chain_address_import_attempts.sql");
+
+        assert!(migration
+            .contains("ADD COLUMN IF NOT EXISTS chain_configs JSONB NOT NULL DEFAULT '[]'::jsonb"));
+        assert!(migration.contains("CREATE TABLE IF NOT EXISTS watched_address_import_attempts"));
+        assert!(migration.contains(
+            "import_task_id UUID NOT NULL REFERENCES watched_address_import_tasks(id) ON DELETE CASCADE"
+        ));
+        assert!(migration.contains("asset_ids UUID[] NOT NULL"));
+        assert!(migration.contains("status IN ('pending', 'success', 'failed', 'skipped')"));
+        assert!(migration.contains("watched_address_import_attempts_unique_row_chain"));
+        assert!(migration.contains("watched_address_import_attempts_source_row_fk"));
+        assert!(migration.contains("idx_watched_address_import_attempts_task_status"));
+        assert!(migration.contains("jsonb_build_array"));
+        assert!(migration.contains("INSERT INTO watched_address_import_attempts"));
+    }
+
+    #[test]
     fn claim_query_uses_skip_locked() {
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("FOR UPDATE SKIP LOCKED"));
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("status = 'pending'"));
