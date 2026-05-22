@@ -550,6 +550,7 @@ mod tests {
             defaults: WatchedAddressImportDefaults {
                 chain_id: Uuid::from_u128(2),
                 asset_ids: vec![Uuid::from_u128(101)],
+                chain_configs: Vec::new(),
                 priority: "normal".to_string(),
                 scan_interval_seconds: 300,
                 transfer_filter_enabled: true,
