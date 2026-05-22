@@ -1,10 +1,14 @@
-use coin_listener_core::models::AddressEvent;
+use coin_listener_core::{models::AddressEvent, proxy::normalize_proxy_url, AppError};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::Sha256;
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,14 +116,58 @@ pub fn telegram_binding_confirmation_text(chat_name: &str) -> String {
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone)]
+pub struct TelegramClientResolver {
+    direct_client: Client,
+    proxy_clients: Arc<RwLock<HashMap<String, Client>>>,
+}
+
+impl TelegramClientResolver {
+    pub fn new(direct_client: Client) -> Self {
+        Self {
+            direct_client,
+            proxy_clients: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub fn client_for(&self, proxy_url: Option<&str>) -> Result<Client, AppError> {
+        let Some(proxy_url) = normalize_proxy_url(proxy_url)? else {
+            return Ok(self.direct_client.clone());
+        };
+        if let Some(client) = self
+            .proxy_clients
+            .read()
+            .expect("telegram proxy client cache lock is poisoned")
+            .get(&proxy_url)
+            .cloned()
+        {
+            return Ok(client);
+        }
+
+        let client = Client::builder()
+            .proxy(reqwest::Proxy::all(&proxy_url).map_err(|error| {
+                AppError::Validation(format!("proxy_url is invalid for Telegram: {error}"))
+            })?)
+            .build()
+            .map_err(|error| AppError::Config(format!("Telegram proxy client failed: {error}")))?;
+        self.proxy_clients
+            .write()
+            .expect("telegram proxy client cache lock is poisoned")
+            .insert(proxy_url, client.clone());
+        Ok(client)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ExternalNotificationSender {
     client: Client,
+    telegram_clients: TelegramClientResolver,
     telegram_api_base_url: String,
 }
 
 impl ExternalNotificationSender {
     pub fn new(client: Client) -> Self {
         Self {
+            telegram_clients: TelegramClientResolver::new(client.clone()),
             client,
             telegram_api_base_url: "https://api.telegram.org".to_string(),
         }
@@ -128,6 +176,7 @@ impl ExternalNotificationSender {
     #[cfg(test)]
     fn with_telegram_api_base_url(client: Client, telegram_api_base_url: String) -> Self {
         Self {
+            telegram_clients: TelegramClientResolver::new(client.clone()),
             client,
             telegram_api_base_url,
         }
@@ -138,10 +187,21 @@ impl ExternalNotificationSender {
         config: &TelegramChannelConfig,
         bot_token: &str,
         text: &str,
+        proxy_url: Option<&str>,
     ) -> ExternalSendOutcome {
+        let client = match self.telegram_clients.client_for(proxy_url) {
+            Ok(client) => client,
+            Err(error) => {
+                return ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+                    last_error: Some(error.to_string()),
+                    provider_message_id: None,
+                    provider_status_code: None,
+                    provider_response: None,
+                })
+            }
+        };
         let url = self.telegram_bot_method_url(bot_token, "sendMessage");
-        let response = self
-            .client
+        let response = client
             .post(&url)
             .timeout(Duration::from_millis(5000))
             .json(&serde_json::json!({
@@ -166,10 +226,24 @@ impl ExternalNotificationSender {
         }
     }
 
-    pub async fn verify_telegram_bot(&self, bot_token: &str) -> ExternalSendOutcome {
+    pub async fn verify_telegram_bot(
+        &self,
+        bot_token: &str,
+        proxy_url: Option<&str>,
+    ) -> ExternalSendOutcome {
+        let client = match self.telegram_clients.client_for(proxy_url) {
+            Ok(client) => client,
+            Err(error) => {
+                return ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+                    last_error: Some(error.to_string()),
+                    provider_message_id: None,
+                    provider_status_code: None,
+                    provider_response: None,
+                })
+            }
+        };
         let url = self.telegram_bot_method_url(bot_token, "getMe");
-        let response = self
-            .client
+        let response = client
             .get(&url)
             .timeout(Duration::from_millis(5000))
             .send()
@@ -211,10 +285,21 @@ impl ExternalNotificationSender {
         &self,
         bot_token: &str,
         last_update_id: i64,
+        proxy_url: Option<&str>,
     ) -> Result<Vec<crate::telegram_updates::TelegramUpdate>, ExternalSendOutcome> {
+        let client = self
+            .telegram_clients
+            .client_for(proxy_url)
+            .map_err(|error| {
+                ExternalSendOutcome::TransientFailure(ExternalSendMetadata {
+                    last_error: Some(error.to_string()),
+                    provider_message_id: None,
+                    provider_status_code: None,
+                    provider_response: None,
+                })
+            })?;
         let url = self.telegram_get_updates_url(bot_token, last_update_id);
-        let response = self
-            .client
+        let response = client
             .get(&url)
             .timeout(Duration::from_millis(5000))
             .send()
@@ -759,6 +844,48 @@ mod tests {
             metadata: serde_json::json!({}),
             detected_at: Utc.with_ymd_and_hms(2026, 5, 18, 15, 0, 0).unwrap(),
             created_at: Utc.with_ymd_and_hms(2026, 5, 18, 15, 0, 1).unwrap(),
+        }
+    }
+
+    fn production_source() -> &'static str {
+        include_str!("external.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source is present")
+    }
+
+    #[test]
+    fn external_sender_source_contains_proxy_resolver() {
+        let source = production_source();
+
+        assert!(source.contains("TelegramClientResolver"));
+        assert!(source.contains("client_for"));
+        assert!(source.contains("reqwest::Proxy::all"));
+        assert!(source.contains("proxy_clients"));
+    }
+
+    #[test]
+    fn telegram_methods_accept_proxy_url() {
+        let source = production_source();
+
+        for method in [
+            "send_telegram",
+            "verify_telegram_bot",
+            "get_telegram_updates",
+        ] {
+            let method_source = source
+                .split(&format!("pub async fn {method}"))
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing method {method}"));
+            let signature = method_source
+                .split('{')
+                .next()
+                .expect("method signature precedes body");
+
+            assert!(
+                signature.contains("proxy_url: Option<&str>"),
+                "{method} must accept proxy_url: Option<&str>"
+            );
         }
     }
 

@@ -24,7 +24,9 @@ use coin_listener_core::{
     },
     AppError, AppResult, NotifyConfig,
 };
-use coin_listener_storage::{notifications, notifications::ExternalDeliveryStart, repositories};
+use coin_listener_storage::{
+    notifications, notifications::ExternalDeliveryStart, repositories, telegram_settings,
+};
 use sqlx::PgPool;
 use tracing::{info, warn};
 
@@ -103,6 +105,7 @@ pub async fn process_telegram_binding_update(
     sender: &external::ExternalNotificationSender,
     telegram_bot_id: uuid::Uuid,
     bot_token: &str,
+    proxy_url: Option<&str>,
     update: &crate::telegram_updates::TelegramUpdate,
     now: DateTime<Utc>,
 ) -> AppResult<Option<TelegramBindingRequest>> {
@@ -140,6 +143,7 @@ pub async fn process_telegram_binding_update(
             },
             bot_token,
             &external::telegram_binding_confirmation_text(chat_name),
+            proxy_url,
         )
         .await;
 
@@ -635,9 +639,9 @@ async fn process_external_channel_delivery(
                     return Ok(());
                 }
             };
-            let bot_token = if let Some(bot_id) = config.telegram_bot_id {
+            let (bot_token, effective_proxy_url) = if let Some(bot_id) = config.telegram_bot_id {
                 match notifications::get_telegram_bot_secret(pool, task.tenant_id, bot_id).await {
-                    Ok(bot) if bot.status == "active" => bot.bot_token,
+                    Ok(bot) if bot.status == "active" => (bot.bot_token, bot.effective_proxy_url),
                     Ok(_) => {
                         notifications::mark_external_notification_delivery_failed(
                             pool,
@@ -667,7 +671,7 @@ async fn process_external_channel_delivery(
                     }
                 }
             } else {
-                match config
+                let bot_token = match config
                     .bot_token_env
                     .as_deref()
                     .and_then(|name| std::env::var(name).ok())
@@ -686,13 +690,17 @@ async fn process_external_channel_delivery(
                         .await?;
                         return Ok(());
                     }
-                }
+                };
+                let effective_proxy_url =
+                    telegram_settings::get_telegram_proxy_url(pool, task.tenant_id).await?;
+                (bot_token, effective_proxy_url)
             };
             sender
                 .send_telegram(
                     &config,
                     &bot_token,
                     &render_external_notification_text(event),
+                    effective_proxy_url.as_deref(),
                 )
                 .await
         }
@@ -929,7 +937,11 @@ pub async fn run_telegram_update_poller(
             };
 
             let updates = match sender
-                .get_telegram_updates(&bot.bot_token, offset_claim.last_update_id)
+                .get_telegram_updates(
+                    &bot.bot_token,
+                    offset_claim.last_update_id,
+                    bot.effective_proxy_url.as_deref(),
+                )
                 .await
             {
                 Ok(updates) => updates,
@@ -956,6 +968,7 @@ pub async fn run_telegram_update_poller(
                     &sender,
                     bot.id,
                     &bot.bot_token,
+                    bot.effective_proxy_url.as_deref(),
                     &update,
                     Utc::now(),
                 )
@@ -1256,6 +1269,19 @@ mod tests {
         assert!(poller_source.contains("get_telegram_updates"));
         assert!(poller_source.contains("process_telegram_binding_update"));
         assert!(poller_source.contains("upsert_telegram_update_offset"));
+    }
+
+    #[test]
+    fn telegram_runtime_passes_effective_proxy_url_to_sender() {
+        let source = include_str!("lib.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is before tests");
+
+        assert!(production_source.contains("effective_proxy_url.as_deref()"));
+        assert!(production_source.contains("get_telegram_proxy_url(pool, task.tenant_id)"));
+        assert!(production_source.contains("process_telegram_binding_update("));
     }
 
     #[test]

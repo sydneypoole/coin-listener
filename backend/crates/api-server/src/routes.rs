@@ -551,7 +551,7 @@ async fn verify_telegram_bot(
 ) -> Result<Response, ApiError> {
     let bot = notifications::get_telegram_bot_secret(&state.postgres, auth.tenant_id, id).await?;
     let outcome = notifier::external::ExternalNotificationSender::new(reqwest::Client::new())
-        .verify_telegram_bot(&bot.bot_token)
+        .verify_telegram_bot(&bot.bot_token, bot.effective_proxy_url.as_deref())
         .await;
     let ok = outcome.is_sent();
     let message = external_outcome_message(&outcome, "telegram bot verified");
@@ -657,6 +657,7 @@ async fn telegram_webhook(
         &sender,
         bot_id,
         &bot.bot_token,
+        bot.effective_proxy_url.as_deref(),
         &update,
         Utc::now(),
     )
@@ -706,7 +707,11 @@ async fn telegram_channel_bot_token(
     tenant_id: Uuid,
     channel_id: Uuid,
     verify_mode: bool,
-) -> AppResult<(notifier::external::TelegramChannelConfig, String)> {
+) -> AppResult<(
+    notifier::external::TelegramChannelConfig,
+    String,
+    Option<String>,
+)> {
     let channel = notifications::get_notification_channel(pool, tenant_id, channel_id).await?;
     if channel.channel_type != "telegram" {
         return Err(AppError::Validation(
@@ -730,7 +735,7 @@ async fn telegram_channel_bot_token(
         return Err(AppError::Validation("telegram bot is inactive".to_string()));
     }
 
-    Ok((config, bot.bot_token))
+    Ok((config, bot.bot_token, bot.effective_proxy_url))
 }
 
 async fn verify_notification_channel(
@@ -738,13 +743,14 @@ async fn verify_notification_channel(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let (config, bot_token) =
+    let (config, bot_token, proxy_url) =
         telegram_channel_bot_token(&state.postgres, auth.tenant_id, id, true).await?;
     let outcome = notifier::external::ExternalNotificationSender::new(reqwest::Client::new())
         .send_telegram(
             &config,
             &bot_token,
             "Coin Listener Telegram channel verification",
+            proxy_url.as_deref(),
         )
         .await;
     let ok = outcome.is_sent();
@@ -758,10 +764,15 @@ async fn test_notification_channel(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let (config, bot_token) =
+    let (config, bot_token, proxy_url) =
         telegram_channel_bot_token(&state.postgres, auth.tenant_id, id, false).await?;
     let outcome = notifier::external::ExternalNotificationSender::new(reqwest::Client::new())
-        .send_telegram(&config, &bot_token, "Coin Listener test notification")
+        .send_telegram(
+            &config,
+            &bot_token,
+            "Coin Listener test notification",
+            proxy_url.as_deref(),
+        )
         .await;
     let ok = outcome.is_sent();
     let message = external_outcome_message(&outcome, "telegram channel test sent");
@@ -1079,6 +1090,15 @@ mod tests {
         assert!(source.contains("telegram_bot_secret_by_id_any_tenant"));
         assert!(source.contains("/api/telegram/webhook/:bot_id"));
         assert!(!source.contains("/api/telegram/webhook/:bot_token"));
+    }
+
+    #[test]
+    fn telegram_api_uses_effective_proxy_url() {
+        let source = production_source();
+
+        assert!(source.contains("bot.effective_proxy_url.as_deref()"));
+        assert!(source.contains("process_telegram_binding_update("));
+        assert!(source.contains("proxy_url.as_deref()"));
     }
 
     #[tokio::test]
