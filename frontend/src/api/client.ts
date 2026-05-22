@@ -28,8 +28,10 @@ import type {
   SystemStatus,
   TelegramBindingRequest,
   TelegramBot,
+  TelegramSettings,
   UpdateNotificationChannelRequest,
   UpdateTelegramBotRequest,
+  UpdateTelegramSettingsRequest,
   VerificationResponse,
   WatchedAddress,
   WatchedAddressImportErrorRow,
@@ -177,6 +179,17 @@ export function listWatchedAddressImportErrors(id: string): Promise<WatchedAddre
 export function cancelWatchedAddressImport(id: string): Promise<WatchedAddressImportTask> {
   return request<WatchedAddressImportTask>(`/api/addresses/imports/${id}/cancel`, {
     method: 'POST',
+  });
+}
+
+export function getTelegramSettings(): Promise<TelegramSettings> {
+  return request<TelegramSettings>('/api/telegram-settings');
+}
+
+export function updateTelegramSettings(payload: UpdateTelegramSettingsRequest): Promise<TelegramSettings> {
+  return request<TelegramSettings>('/api/telegram-settings', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
   });
 }
 

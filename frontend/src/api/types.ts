@@ -117,6 +117,8 @@ export type TelegramBot = {
   tenant_id: string;
   name: string;
   token_preview: string;
+  proxy_source: string;
+  proxy_url_preview?: string | null;
   status: string;
   verification_status: string;
   last_verified_at?: string | null;
@@ -125,16 +127,30 @@ export type TelegramBot = {
   updated_at: string;
 };
 
+export type TelegramSettings = {
+  tenant_id: string;
+  proxy_url_preview?: string | null;
+  has_proxy: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type UpdateTelegramSettingsRequest = {
+  proxy_url?: string | null;
+};
+
 export type CreateTelegramBotRequest = {
   name: string;
   bot_token: string;
   status?: string;
+  proxy_url?: string | null;
 };
 
 export type UpdateTelegramBotRequest = {
   name: string;
   bot_token?: string | null;
   status: string;
+  proxy_url?: string | null;
 };
 
 export type TelegramBindingRequest = {

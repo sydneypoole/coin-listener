@@ -313,6 +313,29 @@ describe('frontend UI regressions', () => {
     expectContains(page, 'tableId="telegram-bots"');
   });
 
+  test('telegram bot management exposes global and bot proxy configuration', () => {
+    const types = readSource('api/types.ts');
+    const client = readSource('api/client.ts');
+    const page = readSource('pages/TelegramBotsPage.tsx');
+    const combined = `${types}\n${client}\n${page}`;
+
+    for (const expected of [
+      'export type TelegramSettings',
+      'proxy_url_preview?: string | null',
+      'proxy_source: string',
+      'getTelegramSettings',
+      'updateTelegramSettings',
+      'Telegram 全局代理',
+      '代理来源',
+      'proxy_mode',
+      'proxy_url',
+      '使用全局代理',
+      '此机器人单独配置代理',
+    ]) {
+      expectContains(combined, expected);
+    }
+  });
+
   test('notification channel management page and rule quick actions exist', () => {
     const app = readSource('App.tsx');
     const page = readSource('pages/NotificationChannelsPage.tsx');
