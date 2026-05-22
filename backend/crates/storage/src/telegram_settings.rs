@@ -77,10 +77,10 @@ pub async fn update_telegram_settings(
     tenant_id: Uuid,
     request: UpdateTelegramSettingsRequest,
 ) -> AppResult<TelegramSettings> {
-    let proxy_url = match request.proxy_url {
-        Some(proxy_url) => normalize_proxy_url(proxy_url.as_deref())?,
-        None => get_telegram_proxy_url(pool, tenant_id).await?,
+    let Some(proxy_url) = request.proxy_url else {
+        return get_telegram_settings(pool, tenant_id).await;
     };
+    let proxy_url = normalize_proxy_url(proxy_url.as_deref())?;
 
     sqlx::query_as::<_, TelegramSettingsRow>(UPSERT_TELEGRAM_SETTINGS_QUERY)
         .bind(tenant_id)
@@ -130,16 +130,20 @@ mod tests {
     }
 
     #[test]
-    fn update_settings_source_preserves_omitted_proxy_and_normalizes_explicit_value() {
+    fn update_settings_source_preserves_omitted_proxy_without_writing() {
         let source = include_str!("telegram_settings.rs");
         let production_source = source
             .split("#[cfg(test)]")
             .next()
             .expect("production source is before tests");
 
-        assert!(production_source.contains("normalize_proxy_url(proxy_url.as_deref())"));
-        assert!(
-            production_source.contains("None => get_telegram_proxy_url(pool, tenant_id).await?")
-        );
+        let update_function = production_source
+            .split("pub async fn update_telegram_settings")
+            .nth(1)
+            .expect("update function exists");
+
+        assert!(update_function.contains("return get_telegram_settings(pool, tenant_id).await"));
+        assert!(update_function.contains("normalize_proxy_url(proxy_url.as_deref())"));
+        assert!(!update_function.contains("get_telegram_proxy_url(pool, tenant_id).await?"));
     }
 }
