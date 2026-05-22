@@ -243,13 +243,14 @@ pub fn decode_btc_transaction_page(body: Value) -> AppResult<BtcTransactionPage>
 }
 
 pub fn parse_btc_tip_height(payload: &str) -> AppResult<i64> {
-    let value = payload.trim().parse::<i64>().map_err(|error| {
-        AppError::Validation(format!("invalid BTC tip height {payload:?}: {error}"))
-    })?;
+    let value = payload
+        .trim()
+        .parse::<i64>()
+        .map_err(|error| AppError::Validation(format!("invalid BTC tip height: {error}")))?;
     if value < 0 {
-        return Err(AppError::Validation(format!(
-            "invalid BTC tip height {payload:?}: must be non-negative"
-        )));
+        return Err(AppError::Validation(
+            "invalid BTC tip height: must be non-negative".to_string(),
+        ));
     }
     Ok(value)
 }
@@ -563,7 +564,23 @@ mod tests {
                 error.contains("invalid BTC tip height"),
                 "{payload}: {error}"
             );
+            if !payload.is_empty() {
+                assert!(!error.contains(payload), "{payload}: {error}");
+            }
         }
+    }
+
+    #[test]
+    fn btc_tip_height_parser_does_not_echo_provider_response_text() {
+        let payload = "https://secret.example.invalid/provider-key";
+        let error = super::parse_btc_tip_height(payload)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("invalid BTC tip height"), "{error}");
+        assert!(!error.contains(payload), "{error}");
+        assert!(!error.contains("secret.example.invalid"), "{error}");
+        assert!(!error.contains("provider-key"), "{error}");
     }
 
     #[test]
