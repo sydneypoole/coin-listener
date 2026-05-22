@@ -78,6 +78,7 @@ export function AddressesPage() {
   const importableRows = parsedImport.rows.filter(row => !row.error);
   const selectedBatchChainCount = batchChainRows.filter(row => row.chain_id && row.asset_ids.length > 0).length;
   const batchAttemptCount = importableRows.length * selectedBatchChainCount;
+  const isActiveImportTask = Boolean(importTaskId) && !isTerminalImportStatus(importTaskQuery.data?.status);
 
   useEffect(() => {
     if (!importTaskId || !isTerminalImportStatus(importTaskQuery.data?.status)) return;
@@ -133,6 +134,9 @@ export function AddressesPage() {
 
   const createImportMutation = useMutation({
     mutationFn: (values: Record<string, unknown>) => {
+      if (isActiveImportTask) {
+        throw new Error('导入任务进行中，请先取消或等待完成');
+      }
       const chainConfigs = normalizedBatchChainConfigs();
       const firstConfig = chainConfigs[0];
       if (!firstConfig) {
@@ -172,9 +176,9 @@ export function AddressesPage() {
 
   const cancelImportMutation = useMutation({
     mutationFn: cancelWatchedAddressImport,
-    onSuccess: () => {
+    onSuccess: (_task, taskId) => {
       Toast.success('导入任务已取消');
-      queryClient.invalidateQueries({ queryKey: ['address-import', importTaskId] });
+      queryClient.invalidateQueries({ queryKey: ['address-import', taskId] });
     },
     onError: error => Toast.error(error instanceof Error ? error.message : '取消导入失败'),
   });
@@ -236,7 +240,9 @@ export function AddressesPage() {
 
   function openBatchModal() {
     setBatchInput('');
-    setImportTaskId(null);
+    if (!isActiveImportTask) {
+      setImportTaskId(null);
+    }
     setBatchChainRows([emptyChainRow()]);
     setBatchVisible(true);
   }
@@ -540,9 +546,9 @@ export function AddressesPage() {
                 />
               </div>
               <Space className="form-modal-actions">
-                <Button htmlType="submit" type="primary" loading={createImportMutation.isPending} disabled={importableRows.length === 0}>创建导入任务</Button>
-                {importTaskId ? (
-                  <Button htmlType="button" type="danger" loading={cancelImportMutation.isPending} onClick={() => cancelImportMutation.mutate(importTaskId)}>取消导入</Button>
+                <Button htmlType="submit" type="primary" loading={createImportMutation.isPending} disabled={importableRows.length === 0 || isActiveImportTask}>创建导入任务</Button>
+                {isActiveImportTask && importTaskId ? (
+                  <Button htmlType="button" type="danger" loading={cancelImportMutation.isPending} disabled={cancelImportMutation.isPending} onClick={() => cancelImportMutation.mutate(importTaskId)}>取消导入</Button>
                 ) : null}
                 <Button htmlType="button" onClick={closeBatchModal}>关闭</Button>
               </Space>
