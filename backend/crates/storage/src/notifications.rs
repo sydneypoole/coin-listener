@@ -9,6 +9,7 @@ use coin_listener_core::{
         NotificationRule, TelegramBot, TelegramBotSecret, UpdateNotificationChannelRequest,
         UpdateTelegramBotRequest,
     },
+    proxy::{mask_proxy_url, normalize_proxy_url},
     AppError, AppResult,
 };
 use sqlx::PgPool;
@@ -61,92 +62,152 @@ pub const DELETE_NOTIFICATION_CHANNEL_QUERY: &str =
     "DELETE FROM notification_channels WHERE id = $1 AND tenant_id = $2";
 
 const LIST_TELEGRAM_BOTS_QUERY: &str = r#"
-        SELECT id, tenant_id, name, username, token_preview, status, verification_status,
-               last_verified_at, last_error, created_at, updated_at
-        FROM telegram_bots
-        WHERE tenant_id = $1
-        ORDER BY created_at DESC
+        SELECT b.id, b.tenant_id, b.name, b.username, b.token_preview,
+               CASE
+                   WHEN b.proxy_url IS NOT NULL THEN 'bot'
+                   WHEN s.proxy_url IS NOT NULL THEN 'global'
+                   ELSE 'direct'
+               END AS proxy_source,
+               COALESCE(b.proxy_url, s.proxy_url) AS proxy_url_preview,
+               b.status, b.verification_status, b.last_verified_at, b.last_error,
+               b.created_at, b.updated_at
+        FROM telegram_bots b
+        LEFT JOIN telegram_settings s ON s.tenant_id = b.tenant_id
+        WHERE b.tenant_id = $1
+        ORDER BY b.created_at DESC
         "#;
 
 const CREATE_TELEGRAM_BOT_QUERY: &str = r#"
-        INSERT INTO telegram_bots (tenant_id, name, bot_token, token_preview, status)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id, tenant_id, name, username, token_preview, status, verification_status,
-                  last_verified_at, last_error, created_at, updated_at
+        WITH inserted_bot AS (
+            INSERT INTO telegram_bots (tenant_id, name, bot_token, token_preview, status, proxy_url)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, tenant_id, name, username, token_preview, proxy_url, status,
+                      verification_status, last_verified_at, last_error, created_at, updated_at
+        )
+        SELECT b.id, b.tenant_id, b.name, b.username, b.token_preview,
+               CASE
+                   WHEN b.proxy_url IS NOT NULL THEN 'bot'
+                   WHEN s.proxy_url IS NOT NULL THEN 'global'
+                   ELSE 'direct'
+               END AS proxy_source,
+               COALESCE(b.proxy_url, s.proxy_url) AS proxy_url_preview,
+               b.status, b.verification_status, b.last_verified_at, b.last_error,
+               b.created_at, b.updated_at
+        FROM inserted_bot b
+        LEFT JOIN telegram_settings s ON s.tenant_id = b.tenant_id
         "#;
 
 const GET_TELEGRAM_BOT_SECRET_QUERY: &str = r#"
-        SELECT id, tenant_id, name, username, bot_token, token_preview, status, verification_status,
-               last_verified_at, last_error, created_at, updated_at
-        FROM telegram_bots
-        WHERE id = $1
-          AND tenant_id = $2
+        SELECT b.id, b.tenant_id, b.name, b.username, b.bot_token, b.token_preview,
+               b.proxy_url AS bot_proxy_url,
+               COALESCE(b.proxy_url, s.proxy_url) AS effective_proxy_url,
+               b.status, b.verification_status, b.last_verified_at, b.last_error,
+               b.created_at, b.updated_at
+        FROM telegram_bots b
+        LEFT JOIN telegram_settings s ON s.tenant_id = b.tenant_id
+        WHERE b.id = $1
+          AND b.tenant_id = $2
         "#;
 
 const GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY: &str = r#"
-        SELECT id, tenant_id, name, username, bot_token, token_preview, status, verification_status,
-               last_verified_at, last_error, created_at, updated_at
-        FROM telegram_bots
-        WHERE id = $1
-          AND status = 'active'
-          AND verification_status = 'verified'
+        SELECT b.id, b.tenant_id, b.name, b.username, b.bot_token, b.token_preview,
+               b.proxy_url AS bot_proxy_url,
+               COALESCE(b.proxy_url, s.proxy_url) AS effective_proxy_url,
+               b.status, b.verification_status, b.last_verified_at, b.last_error,
+               b.created_at, b.updated_at
+        FROM telegram_bots b
+        LEFT JOIN telegram_settings s ON s.tenant_id = b.tenant_id
+        WHERE b.id = $1
+          AND b.status = 'active'
+          AND b.verification_status = 'verified'
         "#;
 
 const LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY: &str = r#"
-        SELECT id, tenant_id, name, username, bot_token, token_preview, status, verification_status,
-               last_verified_at, last_error, created_at, updated_at
-        FROM telegram_bots
-        WHERE status = 'active'
-          AND verification_status = 'verified'
+        SELECT b.id, b.tenant_id, b.name, b.username, b.bot_token, b.token_preview,
+               b.proxy_url AS bot_proxy_url,
+               COALESCE(b.proxy_url, s.proxy_url) AS effective_proxy_url,
+               b.status, b.verification_status, b.last_verified_at, b.last_error,
+               b.created_at, b.updated_at
+        FROM telegram_bots b
+        LEFT JOIN telegram_settings s ON s.tenant_id = b.tenant_id
+        WHERE b.status = 'active'
+          AND b.verification_status = 'verified'
         ORDER BY created_at ASC
         "#;
 
 const UPDATE_TELEGRAM_BOT_QUERY: &str = r#"
-        UPDATE telegram_bots
-        SET name = $3,
-            bot_token = COALESCE($4, bot_token),
-            token_preview = COALESCE($5, token_preview),
-            status = $6,
-            username = CASE
-                WHEN $4::text IS NULL THEN username
-                ELSE NULL
-            END,
-            verification_status = CASE
-                WHEN $4::text IS NULL THEN verification_status
-                ELSE 'unverified'
-            END,
-            last_verified_at = CASE
-                WHEN $4::text IS NULL THEN last_verified_at
-                ELSE NULL
-            END,
-            last_error = CASE
-                WHEN $4::text IS NULL THEN last_error
-                ELSE NULL
-            END,
-            updated_at = NOW()
-        WHERE id = $1
-          AND tenant_id = $2
-        RETURNING id, tenant_id, name, username, token_preview, status, verification_status,
-                  last_verified_at, last_error, created_at, updated_at
+        WITH updated_bot AS (
+            UPDATE telegram_bots
+            SET name = $3,
+                bot_token = COALESCE($4, bot_token),
+                token_preview = COALESCE($5, token_preview),
+                status = $6,
+                proxy_url = CASE WHEN $7::boolean THEN $8 ELSE proxy_url END,
+                username = CASE
+                    WHEN $4::text IS NULL THEN username
+                    ELSE NULL
+                END,
+                verification_status = CASE
+                    WHEN $4::text IS NULL THEN verification_status
+                    ELSE 'unverified'
+                END,
+                last_verified_at = CASE
+                    WHEN $4::text IS NULL THEN last_verified_at
+                    ELSE NULL
+                END,
+                last_error = CASE
+                    WHEN $4::text IS NULL THEN last_error
+                    ELSE NULL
+                END,
+                updated_at = NOW()
+            WHERE id = $1
+              AND tenant_id = $2
+            RETURNING id, tenant_id, name, username, token_preview, proxy_url, status,
+                      verification_status, last_verified_at, last_error, created_at, updated_at
+        )
+        SELECT b.id, b.tenant_id, b.name, b.username, b.token_preview,
+               CASE
+                   WHEN b.proxy_url IS NOT NULL THEN 'bot'
+                   WHEN s.proxy_url IS NOT NULL THEN 'global'
+                   ELSE 'direct'
+               END AS proxy_source,
+               COALESCE(b.proxy_url, s.proxy_url) AS proxy_url_preview,
+               b.status, b.verification_status, b.last_verified_at, b.last_error,
+               b.created_at, b.updated_at
+        FROM updated_bot b
+        LEFT JOIN telegram_settings s ON s.tenant_id = b.tenant_id
         "#;
 
 const DELETE_TELEGRAM_BOT_QUERY: &str =
     "DELETE FROM telegram_bots WHERE id = $1 AND tenant_id = $2";
 
 const MARK_TELEGRAM_BOT_VERIFICATION_QUERY: &str = r#"
-        UPDATE telegram_bots
-        SET verification_status = $3,
-            username = CASE
-                WHEN $3 = 'verified' THEN $4
-                ELSE username
-            END,
-            last_error = $5,
-            last_verified_at = $6,
-            updated_at = NOW()
-        WHERE id = $1
-          AND tenant_id = $2
-        RETURNING id, tenant_id, name, username, token_preview, status, verification_status,
-                  last_verified_at, last_error, created_at, updated_at
+        WITH updated_bot AS (
+            UPDATE telegram_bots
+            SET verification_status = $3,
+                username = CASE
+                    WHEN $3 = 'verified' THEN $4
+                    ELSE username
+                END,
+                last_error = $5,
+                last_verified_at = $6,
+                updated_at = NOW()
+            WHERE id = $1
+              AND tenant_id = $2
+            RETURNING id, tenant_id, name, username, token_preview, proxy_url, status,
+                      verification_status, last_verified_at, last_error, created_at, updated_at
+        )
+        SELECT b.id, b.tenant_id, b.name, b.username, b.token_preview,
+               CASE
+                   WHEN b.proxy_url IS NOT NULL THEN 'bot'
+                   WHEN s.proxy_url IS NOT NULL THEN 'global'
+                   ELSE 'direct'
+               END AS proxy_source,
+               COALESCE(b.proxy_url, s.proxy_url) AS proxy_url_preview,
+               b.status, b.verification_status, b.last_verified_at, b.last_error,
+               b.created_at, b.updated_at
+        FROM updated_bot b
+        LEFT JOIN telegram_settings s ON s.tenant_id = b.tenant_id
         "#;
 
 pub const LIST_NOTIFICATION_RULES_QUERY: &str = r#"
@@ -389,6 +450,43 @@ ORDER BY created_at DESC
 pub enum ExternalDeliveryStart {
     AlreadyComplete { delivery_id: Uuid },
     ReadyToSend { delivery_id: Uuid },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct TelegramBotRow {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub name: String,
+    pub username: Option<String>,
+    pub token_preview: String,
+    pub proxy_source: String,
+    pub proxy_url_preview: Option<String>,
+    pub status: String,
+    pub verification_status: String,
+    pub last_verified_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl TelegramBotRow {
+    fn into_public(self) -> TelegramBot {
+        TelegramBot {
+            id: self.id,
+            tenant_id: self.tenant_id,
+            name: self.name,
+            username: self.username,
+            token_preview: self.token_preview,
+            proxy_source: self.proxy_source,
+            proxy_url_preview: self.proxy_url_preview.as_deref().map(mask_proxy_url),
+            status: self.status,
+            verification_status: self.verification_status,
+            last_verified_at: self.last_verified_at,
+            last_error: self.last_error,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
 }
 
 pub fn validate_notification_channel_request(
@@ -664,10 +762,11 @@ pub async fn delete_notification_channel(
 }
 
 pub async fn list_telegram_bots(pool: &PgPool, tenant_id: Uuid) -> AppResult<Vec<TelegramBot>> {
-    sqlx::query_as::<_, TelegramBot>(LIST_TELEGRAM_BOTS_QUERY)
+    sqlx::query_as::<_, TelegramBotRow>(LIST_TELEGRAM_BOTS_QUERY)
         .bind(tenant_id)
         .fetch_all(pool)
         .await
+        .map(|rows| rows.into_iter().map(TelegramBotRow::into_public).collect())
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
@@ -688,15 +787,18 @@ pub async fn create_telegram_bot(
     let status = request.status.unwrap_or_else(|| STATUS_ACTIVE.to_string());
     validate_status(&status)?;
     let token_preview = telegram_token_preview(&bot_token);
+    let proxy_url = normalize_proxy_url(request.proxy_url.as_deref())?;
 
-    sqlx::query_as::<_, TelegramBot>(CREATE_TELEGRAM_BOT_QUERY)
+    sqlx::query_as::<_, TelegramBotRow>(CREATE_TELEGRAM_BOT_QUERY)
         .bind(tenant_id)
         .bind(request.name)
         .bind(bot_token)
         .bind(token_preview)
         .bind(status)
+        .bind(proxy_url)
         .fetch_one(pool)
         .await
+        .map(TelegramBotRow::into_public)
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
@@ -754,17 +856,25 @@ pub async fn update_telegram_bot(
         .filter(|token| !token.is_empty())
         .map(ToString::to_string);
     let token_preview = bot_token.as_deref().map(telegram_token_preview);
+    let proxy_url_was_provided = request.proxy_url.is_some();
+    let proxy_url = match request.proxy_url {
+        Some(proxy_url) => normalize_proxy_url(proxy_url.as_deref())?,
+        None => None,
+    };
 
-    sqlx::query_as::<_, TelegramBot>(UPDATE_TELEGRAM_BOT_QUERY)
+    sqlx::query_as::<_, TelegramBotRow>(UPDATE_TELEGRAM_BOT_QUERY)
         .bind(id)
         .bind(tenant_id)
         .bind(request.name)
         .bind(bot_token)
         .bind(token_preview)
         .bind(request.status)
+        .bind(proxy_url_was_provided)
+        .bind(proxy_url)
         .fetch_optional(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
+        .map(TelegramBotRow::into_public)
         .ok_or_else(|| AppError::NotFound("telegram bot".to_string()))
 }
 
@@ -794,7 +904,7 @@ pub async fn mark_telegram_bot_verification(
 ) -> AppResult<TelegramBot> {
     validate_verification_status(status)?;
 
-    sqlx::query_as::<_, TelegramBot>(MARK_TELEGRAM_BOT_VERIFICATION_QUERY)
+    sqlx::query_as::<_, TelegramBotRow>(MARK_TELEGRAM_BOT_VERIFICATION_QUERY)
         .bind(id)
         .bind(tenant_id)
         .bind(status)
@@ -804,6 +914,7 @@ pub async fn mark_telegram_bot_verification(
         .fetch_optional(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
+        .map(TelegramBotRow::into_public)
         .ok_or_else(|| AppError::NotFound("telegram bot".to_string()))
 }
 
@@ -1560,15 +1671,17 @@ mod tests {
         validate_notification_channel_request, validate_notification_delivery_status,
         validate_notification_rule_reference_consistency, validate_notification_rule_request,
         ExternalDeliveryStart, CREATE_IN_APP_NOTIFICATION_DELIVERY_QUERY,
-        CREATE_IN_APP_NOTIFICATION_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
+        CREATE_IN_APP_NOTIFICATION_QUERY, CREATE_TELEGRAM_BOT_QUERY, DEFAULT_IN_APP_CHANNEL_NAME,
         DELETE_NOTIFICATION_CHANNEL_QUERY, DELETE_NOTIFICATION_RULE_QUERY,
         GET_NOTIFICATION_CHANNEL_QUERY, GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY,
-        INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY, IN_APP_NOTIFICATION_NOTIFY_CHANNEL,
-        IN_APP_NOTIFICATION_NOTIFY_QUERY, LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY,
-        LIST_IN_APP_NOTIFICATIONS_QUERY, LIST_NOTIFICATION_CHANNELS_QUERY,
-        LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY, LIST_NOTIFICATION_DELIVERIES_QUERY,
-        LIST_NOTIFICATION_RULES_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
+        GET_TELEGRAM_BOT_SECRET_QUERY, INSERT_EXTERNAL_NOTIFICATION_DELIVERY_QUERY,
+        IN_APP_NOTIFICATION_NOTIFY_CHANNEL, IN_APP_NOTIFICATION_NOTIFY_QUERY,
+        LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY, LIST_IN_APP_NOTIFICATIONS_QUERY,
+        LIST_NOTIFICATION_CHANNELS_QUERY, LIST_NOTIFICATION_DELIVERIES_FOR_EVENT_QUERY,
+        LIST_NOTIFICATION_DELIVERIES_QUERY, LIST_NOTIFICATION_RULES_QUERY,
+        LIST_TELEGRAM_BOTS_QUERY, MARK_EXTERNAL_NOTIFICATION_DELIVERY_FAILED_QUERY,
         MARK_EXTERNAL_NOTIFICATION_DELIVERY_SENT_QUERY, MARK_IN_APP_NOTIFICATION_READ_QUERY,
+        MARK_TELEGRAM_BOT_VERIFICATION_QUERY,
         SELECT_EXTERNAL_NOTIFICATION_DELIVERY_FOR_UPDATE_QUERY,
         UPDATE_EXTERNAL_NOTIFICATION_DELIVERY_PROCESSING_QUERY, UPDATE_NOTIFICATION_CHANNEL_QUERY,
         UPDATE_NOTIFICATION_RULE_QUERY, UPDATE_TELEGRAM_BOT_QUERY,
@@ -1821,6 +1934,20 @@ mod tests {
         assert!(GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY.contains("status = 'active'"));
         assert!(GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY
             .contains("verification_status = 'verified'"));
+    }
+
+    #[test]
+    fn telegram_bot_queries_include_proxy_columns_and_global_join() {
+        assert!(LIST_TELEGRAM_BOTS_QUERY.contains("LEFT JOIN telegram_settings"));
+        assert!(LIST_TELEGRAM_BOTS_QUERY.contains("proxy_url_preview"));
+        assert!(LIST_TELEGRAM_BOTS_QUERY.contains("proxy_source"));
+        assert!(GET_TELEGRAM_BOT_SECRET_QUERY.contains("effective_proxy_url"));
+        assert!(GET_TELEGRAM_BOT_SECRET_BY_ID_ANY_TENANT_QUERY.contains("effective_proxy_url"));
+        assert!(LIST_ACTIVE_VERIFIED_TELEGRAM_BOT_SECRETS_QUERY.contains("effective_proxy_url"));
+        assert!(CREATE_TELEGRAM_BOT_QUERY.contains("proxy_url"));
+        assert!(UPDATE_TELEGRAM_BOT_QUERY.contains("CASE WHEN $7::boolean"));
+        assert!(MARK_TELEGRAM_BOT_VERIFICATION_QUERY.contains("proxy_url_preview"));
+        assert!(MARK_TELEGRAM_BOT_VERIFICATION_QUERY.contains("proxy_source"));
     }
 
     #[test]
