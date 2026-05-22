@@ -309,6 +309,22 @@ impl From<WatchedAddressImportRow> for WatchedAddressImportRowRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportAttemptSeed {
+    row_number: i32,
+    chain_id: Uuid,
+    asset_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportCreatePlan {
+    chain_id: Uuid,
+    asset_ids: Vec<Uuid>,
+    chain_configs: Vec<WatchedAddressImportChainConfig>,
+    total_rows: i32,
+    attempts: Vec<ImportAttemptSeed>,
+}
+
 pub fn effective_import_chain_configs(
     defaults: &WatchedAddressImportDefaults,
 ) -> Vec<WatchedAddressImportChainConfig> {
@@ -320,6 +336,33 @@ pub fn effective_import_chain_configs(
     }
 
     defaults.chain_configs.clone()
+}
+
+fn import_create_plan(request: &CreateWatchedAddressImportRequest) -> AppResult<ImportCreatePlan> {
+    let chain_configs = effective_import_chain_configs(&request.defaults);
+    let first_config = chain_configs
+        .first()
+        .ok_or_else(|| AppError::Validation("chain_configs are required".to_string()))?;
+    let total_rows = import_attempt_count(request.rows.len(), chain_configs.len())?;
+    let mut attempts = Vec::with_capacity(total_rows as usize);
+
+    for row in &request.rows {
+        for config in &chain_configs {
+            attempts.push(ImportAttemptSeed {
+                row_number: row.row_number,
+                chain_id: config.chain_id,
+                asset_ids: config.asset_ids.clone(),
+            });
+        }
+    }
+
+    Ok(ImportCreatePlan {
+        chain_id: first_config.chain_id,
+        asset_ids: first_config.asset_ids.clone(),
+        chain_configs,
+        total_rows,
+        attempts,
+    })
 }
 
 fn import_attempt_count(row_count: usize, chain_config_count: usize) -> AppResult<i32> {
@@ -392,13 +435,9 @@ pub async fn create_watched_address_import(
     request: CreateWatchedAddressImportRequest,
 ) -> AppResult<WatchedAddressImportTask> {
     validate_import_create_request(&request)?;
+    let plan = import_create_plan(&request)?;
     let defaults = request.defaults;
     let rows = request.rows;
-    let chain_configs = effective_import_chain_configs(&defaults);
-    let first_config = chain_configs
-        .first()
-        .ok_or_else(|| AppError::Validation("chain_configs are required".to_string()))?;
-    let total_rows = import_attempt_count(rows.len(), chain_configs.len())?;
 
     let mut transaction = pool
         .begin()
@@ -408,22 +447,22 @@ pub async fn create_watched_address_import(
     let task_record =
         sqlx::query_as::<_, WatchedAddressImportTaskRecord>(CREATE_WATCHED_ADDRESS_IMPORT_QUERY)
             .bind(tenant_id)
-            .bind(first_config.chain_id)
-            .bind(&first_config.asset_ids)
-            .bind(Json(chain_configs.clone()))
+            .bind(plan.chain_id)
+            .bind(&plan.asset_ids)
+            .bind(Json(plan.chain_configs.clone()))
             .bind(defaults.priority)
             .bind(defaults.scan_interval_seconds)
             .bind(defaults.transfer_filter_enabled)
             .bind(defaults.balance_change_filter_enabled)
             .bind(defaults.status)
-            .bind(total_rows)
+            .bind(plan.total_rows)
             .fetch_one(transaction.as_mut())
             .await
             .map_err(|error| AppError::Database(error.to_string()))?;
     let task = WatchedAddressImportTask::from(task_record);
 
     insert_import_rows(&mut transaction, tenant_id, task.id, &rows).await?;
-    insert_import_attempts(&mut transaction, tenant_id, task.id, &rows, &chain_configs).await?;
+    insert_import_attempts(&mut transaction, tenant_id, task.id, &plan.attempts).await?;
     transaction
         .commit()
         .await
@@ -462,21 +501,18 @@ async fn insert_import_attempts(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     task_id: Uuid,
-    rows: &[WatchedAddressImportRowRequest],
-    chain_configs: &[WatchedAddressImportChainConfig],
+    attempts: &[ImportAttemptSeed],
 ) -> AppResult<()> {
-    for row in rows {
-        for config in chain_configs {
-            sqlx::query(INSERT_IMPORT_ATTEMPT_QUERY)
-                .bind(task_id)
-                .bind(tenant_id)
-                .bind(row.row_number)
-                .bind(config.chain_id)
-                .bind(&config.asset_ids)
-                .execute(transaction.as_mut())
-                .await
-                .map_err(|error| AppError::Database(error.to_string()))?;
-        }
+    for attempt in attempts {
+        sqlx::query(INSERT_IMPORT_ATTEMPT_QUERY)
+            .bind(task_id)
+            .bind(tenant_id)
+            .bind(attempt.row_number)
+            .bind(attempt.chain_id)
+            .bind(&attempt.asset_ids)
+            .execute(transaction.as_mut())
+            .await
+            .map_err(|error| AppError::Database(error.to_string()))?;
     }
     Ok(())
 }
@@ -677,8 +713,8 @@ fn ensure_import_row_updated(rows_affected: u64) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_import_chain_configs, validate_import_create_request,
-        CLAIM_WATCHED_ADDRESS_IMPORT_QUERY, CREATE_WATCHED_ADDRESS_IMPORT_QUERY,
+        effective_import_chain_configs, import_create_plan, validate_import_create_request,
+        ImportAttemptSeed, CLAIM_WATCHED_ADDRESS_IMPORT_QUERY, CREATE_WATCHED_ADDRESS_IMPORT_QUERY,
         INSERT_IMPORT_ATTEMPT_QUERY, MARK_IMPORT_ROW_FAILED_QUERY, MARK_IMPORT_ROW_SUCCESS_QUERY,
         PENDING_IMPORT_ROWS_QUERY, REFRESH_IMPORT_TASK_COUNTS_QUERY,
     };
@@ -821,6 +857,78 @@ mod tests {
             error.to_string(),
             "validation error: chain_id must be unique within an import"
         );
+    }
+
+    #[test]
+    fn multi_chain_create_plan_persists_configs_mirrors_first_config_and_expands_attempts() {
+        let configs = vec![chain_config(2, vec![201]), chain_config(3, vec![301, 302])];
+        let defaults = WatchedAddressImportDefaults {
+            chain_id: Uuid::from_u128(99),
+            asset_ids: vec![Uuid::from_u128(999)],
+            chain_configs: configs.clone(),
+            priority: "normal".to_string(),
+            scan_interval_seconds: 300,
+            transfer_filter_enabled: true,
+            balance_change_filter_enabled: true,
+            status: "active".to_string(),
+        };
+        let rows = vec![
+            row(1, "0x0000000000000000000000000000000000000001"),
+            row(2, "0x0000000000000000000000000000000000000002"),
+        ];
+        let request = request_with_defaults(defaults, rows);
+
+        let plan = import_create_plan(&request).unwrap();
+
+        assert_eq!(plan.chain_id, configs[0].chain_id);
+        assert_eq!(plan.asset_ids, configs[0].asset_ids);
+        assert_eq!(plan.chain_configs, configs);
+        assert_eq!(plan.total_rows, 4);
+        assert_eq!(
+            plan.attempts,
+            vec![
+                ImportAttemptSeed {
+                    row_number: 1,
+                    chain_id: Uuid::from_u128(2),
+                    asset_ids: vec![Uuid::from_u128(201)],
+                },
+                ImportAttemptSeed {
+                    row_number: 1,
+                    chain_id: Uuid::from_u128(3),
+                    asset_ids: vec![Uuid::from_u128(301), Uuid::from_u128(302)],
+                },
+                ImportAttemptSeed {
+                    row_number: 2,
+                    chain_id: Uuid::from_u128(2),
+                    asset_ids: vec![Uuid::from_u128(201)],
+                },
+                ImportAttemptSeed {
+                    row_number: 2,
+                    chain_id: Uuid::from_u128(3),
+                    asset_ids: vec![Uuid::from_u128(301), Uuid::from_u128(302)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_empty_chain_configs_create_plan_derives_single_config_and_one_attempt_per_row() {
+        let request = request_with_rows(vec![
+            row(1, "0x0000000000000000000000000000000000000001"),
+            row(2, "0x0000000000000000000000000000000000000002"),
+        ]);
+
+        let plan = import_create_plan(&request).unwrap();
+
+        assert_eq!(plan.chain_configs, vec![chain_config(2, vec![101])]);
+        assert_eq!(plan.chain_id, Uuid::from_u128(2));
+        assert_eq!(plan.asset_ids, vec![Uuid::from_u128(101)]);
+        assert_eq!(plan.total_rows, 2);
+        assert_eq!(plan.attempts.len(), 2);
+        assert!(plan
+            .attempts
+            .iter()
+            .all(|attempt| attempt.chain_id == Uuid::from_u128(2)));
     }
 
     #[test]
