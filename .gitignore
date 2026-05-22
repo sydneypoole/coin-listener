@@ -14,3 +14,4 @@
 .cursor/
 /package-lock.json
 .worktrees/
+.superpowers/
