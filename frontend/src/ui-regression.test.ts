@@ -56,21 +56,26 @@ function expectOrdered(source: string, first: string, second: string) {
 }
 
 describe('frontend UI regressions', () => {
-  test('provider management exposes edit and connectivity test controls', () => {
+  test('provider management exposes multi-provider connectivity test controls', () => {
     const page = readSource('pages/ProvidersPage.tsx');
     const client = readSource('api/client.ts');
+    const types = readSource('api/types.ts');
 
     expectContains(client, 'export function updateProvider');
     expectContains(client, 'export function testProvider');
+    expectContains(types, 'chain_type: string');
+    expectContains(types, 'provider_type: string');
     expectContains(page, 'editingProvider');
     expectContains(page, 'updateProvider');
     expectContains(page, 'testProvider');
-    expectContains(page, 'Provider 测试成功');
-    expectContains(page, '编辑');
-    expectContains(page, '测试');
-    expectContains(page, 'testingProviderId');
-    expectContains(page, "provider.provider_type === 'rpc'");
-    expectContains(page, '当前仅支持 EVM/Base RPC 测试');
+    expectContains(page, 'providerTestSupported');
+    expectContains(page, "chainType === 'evm' && provider.provider_type === 'rpc'");
+    expectContains(page, "chainType === 'tron' && ['rest_api', 'rpc'].includes(provider.provider_type)");
+    expectContains(page, "chainType === 'utxo' && provider.provider_type === 'rest_api'");
+    expectContains(page, 'result.message');
+    expectContains(page, '最新区块');
+    expectContains(page, '暂不支持测试');
+    expectContains(page, '支持 EVM RPC、TRON REST、BTC/UTXO REST Provider 连通性测试；WebSocket 暂不测试。');
     expectContains(page, 'value="websocket"');
     expectContains(page, 'value="rest_api"');
     expectContains(page, 'rules={[{ required: true, message: \'请输入优先级\' }]');

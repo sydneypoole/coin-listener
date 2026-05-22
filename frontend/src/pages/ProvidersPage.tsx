@@ -34,8 +34,8 @@ export function ProvidersPage() {
     mutationFn: testProvider,
     onSuccess: result => {
       Toast.success(result.latest_block === null || result.latest_block === undefined
-        ? 'Provider 测试成功'
-        : `Provider 测试成功，最新区块 ${result.latest_block}`);
+        ? result.message
+        : `${result.message}，最新区块 ${result.latest_block}`);
     },
     onError: error => Toast.error(error instanceof Error ? error.message : 'Provider 测试失败'),
     onSettled: () => setTestingProviderId(null),
@@ -80,8 +80,13 @@ export function ProvidersPage() {
     };
   }
 
-  function canTestProvider(provider: Provider) {
-    return provider.provider_type === 'rpc' && chainTypeMap.get(provider.chain_id) === 'evm';
+  function providerTestSupported(provider: Provider) {
+    const chainType = chainTypeMap.get(provider.chain_id);
+    return (
+      (chainType === 'evm' && provider.provider_type === 'rpc')
+      || (chainType === 'tron' && ['rest_api', 'rpc'].includes(provider.provider_type))
+      || (chainType === 'utxo' && provider.provider_type === 'rest_api')
+    );
   }
 
   function handleTestProvider(provider: Provider) {
@@ -114,7 +119,7 @@ export function ProvidersPage() {
               title: '操作',
               width: 150,
               render: (_, provider) => {
-                const testDisabled = !canTestProvider(provider);
+                const testDisabled = !providerTestSupported(provider);
                 return (
                   <Space>
                     <Button size="small" onClick={() => openEditModal(provider)}>编辑</Button>
@@ -124,7 +129,7 @@ export function ProvidersPage() {
                       loading={testingProviderId === provider.id}
                       onClick={() => handleTestProvider(provider)}
                     >
-                      {testDisabled ? '仅 EVM RPC 可测' : '测试'}
+                      {testDisabled ? '暂不支持测试' : '测试'}
                     </Button>
                   </Space>
                 );
@@ -134,7 +139,7 @@ export function ProvidersPage() {
         />
       </DataSurface>
       <Modal title={editingProvider ? '编辑 Provider' : '新增 Provider'} visible={visible} onCancel={closeModal} footer={null}>
-        <p className="form-help-text">当前仅支持 EVM/Base RPC 测试；WebSocket 与 REST API Provider 可保存，但暂不提供连通性测试。</p>
+        <p className="form-help-text">支持 EVM RPC、TRON REST、BTC/UTXO REST Provider 连通性测试；WebSocket 暂不测试。</p>
         <Form initValues={initialValues()} onSubmit={handleSubmit} labelPosition="left" labelWidth={110}>
           <Form.Select field="chain_id" label="链" rules={[{ required: true, message: '请选择链' }]}>
             {(chainsQuery.data ?? []).map(chain => <Form.Select.Option key={chain.id} value={chain.id}>{chain.name}</Form.Select.Option>)}

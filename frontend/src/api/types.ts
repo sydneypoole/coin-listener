@@ -106,6 +106,8 @@ export type ProviderTestResponse = {
   ok: boolean;
   message: string;
   latest_block?: number | null;
+  chain_type: string;
+  provider_type: string;
 };
 
 export type CreateWatchedAddressRequest = Omit<WatchedAddress, 'id' | 'tenant_id'> & {
