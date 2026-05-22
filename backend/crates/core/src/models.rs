@@ -2,6 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn deserialize_nested_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
@@ -401,6 +409,8 @@ pub struct TelegramBot {
     pub name: String,
     pub username: Option<String>,
     pub token_preview: String,
+    pub proxy_source: String,
+    pub proxy_url_preview: Option<String>,
     pub status: String,
     pub verification_status: String,
     pub last_verified_at: Option<DateTime<Utc>>,
@@ -417,6 +427,8 @@ pub struct TelegramBotSecret {
     pub username: Option<String>,
     pub bot_token: String,
     pub token_preview: String,
+    pub bot_proxy_url: Option<String>,
+    pub effective_proxy_url: Option<String>,
     pub status: String,
     pub verification_status: String,
     pub last_verified_at: Option<DateTime<Utc>>,
@@ -425,11 +437,27 @@ pub struct TelegramBotSecret {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TelegramSettings {
+    pub tenant_id: Uuid,
+    pub proxy_url_preview: Option<String>,
+    pub has_proxy: bool,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateTelegramSettingsRequest {
+    #[serde(default, deserialize_with = "deserialize_nested_option")]
+    pub proxy_url: Option<Option<String>>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateTelegramBotRequest {
     pub name: String,
     pub bot_token: String,
     pub status: Option<String>,
+    pub proxy_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -437,6 +465,8 @@ pub struct UpdateTelegramBotRequest {
     pub name: String,
     pub bot_token: Option<String>,
     pub status: String,
+    #[serde(default, deserialize_with = "deserialize_nested_option")]
+    pub proxy_url: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -749,7 +779,7 @@ mod tests {
         ProviderChainStatus, ProviderHealthStatus, ProviderStatus, ProviderStatusItem, QueueStatus,
         RetryNotificationOutboxResponse, ScanAddressTask, ScanCursor, ScanStatus,
         ServiceHealthStatus, ServiceHeartbeatStatusItem, SystemStatus, TelegramBindingRequest,
-        WatchedAddressResponse,
+        UpdateTelegramBotRequest, WatchedAddressResponse,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
@@ -819,7 +849,8 @@ mod tests {
         let payload = r#"{
             "name":"Ops bot",
             "bot_token":"123456:secret-token",
-            "status":"active"
+            "status":"active",
+            "proxy_url":"socks5://127.0.0.1:1080"
         }"#;
 
         let request: CreateTelegramBotRequest = serde_json::from_str(payload).unwrap();
@@ -827,6 +858,31 @@ mod tests {
         assert_eq!(request.name, "Ops bot");
         assert_eq!(request.bot_token, "123456:secret-token");
         assert_eq!(request.status.as_deref(), Some("active"));
+        assert_eq!(
+            request.proxy_url.as_deref(),
+            Some("socks5://127.0.0.1:1080")
+        );
+    }
+
+    #[test]
+    fn update_telegram_bot_request_distinguishes_proxy_omitted_null_and_value() {
+        let omitted: UpdateTelegramBotRequest =
+            serde_json::from_str(r#"{"name":"Ops bot","status":"active"}"#).unwrap();
+        assert_eq!(omitted.proxy_url, None);
+
+        let cleared: UpdateTelegramBotRequest =
+            serde_json::from_str(r#"{"name":"Ops bot","status":"active","proxy_url":null}"#)
+                .unwrap();
+        assert_eq!(cleared.proxy_url, Some(None));
+
+        let updated: UpdateTelegramBotRequest = serde_json::from_str(
+            r#"{"name":"Ops bot","status":"active","proxy_url":"http://proxy:7890"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            updated.proxy_url,
+            Some(Some("http://proxy:7890".to_string()))
+        );
     }
 
     #[test]
