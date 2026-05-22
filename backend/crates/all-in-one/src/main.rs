@@ -70,11 +70,18 @@ async fn main() -> anyhow::Result<()> {
     info!(address = %listener.local_addr()?, "all-in-one server listening");
 
     let mut heartbeat_handles = Vec::new();
+    let worker_id = service_heartbeat_instance_id();
+    info!(service = "worker", instance_id = %worker_id, "worker instance id assigned");
     for service_name in ALL_IN_ONE_SERVICE_NAMES {
+        let instance_id = if service_name == "worker" {
+            worker_id.clone()
+        } else {
+            service_heartbeat_instance_id()
+        };
         heartbeat_handles.push(tokio::spawn(run_service_heartbeat(
             postgres.clone(),
             service_name,
-            service_heartbeat_instance_id(),
+            instance_id,
             Utc::now(),
             Arc::clone(&shutdown),
         )));
@@ -93,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         postgres.clone(),
         worker_redis,
         worker_queue,
+        worker_id,
         Arc::clone(&shutdown),
     ));
 

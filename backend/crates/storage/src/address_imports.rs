@@ -86,26 +86,38 @@ LIMIT $4
 "#;
 
 pub const MARK_IMPORT_ATTEMPT_SUCCESS_QUERY: &str = r#"
-UPDATE watched_address_import_attempts
-SET status = 'success',
-    watched_address_id = $3,
-    error_code = NULL,
-    error_message = NULL,
+UPDATE watched_address_import_attempts attempt
+SET status = CASE WHEN task.status = 'cancelled' THEN attempt.status ELSE 'success' END,
+    watched_address_id = CASE WHEN task.status = 'cancelled' THEN attempt.watched_address_id ELSE $3 END,
+    error_code = CASE WHEN task.status = 'cancelled' THEN attempt.error_code ELSE NULL END,
+    error_message = CASE WHEN task.status = 'cancelled' THEN attempt.error_message ELSE NULL END,
     updated_at = NOW()
-WHERE id = $1
-  AND tenant_id = $2
-  AND status = 'pending'
+FROM watched_address_import_tasks task
+WHERE attempt.id = $1
+  AND attempt.tenant_id = $2
+  AND task.id = attempt.import_task_id
+  AND task.tenant_id = attempt.tenant_id
+  AND (
+      attempt.status = 'pending'
+      OR (attempt.status = 'skipped' AND task.status = 'cancelled')
+  )
 "#;
 
 pub const MARK_IMPORT_ATTEMPT_FAILED_QUERY: &str = r#"
-UPDATE watched_address_import_attempts
-SET status = 'failed',
-    error_code = $3,
-    error_message = $4,
+UPDATE watched_address_import_attempts attempt
+SET status = CASE WHEN task.status = 'cancelled' THEN attempt.status ELSE 'failed' END,
+    error_code = CASE WHEN task.status = 'cancelled' THEN attempt.error_code ELSE $3 END,
+    error_message = CASE WHEN task.status = 'cancelled' THEN attempt.error_message ELSE $4 END,
     updated_at = NOW()
-WHERE id = $1
-  AND tenant_id = $2
-  AND status = 'pending'
+FROM watched_address_import_tasks task
+WHERE attempt.id = $1
+  AND attempt.tenant_id = $2
+  AND task.id = attempt.import_task_id
+  AND task.tenant_id = attempt.tenant_id
+  AND (
+      attempt.status = 'pending'
+      OR (attempt.status = 'skipped' AND task.status = 'cancelled')
+  )
 "#;
 
 pub const REFRESH_IMPORT_TASK_COUNTS_QUERY: &str = r#"
@@ -1064,6 +1076,17 @@ mod tests {
         assert!(
             CANCEL_WATCHED_ADDRESS_IMPORT_QUERY.contains("FROM watched_address_import_attempts")
         );
+    }
+
+    #[test]
+    fn attempt_mark_queries_tolerate_cancelled_tasks() {
+        for query in [
+            MARK_IMPORT_ATTEMPT_SUCCESS_QUERY,
+            MARK_IMPORT_ATTEMPT_FAILED_QUERY,
+        ] {
+            assert!(query.contains("task.status = 'cancelled'"), "{query}");
+            assert!(query.contains("attempt.status = 'skipped'"), "{query}");
+        }
     }
 
     #[test]

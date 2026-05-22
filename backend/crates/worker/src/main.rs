@@ -37,11 +37,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let worker_id = service_heartbeat_instance_id();
+    info!(service = "worker", instance_id = %worker_id, "worker instance id assigned");
     let heartbeat_shutdown = Arc::clone(&shutdown);
     tokio::spawn(run_service_heartbeat(
         postgres.clone(),
         "worker",
-        service_heartbeat_instance_id(),
+        worker_id.clone(),
         Utc::now(),
         heartbeat_shutdown,
     ));
@@ -52,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    run_worker(postgres, redis, scan_queue, shutdown).await?;
+    run_worker(postgres, redis, scan_queue, worker_id, shutdown).await?;
 
     info!(service = "worker", "service stopped");
     Ok(())

@@ -1025,10 +1025,11 @@ pub async fn run_worker(
     pool: PgPool,
     mut redis: MultiplexedConnection,
     scan_queue: ScanQueue,
+    worker_id: String,
     shutdown: Arc<AtomicBool>,
 ) -> AppResult<()> {
     while !worker_shutdown_requested(&shutdown) {
-        if let Err(error) = process_one_address_import_task(&pool, "worker", Utc::now()).await {
+        if let Err(error) = process_one_address_import_task(&pool, &worker_id, Utc::now()).await {
             warn!(error = %error, "address import task processing failed");
         }
 
@@ -1892,6 +1893,17 @@ mod tests {
         ] {
             assert!(!body.contains(row_api), "worker still calls {row_api}");
         }
+    }
+
+    #[test]
+    fn run_worker_uses_caller_supplied_worker_id_for_import_locks() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let run_worker_source = &source[run_worker_index..];
+
+        assert!(run_worker_source.contains("worker_id: String"));
+        assert!(run_worker_source.contains("process_one_address_import_task(&pool, &worker_id"));
+        assert!(!run_worker_source.contains("process_one_address_import_task(&pool, \"worker\""));
     }
 
     #[test]
