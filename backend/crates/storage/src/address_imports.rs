@@ -20,6 +20,10 @@ WITH next_task AS (
        OR (
            task.status = 'running'
            AND task.locked_by = $2
+       )
+       OR (
+           task.status = 'running'
+           AND task.locked_at < $1 - INTERVAL '5 minutes'
        ))
       AND EXISTS (
           SELECT 1
@@ -30,7 +34,8 @@ WITH next_task AS (
       )
     ORDER BY CASE
         WHEN task.status = 'running' AND task.locked_by = $2 THEN 0
-        ELSE 1
+        WHEN task.status = 'running' AND task.locked_at < $1 - INTERVAL '5 minutes' THEN 1
+        ELSE 2
     END,
     task.created_at ASC
     LIMIT 1
@@ -1021,6 +1026,12 @@ mod tests {
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("attempt.status = 'pending'"));
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("locked_by = $2"));
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("FOR UPDATE SKIP LOCKED"));
+    }
+
+    #[test]
+    fn claim_query_recovers_stale_running_import_locks() {
+        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("locked_at < $1 - INTERVAL"));
+        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("status = 'running'"));
     }
 
     #[test]
