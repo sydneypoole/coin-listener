@@ -113,7 +113,10 @@ pub fn bounded_block_ranges(
             from_block: current_from,
             to_block: current_to,
         });
-        current_from = current_to.saturating_add(1);
+        if current_to == to_block {
+            break;
+        }
+        current_from = current_to + 1;
     }
     Ok(ranges)
 }
@@ -1450,6 +1453,19 @@ mod tests {
                 vec![BlockRange {
                     from_block: 5,
                     to_block: 10_004,
+                }]
+            );
+        }
+
+        #[test]
+        fn bounded_block_ranges_terminates_at_i64_max() {
+            let ranges = bounded_block_ranges(i64::MAX - 2, i64::MAX, 10).unwrap();
+
+            assert_eq!(
+                ranges,
+                vec![BlockRange {
+                    from_block: i64::MAX - 2,
+                    to_block: i64::MAX,
                 }]
             );
         }
