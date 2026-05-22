@@ -924,51 +924,52 @@ pub async fn process_one_address_import_task(
         return Ok(false);
     };
 
-    let rows = address_imports::pending_import_rows(
+    let attempts = address_imports::pending_import_attempts(
         pool,
         task.tenant_id,
         task.id,
+        worker_id,
         ADDRESS_IMPORT_ROW_BATCH_SIZE,
     )
     .await?;
 
-    for row in rows {
+    for attempt in attempts {
         let request = CreateWatchedAddressRequest {
             tenant_id: Some(task.tenant_id),
-            chain_id: task.chain_id,
-            address: row.address,
-            label: row.label,
-            priority: row.priority.unwrap_or_else(|| task.priority.clone()),
-            scan_interval_seconds: row
+            chain_id: attempt.chain_id,
+            address: attempt.address,
+            label: attempt.label,
+            priority: attempt.priority.unwrap_or_else(|| task.priority.clone()),
+            scan_interval_seconds: attempt
                 .scan_interval_seconds
                 .unwrap_or(task.scan_interval_seconds),
-            transfer_filter_enabled: row
+            transfer_filter_enabled: attempt
                 .transfer_filter_enabled
                 .unwrap_or(task.transfer_filter_enabled),
-            balance_change_filter_enabled: row
+            balance_change_filter_enabled: attempt
                 .balance_change_filter_enabled
                 .unwrap_or(task.balance_change_filter_enabled),
-            status: row.status.unwrap_or_else(|| task.address_status.clone()),
-            asset_ids: task.asset_ids.clone(),
+            status: attempt
+                .status
+                .unwrap_or_else(|| task.address_status.clone()),
+            asset_ids: attempt.asset_ids.clone(),
         };
 
         match repositories::create_watched_address(pool, request).await {
             Ok(address) => {
-                address_imports::mark_import_row_success(
+                address_imports::mark_import_attempt_success(
                     pool,
                     task.tenant_id,
-                    task.id,
-                    row.row_number,
+                    attempt.attempt_id,
                     address.id,
                 )
                 .await?;
             }
             Err(error) => {
-                address_imports::mark_import_row_failed(
+                address_imports::mark_import_attempt_failed(
                     pool,
                     task.tenant_id,
-                    task.id,
-                    row.row_number,
+                    attempt.attempt_id,
                     "create_failed",
                     &error.to_string(),
                 )
@@ -1842,9 +1843,55 @@ mod tests {
         }
     }
 
+    fn address_import_worker_source() -> &'static str {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub async fn process_one_address_import_task")
+            .expect("address import worker function");
+        let end = source[start..]
+            .find("async fn process_locked_scan_task")
+            .expect("next worker function")
+            + start;
+        &source[start..end]
+    }
+
     #[test]
     fn address_import_batch_size_is_bounded() {
         assert_eq!(crate::ADDRESS_IMPORT_ROW_BATCH_SIZE, 50);
+    }
+
+    #[test]
+    fn address_import_worker_processes_attempt_chain_configs() {
+        let body = address_import_worker_source();
+
+        assert!(body.contains("pending_import_attempts"));
+        assert!(body.contains("chain_id: attempt.chain_id"));
+        assert!(body.contains("asset_ids: attempt.asset_ids.clone()"));
+        assert!(body.contains("mark_import_attempt_success"));
+        assert!(body.contains("mark_import_attempt_failed"));
+        assert!(!body.contains("chain_id: task.chain_id"));
+        assert!(!body.contains("asset_ids: task.asset_ids.clone()"));
+    }
+
+    #[test]
+    fn address_import_worker_marks_attempts_by_attempt_id() {
+        let body = address_import_worker_source();
+
+        assert!(body.contains("attempt.attempt_id"));
+        assert!(!body.contains("row.row_number"));
+    }
+
+    #[test]
+    fn address_import_worker_does_not_call_row_import_apis() {
+        let body = address_import_worker_source();
+
+        for row_api in [
+            "pending_import_rows",
+            "mark_import_row_success",
+            "mark_import_row_failed",
+        ] {
+            assert!(!body.contains(row_api), "worker still calls {row_api}");
+        }
     }
 
     #[test]
@@ -1910,7 +1957,9 @@ mod tests {
             + start;
         let scanner = &source[start..end];
 
-        assert!(scanner.contains("bounded_block_ranges(from_block, to_block, EVM_LOG_MAX_BLOCK_SPAN)?"));
+        assert!(
+            scanner.contains("bounded_block_ranges(from_block, to_block, EVM_LOG_MAX_BLOCK_SPAN)?")
+        );
         assert!(scanner.contains("for range in ranges"));
         assert!(scanner.contains("range.from_block"));
         assert!(scanner.contains("range.to_block"));

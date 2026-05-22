@@ -53,6 +53,8 @@ RETURNING task.id, task.tenant_id, task.status, task.chain_id, task.asset_ids,
           task.updated_at
 "#;
 
+// Attempts have no per-row processing lock in migration 0018; selection is guarded by
+// the import task lock owner, so this queue assumes one active worker per task lock.
 pub const PENDING_IMPORT_ATTEMPTS_QUERY: &str = r#"
 SELECT attempt.id AS attempt_id,
        attempt.row_number,
@@ -67,6 +69,9 @@ SELECT attempt.id AS attempt_id,
        attempt.chain_id,
        attempt.asset_ids
 FROM watched_address_import_attempts attempt
+JOIN watched_address_import_tasks task
+  ON task.id = attempt.import_task_id
+ AND task.tenant_id = attempt.tenant_id
 JOIN watched_address_import_rows import_row
   ON import_row.import_task_id = attempt.import_task_id
  AND import_row.tenant_id = attempt.tenant_id
@@ -74,19 +79,10 @@ JOIN watched_address_import_rows import_row
 WHERE attempt.import_task_id = $1
   AND attempt.tenant_id = $2
   AND attempt.status = 'pending'
+  AND task.status = 'running'
+  AND task.locked_by = $3
 ORDER BY attempt.row_number ASC, attempt.chain_id ASC
-LIMIT $3
-"#;
-
-pub const PENDING_IMPORT_ROWS_QUERY: &str = r#"
-SELECT row_number, raw_text, address, label, priority, scan_interval_seconds,
-       transfer_filter_enabled, balance_change_filter_enabled, address_status AS status
-FROM watched_address_import_rows
-WHERE import_task_id = $1
-  AND tenant_id = $2
-  AND status = 'pending'
-ORDER BY row_number ASC
-LIMIT $3
+LIMIT $4
 "#;
 
 pub const MARK_IMPORT_ATTEMPT_SUCCESS_QUERY: &str = r#"
@@ -109,31 +105,6 @@ SET status = 'failed',
     updated_at = NOW()
 WHERE id = $1
   AND tenant_id = $2
-  AND status = 'pending'
-"#;
-
-pub const MARK_IMPORT_ROW_SUCCESS_QUERY: &str = r#"
-UPDATE watched_address_import_rows
-SET status = 'success',
-    watched_address_id = $4,
-    error_code = NULL,
-    error_message = NULL,
-    updated_at = NOW()
-WHERE import_task_id = $1
-  AND tenant_id = $2
-  AND row_number = $3
-  AND status = 'pending'
-"#;
-
-pub const MARK_IMPORT_ROW_FAILED_QUERY: &str = r#"
-UPDATE watched_address_import_rows
-SET status = 'failed',
-    error_code = $4,
-    error_message = $5,
-    updated_at = NOW()
-WHERE import_task_id = $1
-  AND tenant_id = $2
-  AND row_number = $3
   AND status = 'pending'
 "#;
 
@@ -352,19 +323,6 @@ impl From<WatchedAddressImportTaskRecord> for WatchedAddressImportTask {
     }
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct WatchedAddressImportRow {
-    row_number: i32,
-    raw_text: String,
-    address: String,
-    label: Option<String>,
-    priority: Option<String>,
-    scan_interval_seconds: Option<i32>,
-    transfer_filter_enabled: Option<bool>,
-    balance_change_filter_enabled: Option<bool>,
-    status: Option<String>,
-}
-
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct WatchedAddressImportAttempt {
     pub attempt_id: Uuid,
@@ -379,22 +337,6 @@ pub struct WatchedAddressImportAttempt {
     pub status: Option<String>,
     pub chain_id: Uuid,
     pub asset_ids: Vec<Uuid>,
-}
-
-impl From<WatchedAddressImportRow> for WatchedAddressImportRowRequest {
-    fn from(row: WatchedAddressImportRow) -> Self {
-        Self {
-            row_number: row.row_number,
-            raw_text: row.raw_text,
-            address: row.address,
-            label: row.label,
-            priority: row.priority,
-            scan_interval_seconds: row.scan_interval_seconds,
-            transfer_filter_enabled: row.transfer_filter_enabled,
-            balance_change_filter_enabled: row.balance_change_filter_enabled,
-            status: row.status,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -686,6 +628,7 @@ pub async fn pending_import_attempts(
     pool: &PgPool,
     tenant_id: Uuid,
     task_id: Uuid,
+    worker_id: &str,
     limit: i64,
 ) -> AppResult<Vec<WatchedAddressImportAttempt>> {
     if limit <= 0 {
@@ -695,31 +638,11 @@ pub async fn pending_import_attempts(
     sqlx::query_as::<_, WatchedAddressImportAttempt>(PENDING_IMPORT_ATTEMPTS_QUERY)
         .bind(task_id)
         .bind(tenant_id)
+        .bind(worker_id)
         .bind(limit)
         .fetch_all(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))
-}
-
-pub async fn pending_import_rows(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    task_id: Uuid,
-    limit: i64,
-) -> AppResult<Vec<WatchedAddressImportRowRequest>> {
-    if limit <= 0 {
-        return Ok(Vec::new());
-    }
-
-    let rows = sqlx::query_as::<_, WatchedAddressImportRow>(PENDING_IMPORT_ROWS_QUERY)
-        .bind(task_id)
-        .bind(tenant_id)
-        .bind(limit)
-        .fetch_all(pool)
-        .await
-        .map_err(|error| AppError::Database(error.to_string()))?;
-
-    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 pub async fn mark_import_attempt_success(
@@ -756,46 +679,6 @@ pub async fn mark_import_attempt_failed(
         .map_err(|error| AppError::Database(error.to_string()))?;
 
     ensure_import_attempt_updated(result.rows_affected())
-}
-
-pub async fn mark_import_row_success(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    task_id: Uuid,
-    row_number: i32,
-    watched_address_id: Uuid,
-) -> AppResult<()> {
-    let result = sqlx::query(MARK_IMPORT_ROW_SUCCESS_QUERY)
-        .bind(task_id)
-        .bind(tenant_id)
-        .bind(row_number)
-        .bind(watched_address_id)
-        .execute(pool)
-        .await
-        .map_err(|error| AppError::Database(error.to_string()))?;
-
-    ensure_import_row_updated(result.rows_affected())
-}
-
-pub async fn mark_import_row_failed(
-    pool: &PgPool,
-    tenant_id: Uuid,
-    task_id: Uuid,
-    row_number: i32,
-    error_code: &str,
-    error_message: &str,
-) -> AppResult<()> {
-    let result = sqlx::query(MARK_IMPORT_ROW_FAILED_QUERY)
-        .bind(task_id)
-        .bind(tenant_id)
-        .bind(row_number)
-        .bind(error_code)
-        .bind(error_message)
-        .execute(pool)
-        .await
-        .map_err(|error| AppError::Database(error.to_string()))?;
-
-    ensure_import_row_updated(result.rows_affected())
 }
 
 pub async fn refresh_import_task_counts(
@@ -857,14 +740,6 @@ fn ensure_import_attempt_updated(rows_affected: u64) -> AppResult<()> {
         return Err(AppError::NotFound(
             "watched address import attempt".to_string(),
         ));
-    }
-
-    Ok(())
-}
-
-fn ensure_import_row_updated(rows_affected: u64) -> AppResult<()> {
-    if rows_affected == 0 {
-        return Err(AppError::NotFound("watched address import row".to_string()));
     }
 
     Ok(())
@@ -1159,6 +1034,14 @@ mod tests {
     }
 
     #[test]
+    fn pending_attempts_are_guarded_by_task_lock_owner() {
+        assert!(PENDING_IMPORT_ATTEMPTS_QUERY.contains("JOIN watched_address_import_tasks task"));
+        assert!(PENDING_IMPORT_ATTEMPTS_QUERY.contains("task.status = 'running'"));
+        assert!(PENDING_IMPORT_ATTEMPTS_QUERY.contains("task.locked_by = $3"));
+        assert!(PENDING_IMPORT_ATTEMPTS_QUERY.contains("LIMIT $4"));
+    }
+
+    #[test]
     fn progress_counts_are_refreshed_from_attempts() {
         assert!(REFRESH_IMPORT_TASK_COUNTS_QUERY.contains("FROM watched_address_import_attempts"));
         assert!(
@@ -1181,5 +1064,22 @@ mod tests {
         assert!(
             CANCEL_WATCHED_ADDRESS_IMPORT_QUERY.contains("FROM watched_address_import_attempts")
         );
+    }
+
+    #[test]
+    fn storage_source_no_longer_exposes_row_processing_apis() {
+        let source = include_str!("address_imports.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("test module")];
+
+        for row_api in [
+            "pub async fn pending_import_rows(",
+            "pub async fn mark_import_row_success(",
+            "pub async fn mark_import_row_failed(",
+        ] {
+            assert!(
+                !production.contains(row_api),
+                "storage still exposes {row_api}"
+            );
+        }
     }
 }
