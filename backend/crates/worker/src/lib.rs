@@ -37,6 +37,7 @@ use tracing::{info, warn};
 
 pub const EVM_ERC20_TRANSFER_CURSOR: &str = "evm_erc20_transfer";
 pub const EVM_TRANSFER_INITIAL_WINDOW_BLOCKS: i64 = 1_000;
+pub const EVM_LOG_MAX_BLOCK_SPAN: i64 = 10_000;
 pub const TRON_TRX_TRANSFER_CURSOR: &str = "tron_trx_transfer";
 pub const TRON_TRC20_TRANSFER_CURSOR: &str = "tron_trc20_transfer";
 pub const BTC_TRANSACTION_CURSOR: &str = "btc_transaction";
@@ -80,6 +81,41 @@ pub fn should_emit_balance_change(
     current: &BalanceSnapshot,
 ) -> bool {
     previous.is_some_and(|previous| previous.balance_raw != current.balance_raw)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockRange {
+    pub from_block: i64,
+    pub to_block: i64,
+}
+
+pub fn bounded_block_ranges(
+    from_block: i64,
+    to_block: i64,
+    max_block_span: i64,
+) -> AppResult<Vec<BlockRange>> {
+    if max_block_span <= 0 {
+        return Err(AppError::Validation(
+            "max block span must be positive".to_string(),
+        ));
+    }
+    if to_block < from_block {
+        return Ok(Vec::new());
+    }
+
+    let mut ranges = Vec::new();
+    let mut current_from = from_block;
+    while current_from <= to_block {
+        let current_to = current_from
+            .saturating_add(max_block_span - 1)
+            .min(to_block);
+        ranges.push(BlockRange {
+            from_block: current_from,
+            to_block: current_to,
+        });
+        current_from = current_to.saturating_add(1);
+    }
+    Ok(ranges)
 }
 
 pub fn evm_transfer_scan_range(
@@ -351,55 +387,64 @@ pub async fn scan_evm_erc20_transfers(
 
     let watched_topic = address_to_topic(&context.address)?;
     let mut events = Vec::new();
+    let ranges = bounded_block_ranges(from_block, to_block, EVM_LOG_MAX_BLOCK_SPAN)?;
+    let mut last_successful_block = None;
 
-    for asset in assets {
-        let Some(contract_address) = asset.contract_address.clone() else {
-            continue;
-        };
-        let incoming = EvmLogFilter {
-            address: contract_address.clone(),
-            from_block,
-            to_block,
-            topics: vec![
-                Some(TRANSFER_TOPIC0.to_string()),
-                None,
-                Some(watched_topic.clone()),
-            ],
-        };
-        let outgoing = EvmLogFilter {
-            address: contract_address,
-            from_block,
-            to_block,
-            topics: vec![
-                Some(TRANSFER_TOPIC0.to_string()),
-                Some(watched_topic.clone()),
-                None,
-            ],
-        };
+    for range in ranges {
+        for asset in &assets {
+            let Some(contract_address) = asset.contract_address.clone() else {
+                continue;
+            };
+            let incoming = EvmLogFilter {
+                address: contract_address.clone(),
+                from_block: range.from_block,
+                to_block: range.to_block,
+                topics: vec![
+                    Some(TRANSFER_TOPIC0.to_string()),
+                    None,
+                    Some(watched_topic.clone()),
+                ],
+            };
+            let outgoing = EvmLogFilter {
+                address: contract_address,
+                from_block: range.from_block,
+                to_block: range.to_block,
+                topics: vec![
+                    Some(TRANSFER_TOPIC0.to_string()),
+                    Some(watched_topic.clone()),
+                    None,
+                ],
+            };
 
-        for filter in [incoming, outgoing] {
-            let logs = rpc.eth_get_logs(filter).await?;
-            for log in logs {
-                let transfer = evm::decode_erc20_transfer_log(&log, asset.decimals)?;
-                let draft = transfer_event_draft(context, &asset, transfer);
-                if let Some(event) =
-                    repositories::insert_event_and_outbox_if_not_exists(pool, draft).await?
-                {
-                    events.push(event);
+            for filter in [incoming, outgoing] {
+                let logs = rpc.eth_get_logs(filter).await?;
+                for log in logs {
+                    let transfer = evm::decode_erc20_transfer_log(&log, asset.decimals)?;
+                    let draft = transfer_event_draft(context, asset, transfer);
+                    if let Some(event) =
+                        repositories::insert_event_and_outbox_if_not_exists(pool, draft).await?
+                    {
+                        events.push(event);
+                    }
                 }
             }
         }
+
+        repositories::upsert_scan_cursor(
+            pool,
+            context.tenant_id,
+            context.chain_id,
+            context.id,
+            EVM_ERC20_TRANSFER_CURSOR,
+            range.to_block,
+        )
+        .await?;
+        last_successful_block = Some(range.to_block);
     }
 
-    repositories::upsert_scan_cursor(
-        pool,
-        context.tenant_id,
-        context.chain_id,
-        context.id,
-        EVM_ERC20_TRANSFER_CURSOR,
-        to_block,
-    )
-    .await?;
+    if last_successful_block.is_none() {
+        return Ok(events);
+    }
 
     Ok(events)
 }
@@ -1328,7 +1373,10 @@ mod tests {
         use coin_listener_core::models::ScanCursor;
         use uuid::Uuid;
 
-        use crate::{evm_transfer_scan_range, EVM_ERC20_TRANSFER_CURSOR};
+        use crate::{
+            bounded_block_ranges, evm_transfer_scan_range, BlockRange, EVM_ERC20_TRANSFER_CURSOR,
+            EVM_LOG_MAX_BLOCK_SPAN,
+        };
 
         fn cursor(last_scanned_block: i64) -> ScanCursor {
             ScanCursor {
@@ -1368,6 +1416,51 @@ mod tests {
             let error = evm_transfer_scan_range(None, 20_000, -1).unwrap_err();
 
             assert!(error.to_string().contains("default_confirmations"));
+        }
+
+        #[test]
+        fn bounded_block_ranges_split_large_inclusive_ranges() {
+            let ranges = bounded_block_ranges(1, 25_000, 10_000).unwrap();
+
+            assert_eq!(
+                ranges,
+                vec![
+                    BlockRange {
+                        from_block: 1,
+                        to_block: 10_000,
+                    },
+                    BlockRange {
+                        from_block: 10_001,
+                        to_block: 20_000,
+                    },
+                    BlockRange {
+                        from_block: 20_001,
+                        to_block: 25_000,
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn bounded_block_ranges_keep_exact_limit_as_one_range() {
+            let ranges = bounded_block_ranges(5, 10_004, EVM_LOG_MAX_BLOCK_SPAN).unwrap();
+
+            assert_eq!(
+                ranges,
+                vec![BlockRange {
+                    from_block: 5,
+                    to_block: 10_004,
+                }]
+            );
+        }
+
+        #[test]
+        fn bounded_block_ranges_reject_non_positive_span() {
+            let error = bounded_block_ranges(1, 10, 0).unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("max block span must be positive"));
         }
     }
 
@@ -1787,6 +1880,25 @@ mod tests {
                 .count()
                 >= 3
         );
+    }
+
+    #[test]
+    fn evm_erc20_scan_chunks_logs_before_updating_cursor() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("pub async fn scan_evm_erc20_transfers")
+            .expect("erc20 scanner exists");
+        let end = source[start..]
+            .find("pub async fn scan_evm_address_with_provider")
+            .expect("next function exists")
+            + start;
+        let scanner = &source[start..end];
+
+        assert!(scanner.contains("bounded_block_ranges(from_block, to_block, EVM_LOG_MAX_BLOCK_SPAN)?"));
+        assert!(scanner.contains("for range in ranges"));
+        assert!(scanner.contains("range.from_block"));
+        assert!(scanner.contains("range.to_block"));
+        assert!(scanner.contains("last_successful_block = Some(range.to_block)"));
     }
 
     #[test]
