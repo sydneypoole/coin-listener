@@ -7,12 +7,43 @@ body,
   overflow: hidden;
 }
 
+:root {
+  --app-shell-sidebar-bg: linear-gradient(180deg, #06111f 0%, #0b1728 54%, #101827 100%);
+  --app-shell-sidebar-border: rgba(148, 163, 184, 0.18);
+  --app-sidebar-text-primary: #e5f7ff;
+  --app-sidebar-text-secondary: rgba(226, 232, 240, 0.78);
+  --app-sidebar-selected-bg: rgba(14, 165, 233, 0.18);
+  --app-sidebar-selected-text: #e0f2fe;
+  --app-content-bg: var(--semi-color-bg-0);
+  --app-content-bg-accent-a: rgba(20, 184, 166, 0.12);
+  --app-content-bg-accent-b: rgba(59, 130, 246, 0.14);
+  --app-card-bg: color-mix(in srgb, var(--semi-color-bg-1) 94%, transparent);
+  --app-card-bg-strong: var(--semi-color-bg-1);
+  --app-text-primary: var(--semi-color-text-0);
+  --app-text-secondary: var(--semi-color-text-1);
+  --app-text-tertiary: var(--semi-color-text-2);
+  --app-border-subtle: var(--semi-color-border);
+  --app-shadow-soft: 0 20px 60px rgba(15, 23, 42, 0.06);
+  --app-login-panel-bg: rgba(8, 18, 32, 0.72);
+  --app-login-text-primary: #e5f7ff;
+  --app-login-text-secondary: rgba(226, 232, 240, 0.78);
+}
+
+body[theme-mode='dark'] {
+  --app-content-bg: var(--semi-color-bg-0);
+  --app-content-bg-accent-a: rgba(20, 184, 166, 0.16);
+  --app-content-bg-accent-b: rgba(59, 130, 246, 0.18);
+  --app-card-bg: color-mix(in srgb, var(--semi-color-bg-1) 90%, transparent);
+  --app-card-bg-strong: var(--semi-color-bg-1);
+  --app-shadow-soft: 0 20px 60px rgba(0, 0, 0, 0.22);
+}
+
 body {
-  color: var(--semi-color-text-0);
+  color: var(--app-text-primary);
   background:
-    radial-gradient(circle at 12% 0%, rgba(20, 184, 166, 0.12), transparent 32%),
-    radial-gradient(circle at 88% 10%, rgba(59, 130, 246, 0.14), transparent 30%),
-    var(--semi-color-bg-0);
+    radial-gradient(circle at 12% 0%, var(--app-content-bg-accent-a), transparent 32%),
+    radial-gradient(circle at 88% 10%, var(--app-content-bg-accent-b), transparent 30%),
+    var(--app-content-bg);
 }
 
 .app-shell {
@@ -23,8 +54,8 @@ body {
 
 .app-sider {
   min-height: 100vh;
-  background: linear-gradient(180deg, #06111f 0%, #0b1728 54%, #101827 100%);
-  border-right: 1px solid rgba(148, 163, 184, 0.18);
+  background: var(--app-shell-sidebar-bg);
+  border-right: 1px solid var(--app-shell-sidebar-border);
 }
 
 .brand {
@@ -32,7 +63,7 @@ body {
   display: flex;
   align-items: center;
   padding: 0 20px;
-  color: #e5f7ff;
+  color: var(--app-sidebar-text-primary);
   font-weight: 800;
   font-size: 18px;
   letter-spacing: 0.02em;
@@ -45,8 +76,9 @@ body {
   justify-content: space-between;
   gap: 16px;
   padding: 0 24px;
-  background: color-mix(in srgb, var(--semi-color-bg-0) 88%, transparent);
-  border-bottom: 1px solid var(--semi-color-border);
+  color: var(--app-text-primary);
+  background: color-mix(in srgb, var(--app-content-bg) 88%, transparent);
+  border-bottom: 1px solid var(--app-border-subtle);
   backdrop-filter: blur(16px);
 }
 
@@ -55,6 +87,8 @@ body {
   height: calc(100vh - 64px);
   padding: 24px;
   overflow: auto;
+  color: var(--app-text-primary);
+  background: var(--app-content-bg);
 }
 
 .content-stack {
@@ -76,7 +110,7 @@ body {
 
 .form-help-text {
   margin-top: 0;
-  color: var(--semi-color-text-2);
+  color: var(--app-text-tertiary);
 }
 
 .form-modal .semi-modal-body {
@@ -94,9 +128,10 @@ body {
 
 .address-import-progress {
   padding: 14px;
-  border: 1px solid var(--semi-color-border);
+  border: 1px solid var(--app-border-subtle);
   border-radius: 12px;
-  background: var(--semi-color-bg-1);
+  color: var(--app-text-primary);
+  background: var(--app-card-bg-strong);
 }
 
 .address-import-progress-title {
@@ -184,14 +219,14 @@ body {
 .login-card {
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 28px;
-  background: rgba(8, 18, 32, 0.72);
+  background: var(--app-login-panel-bg);
   box-shadow: 0 34px 110px rgba(0, 0, 0, 0.34);
   backdrop-filter: blur(18px);
 }
 
 .login-hero-panel {
   padding: 38px;
-  color: #e5f7ff;
+  color: var(--app-login-text-primary);
 }
 
 .login-brand-row {
@@ -204,7 +239,7 @@ body {
 .login-hero-title.semi-typography {
   max-width: 520px;
   margin: 48px 0 18px;
-  color: #f8fbff;
+  color: var(--app-login-text-primary);
   font-size: clamp(40px, 6vw, 76px);
   line-height: 0.92;
   letter-spacing: -0.05em;
@@ -213,7 +248,7 @@ body {
 .login-hero-copy.semi-typography {
   display: block;
   max-width: 500px;
-  color: rgba(226, 232, 240, 0.78);
+  color: var(--app-login-text-secondary);
   font-size: 17px;
   line-height: 1.8;
 }
@@ -253,11 +288,11 @@ body {
 }
 
 .login-card .semi-typography {
-  color: #e5f7ff;
+  color: var(--app-login-text-primary);
 }
 
 .login-card .semi-typography-tertiary {
-  color: rgba(226, 232, 240, 0.68);
+  color: var(--app-login-text-secondary);
 }
 
 .login-form {
@@ -265,7 +300,7 @@ body {
 }
 
 .login-form .semi-form-field-label-text {
-  color: rgba(226, 232, 240, 0.82);
+  color: var(--app-login-text-secondary);
 }
 
 .login-form .semi-input-wrapper {
@@ -292,12 +327,12 @@ body {
 }
 
 .chain-nav .semi-navigation-item {
-  color: rgba(226, 232, 240, 0.78);
+  color: var(--app-sidebar-text-secondary);
 }
 
 .chain-nav .semi-navigation-item-selected {
-  color: #e0f2fe;
-  background: rgba(14, 165, 233, 0.18);
+  color: var(--app-sidebar-selected-text);
+  background: var(--app-sidebar-selected-bg);
 }
 
 .shell-logout-button {
@@ -332,9 +367,10 @@ body {
 .data-surface {
   width: 100%;
   min-width: 0;
-  border: 1px solid var(--semi-color-border);
-  background: color-mix(in srgb, var(--semi-color-bg-1) 92%, transparent);
-  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.06);
+  border: 1px solid var(--app-border-subtle);
+  color: var(--app-text-primary);
+  background: var(--app-card-bg);
+  box-shadow: var(--app-shadow-soft);
 }
 
 .filter-panel-body {
@@ -365,8 +401,9 @@ body {
 }
 
 .metric-card {
-  border: 1px solid var(--semi-color-border);
-  background: linear-gradient(180deg, var(--semi-color-bg-1), var(--semi-color-bg-0));
+  border: 1px solid var(--app-border-subtle);
+  color: var(--app-text-primary);
+  background: linear-gradient(180deg, var(--app-card-bg-strong), var(--app-content-bg));
 }
 
 .metric-card-success { border-color: rgba(34, 197, 94, 0.32); }
@@ -384,7 +421,7 @@ body {
 }
 
 .data-table .semi-table-thead > .semi-table-row > .semi-table-row-head {
-  color: var(--semi-color-text-1);
+  color: var(--app-text-secondary);
   background: color-mix(in srgb, var(--semi-color-bg-2) 86%, transparent);
   font-size: 12px;
   font-weight: 700;
@@ -403,7 +440,7 @@ body {
 
 .dashboard-health-title {
   margin: 4px 0;
-  color: var(--semi-color-text-0);
+  color: var(--app-text-primary);
   font-size: 24px;
   font-weight: 800;
 }
@@ -423,11 +460,10 @@ body {
   position: relative;
   min-height: 132px;
   padding: 18px;
-  border: 1px solid var(--semi-color-border);
+  border: 1px solid var(--app-border-subtle);
   border-radius: 18px;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--semi-color-primary) 10%, transparent), transparent),
-    var(--semi-color-bg-0);
+  color: var(--app-text-primary);
+  background: var(--app-card-bg);
 }
 
 .dashboard-step-index {
@@ -441,7 +477,7 @@ body {
 
 .dashboard-step-title {
   margin: 18px 0 8px;
-  color: var(--semi-color-text-0);
+  color: var(--app-text-primary);
   font-size: 18px;
   font-weight: 800;
 }
@@ -453,14 +489,14 @@ body {
 .status-summary-item,
 .detail-line {
   padding: 12px 0;
-  border-bottom: 1px solid var(--semi-color-border);
+  border-bottom: 1px solid var(--app-border-subtle);
 }
 
 .status-summary-item div,
 .detail-value {
   display: block;
   margin-top: 4px;
-  color: var(--semi-color-text-0);
+  color: var(--app-text-primary);
   word-break: break-word;
 }
 
@@ -471,8 +507,9 @@ body {
 
 .notification-detail-card {
   width: 100%;
-  border: 1px solid var(--semi-color-border);
-  background: color-mix(in srgb, var(--semi-color-bg-1) 94%, transparent);
+  border: 1px solid var(--app-border-subtle);
+  color: var(--app-text-primary);
+  background: var(--app-card-bg);
 }
 
 .detail-line:first-child {
@@ -488,10 +525,10 @@ body {
   margin: 10px 0 0;
   padding: 14px;
   overflow: auto;
-  color: var(--semi-color-text-0);
-  border: 1px solid var(--semi-color-border);
+  color: var(--app-text-primary);
+  border: 1px solid var(--app-border-subtle);
   border-radius: 14px;
-  background: var(--semi-color-bg-0);
+  background: var(--app-content-bg);
   white-space: pre-wrap;
   word-break: break-word;
 }

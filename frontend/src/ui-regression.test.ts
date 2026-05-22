@@ -177,6 +177,43 @@ describe('frontend UI regressions', () => {
     expectContains(app, '<AppShell');
   });
 
+  test('light mode uses app tokens for readable main content while keeping brand sidebar dark', () => {
+    const styles = readSource('styles.css');
+
+    for (const expected of [
+      '--app-shell-sidebar-bg',
+      '--app-content-bg',
+      '--app-card-bg',
+      '--app-text-primary',
+      '--app-text-secondary',
+      '--app-border-subtle',
+      "body[theme-mode='dark']",
+      'background: var(--app-content-bg)',
+      'color: var(--app-text-primary)',
+      '.app-sider',
+    ]) {
+      expectContains(styles, expected);
+    }
+
+    const mainContentSelectors = [
+      '.app-content',
+      '.filter-panel',
+      '.data-surface',
+      '.notification-detail-card',
+      '.detail-json',
+    ];
+    for (const selector of mainContentSelectors) {
+      const selectorIndex = styles.indexOf(selector);
+      if (selectorIndex === -1) {
+        throw new Error(`Missing selector ${selector}`);
+      }
+      const block = styles.slice(selectorIndex, styles.indexOf('}', selectorIndex));
+      expectNotContains(block, '#e5f7ff');
+      expectNotContains(block, '#f8fbff');
+      expectNotContains(block, 'rgba(226, 232, 240');
+    }
+  });
+
   test('frontend design system components exist', () => {
     for (const componentPath of [
       'components/AppShell.tsx',
