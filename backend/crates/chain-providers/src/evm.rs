@@ -8,7 +8,7 @@ use num_bigint::{BigInt, BigUint};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{str::FromStr, time::Duration};
+use std::{error::Error as StdError, str::FromStr, time::Duration};
 
 #[derive(Debug, Clone)]
 pub struct EvmRpcClient {
@@ -151,11 +151,7 @@ impl EvmRpcClient {
             .send()
             .await
             .map_err(|error| {
-                AppError::Config(format_rpc_request_error(
-                    method,
-                    &self.base_url,
-                    &error.without_url().to_string(),
-                ))
+                AppError::Config(format_reqwest_request_error(method, &self.base_url, error))
             })?;
         let status = response.status();
         let body = response.text().await.map_err(|error| {
@@ -182,8 +178,45 @@ pub fn build_json_rpc_request(method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
 }
 
-fn format_rpc_request_error(method: &str, _base_url: &str, error: &str) -> String {
-    format!("evm rpc {method} request failed: {error}")
+fn format_reqwest_request_error(method: &str, base_url: &str, error: reqwest::Error) -> String {
+    let mut sources = Vec::new();
+    let mut source = error.source();
+    while let Some(error) = source {
+        sources.push(error.to_string());
+        source = error.source();
+    }
+    format_rpc_request_error_with_sources(
+        method,
+        base_url,
+        error.without_url().to_string(),
+        sources,
+    )
+}
+
+fn format_rpc_request_error_with_sources(
+    method: &str,
+    base_url: &str,
+    error: impl Into<String>,
+    sources: impl IntoIterator<Item = impl AsRef<str>>,
+) -> String {
+    let error = redact_rpc_url(error.into(), base_url);
+    let details = sources
+        .into_iter()
+        .map(|source| redact_rpc_url(source.as_ref().to_string(), base_url))
+        .filter(|source| !source.is_empty() && source != &error)
+        .collect::<Vec<_>>();
+    if details.is_empty() {
+        format!("evm rpc {method} request failed: {error}")
+    } else {
+        format!(
+            "evm rpc {method} request failed: {error}; caused by: {}",
+            details.join(": ")
+        )
+    }
+}
+
+fn redact_rpc_url(value: String, base_url: &str) -> String {
+    value.replace(base_url, "[redacted rpc url]")
 }
 
 fn format_rpc_body_error(method: &str, error: &str) -> String {
@@ -572,7 +605,7 @@ fn mock_hash(kind: &str, address: &WatchedAddress, asset: &Asset, sequence: i64)
 mod tests {
     use super::{
         address_to_topic, build_json_rpc_request, decode_erc20_transfer_log,
-        evm_balance_change_event, format_rpc_request_error, mock_evm_transfer,
+        evm_balance_change_event, format_rpc_request_error_with_sources, mock_evm_transfer,
         parse_hex_quantity_to_i64, parse_hex_u256_to_decimal_string, parse_json_rpc_hex_result,
         topic_to_address, transfer_event_draft, wei_to_decimal_string, DecodedErc20Transfer,
         EvmBlockTag, EvmLog, EvmLogFilter, TRANSFER_TOPIC0,
@@ -793,14 +826,35 @@ mod tests {
 
     #[test]
     fn json_rpc_request_errors_do_not_include_provider_url() {
-        let message = format_rpc_request_error(
+        let message = format_rpc_request_error_with_sources(
             "eth_getBalance",
             "https://example.invalid/provider-key",
             "connection refused",
+            std::iter::empty::<String>(),
         );
         assert!(message.contains("eth_getBalance"));
         assert!(message.contains("connection refused"));
         assert!(!message.contains("example.invalid"));
+        assert!(!message.contains("provider-key"));
+    }
+
+    #[test]
+    fn json_rpc_request_errors_include_sanitized_source_chain() {
+        let message = format_rpc_request_error_with_sources(
+            "eth_blockNumber",
+            "https://secret.example.invalid/provider-key",
+            "error sending request for url (https://secret.example.invalid/provider-key)",
+            [
+                "client error (Connect)",
+                "dns error: failed to lookup address information: nodename nor servname provided, or not known",
+            ],
+        );
+
+        assert!(message.contains("eth_blockNumber"));
+        assert!(message.contains("error sending request"));
+        assert!(message.contains("dns error"));
+        assert!(message.contains("failed to lookup address information"));
+        assert!(!message.contains("secret.example.invalid"));
         assert!(!message.contains("provider-key"));
     }
 
