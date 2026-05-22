@@ -26,9 +26,12 @@ pub fn mask_proxy_url(url: &str) -> String {
     let Some((userinfo, host)) = authority.rsplit_once('@') else {
         return url.to_string();
     };
-    let username = userinfo.split(':').next().unwrap_or("");
-    if username.is_empty() || host.is_empty() {
+    if host.is_empty() {
         return url.to_string();
+    }
+    let username = userinfo.split(':').next().unwrap_or("");
+    if username.is_empty() {
+        return format!("{scheme}://***@{host}{path}");
     }
     format!("{scheme}://{username}:***@{host}{path}")
 }
@@ -105,6 +108,10 @@ mod tests {
         assert_eq!(
             mask_proxy_url("http://alice:secret@proxy.example.com:7890"),
             "http://alice:***@proxy.example.com:7890"
+        );
+        assert_eq!(
+            mask_proxy_url("http://:secret@proxy.example.com:7890"),
+            "http://***@proxy.example.com:7890"
         );
         assert_eq!(
             mask_proxy_url("socks5://proxy.example.com:1080"),
