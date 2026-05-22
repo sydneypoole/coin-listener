@@ -20,8 +20,8 @@ use coin_listener_core::{
         LoginResponse, NotificationChannelTestResponse, NotificationDeliveryListResponse,
         NotificationDeliveryQuery, NotificationOutboxListResponse, NotificationOutboxQuery,
         QueueStatus, RetryNotificationOutboxResponse, SystemStatus,
-        UpdateNotificationChannelRequest, UpdateTelegramBotRequest, UserSummary,
-        VerificationResponse,
+        UpdateNotificationChannelRequest, UpdateTelegramBotRequest, UpdateTelegramSettingsRequest,
+        UserSummary, VerificationResponse,
     },
     AppError, AppResult,
 };
@@ -30,7 +30,7 @@ use coin_listener_storage::{
     notify_queue::{connect_notify_queue, NotifyQueue},
     repositories,
     scan_queue::{connect_scan_queue, ScanQueue},
-    system_status,
+    system_status, telegram_settings,
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -91,6 +91,10 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
             put(update_address).delete(delete_address),
         )
         .route("/api/events", get(list_events))
+        .route(
+            "/api/telegram-settings",
+            get(get_telegram_settings).put(update_telegram_settings),
+        )
         .route(
             "/api/telegram-bots",
             get(list_telegram_bots).post(create_telegram_bot),
@@ -481,6 +485,26 @@ async fn create_notification_channel(
         notifications::create_notification_channel(&state.postgres, auth.tenant_id, request)
             .await?;
     Ok((StatusCode::CREATED, Json(channel)).into_response())
+}
+
+async fn get_telegram_settings(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
+    let settings =
+        telegram_settings::get_telegram_settings(&state.postgres, auth.tenant_id).await?;
+    Ok(Json(settings).into_response())
+}
+
+async fn update_telegram_settings(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<UpdateTelegramSettingsRequest>,
+) -> Result<Response, ApiError> {
+    let settings =
+        telegram_settings::update_telegram_settings(&state.postgres, auth.tenant_id, request)
+            .await?;
+    Ok(Json(settings).into_response())
 }
 
 async fn list_telegram_bots(
@@ -1019,6 +1043,20 @@ mod tests {
         ] {
             assert!(source.contains(route), "missing route {route}");
         }
+    }
+
+    #[test]
+    fn telegram_settings_routes_are_protected() {
+        let source = production_source();
+        let route_index = source
+            .find("/api/telegram-settings")
+            .expect("telegram settings route is registered");
+        let auth_layer_index = source
+            .find("route_layer(middleware::from_fn_with_state")
+            .expect("auth route layer is registered");
+
+        assert!(route_index < auth_layer_index);
+        assert!(source.contains("get(get_telegram_settings).put(update_telegram_settings)"));
     }
 
     #[test]
