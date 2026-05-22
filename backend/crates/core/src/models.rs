@@ -186,6 +186,7 @@ pub struct WatchedAddressImportTask {
     pub chain_id: Uuid,
     pub asset_ids: Vec<Uuid>,
     #[serde(default)]
+    #[sqlx(json, default)]
     pub chain_configs: Vec<WatchedAddressImportChainConfig>,
     pub priority: String,
     pub scan_interval_seconds: i32,
@@ -210,7 +211,9 @@ pub struct WatchedAddressImportErrorRow {
     pub row_number: i32,
     pub address: String,
     pub raw_text: String,
+    #[sqlx(default)]
     pub chain_id: Uuid,
+    #[sqlx(default)]
     pub chain_name: Option<String>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
