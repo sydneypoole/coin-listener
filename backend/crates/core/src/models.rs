@@ -284,6 +284,44 @@ pub struct EventQuery {
     pub is_transfer: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct EvmTransactionRescanRequest {
+    pub chain_id: Uuid,
+    pub tx_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvmTransactionRescanTransferSummary {
+    pub asset_id: Uuid,
+    pub symbol: String,
+    pub token_contract: String,
+    pub from_address: String,
+    pub to_address: String,
+    pub amount_raw: String,
+    pub amount_decimal: String,
+    pub log_index: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvmTransactionRescanSummary {
+    pub chain_id: Uuid,
+    pub tx_hash: String,
+    pub tx_from: String,
+    pub tx_to: Option<String>,
+    pub native_value_raw: String,
+    pub block_number: i64,
+    pub token_transfer_count: usize,
+    pub inserted_event_count: usize,
+    pub skipped_event_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvmTransactionRescanResponse {
+    pub summary: EvmTransactionRescanSummary,
+    pub token_transfers: Vec<EvmTransactionRescanTransferSummary>,
+    pub events: Vec<AddressEvent>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemStatus {
     pub generated_at: DateTime<Utc>,
@@ -787,18 +825,90 @@ mod tests {
     use super::{
         AddressEvent, CreateBalanceSnapshotRequest, CreateTelegramBindingRequest,
         CreateTelegramBotRequest, CreateWatchedAddressImportRequest, CreateWatchedAddressRequest,
-        EventStatus, NotificationDelivery, NotificationDeliveryListItem,
-        NotificationDeliveryListResponse, NotificationDeliveryQuery, NotificationOutboxDetail,
-        NotificationOutboxItem, NotificationOutboxListItem, NotificationOutboxListResponse,
-        NotificationOutboxQuery, NotificationStatus, NotifyEventTask, OutboxStatusCounts,
-        ProviderChainStatus, ProviderHealthStatus, ProviderStatus, ProviderStatusItem, QueueStatus,
-        RetryNotificationOutboxResponse, ScanAddressTask, ScanCursor, ScanStatus,
-        ServiceHealthStatus, ServiceHeartbeatStatusItem, SystemStatus, TelegramBindingRequest,
-        UpdateTelegramBotRequest, WatchedAddressImportChainConfig, WatchedAddressImportDefaults,
+        EventStatus, EvmTransactionRescanRequest, EvmTransactionRescanResponse,
+        EvmTransactionRescanSummary, EvmTransactionRescanTransferSummary, NotificationDelivery,
+        NotificationDeliveryListItem, NotificationDeliveryListResponse, NotificationDeliveryQuery,
+        NotificationOutboxDetail, NotificationOutboxItem, NotificationOutboxListItem,
+        NotificationOutboxListResponse, NotificationOutboxQuery, NotificationStatus,
+        NotifyEventTask, OutboxStatusCounts, ProviderChainStatus, ProviderHealthStatus,
+        ProviderStatus, ProviderStatusItem, QueueStatus, RetryNotificationOutboxResponse,
+        ScanAddressTask, ScanCursor, ScanStatus, ServiceHealthStatus, ServiceHeartbeatStatusItem,
+        SystemStatus, TelegramBindingRequest, UpdateTelegramBotRequest,
+        WatchedAddressImportChainConfig, WatchedAddressImportDefaults,
         WatchedAddressImportErrorRow, WatchedAddressImportTask, WatchedAddressResponse,
     };
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
+
+    #[test]
+    fn evm_transaction_rescan_request_and_response_round_trip_json() {
+        let tx_hash = "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389";
+        let request: EvmTransactionRescanRequest = serde_json::from_str(&format!(
+            r#"{{"chain_id":"00000000-0000-0000-0000-000000000001","tx_hash":"{tx_hash}"}}"#
+        ))
+        .expect("deserialize rescan request");
+        assert_eq!(request.chain_id, Uuid::from_u128(1));
+        assert_eq!(request.tx_hash, tx_hash);
+
+        let now = Utc.with_ymd_and_hms(2026, 5, 23, 12, 0, 0).unwrap();
+        let response = EvmTransactionRescanResponse {
+            summary: EvmTransactionRescanSummary {
+                chain_id: Uuid::from_u128(1),
+                tx_hash: tx_hash.to_string(),
+                tx_from: "0x0000000000000000000000000000000000000002".to_string(),
+                tx_to: Some("0x0000000000000000000000000000000000000003".to_string()),
+                native_value_raw: "0".to_string(),
+                block_number: 20_000_000,
+                token_transfer_count: 1,
+                inserted_event_count: 1,
+                skipped_event_count: 0,
+            },
+            token_transfers: vec![EvmTransactionRescanTransferSummary {
+                asset_id: Uuid::from_u128(0x101),
+                symbol: "USDC".to_string(),
+                token_contract: "0x0000000000000000000000000000000000000101".to_string(),
+                from_address: "0x0000000000000000000000000000000000000002".to_string(),
+                to_address: "0x0000000000000000000000000000000000000003".to_string(),
+                amount_raw: "1000000".to_string(),
+                amount_decimal: "1.0".to_string(),
+                log_index: 7,
+            }],
+            events: vec![AddressEvent {
+                id: Uuid::from_u128(0x201),
+                tenant_id: Uuid::from_u128(2),
+                chain_id: Uuid::from_u128(1),
+                address_id: Uuid::from_u128(3),
+                asset_id: Uuid::from_u128(0x101),
+                event_type: "transfer".to_string(),
+                direction: "in".to_string(),
+                is_transfer: true,
+                tx_hash: Some(tx_hash.to_string()),
+                log_index: Some(7),
+                block_number: Some(20_000_000),
+                block_hash: Some("0xblock".to_string()),
+                confirmations: 1,
+                from_address: Some("0x0000000000000000000000000000000000000002".to_string()),
+                to_address: Some("0x0000000000000000000000000000000000000003".to_string()),
+                amount_raw: Some("1000000".to_string()),
+                amount_decimal: Some("1.0".to_string()),
+                balance_before_raw: None,
+                balance_after_raw: None,
+                balance_delta_raw: None,
+                metadata: serde_json::json!({"source":"rescan"}),
+                detected_at: now,
+                created_at: now,
+            }],
+        };
+
+        let payload = serde_json::to_string(&response).expect("serialize rescan response");
+        let decoded: EvmTransactionRescanResponse =
+            serde_json::from_str(&payload).expect("deserialize rescan response");
+
+        assert_eq!(decoded.summary.tx_hash, tx_hash);
+        assert_eq!(decoded.token_transfers[0].symbol, "USDC");
+        assert_eq!(decoded.events[0].tx_hash.as_deref(), Some(tx_hash));
+        assert!(payload.contains("\"inserted_event_count\":1"));
+    }
 
     #[test]
     fn telegram_binding_response_carries_private_and_group_binding_fields() {

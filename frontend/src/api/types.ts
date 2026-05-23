@@ -100,6 +100,40 @@ export type EventQuery = {
   is_transfer?: boolean;
 };
 
+export type EvmTransactionRescanRequest = {
+  chain_id: string;
+  tx_hash: string;
+};
+
+export type EvmTransactionRescanTransferSummary = {
+  asset_id: string;
+  symbol: string;
+  token_contract: string;
+  from_address: string;
+  to_address: string;
+  amount_raw: string;
+  amount_decimal: string;
+  log_index: number;
+};
+
+export type EvmTransactionRescanSummary = {
+  chain_id: string;
+  tx_hash: string;
+  tx_from: string;
+  tx_to?: string | null;
+  native_value_raw: string;
+  block_number: number;
+  token_transfer_count: number;
+  inserted_event_count: number;
+  skipped_event_count: number;
+};
+
+export type EvmTransactionRescanResponse = {
+  summary: EvmTransactionRescanSummary;
+  token_transfers: EvmTransactionRescanTransferSummary[];
+  events: AddressEvent[];
+};
+
 export type CreateProviderRequest = Omit<Provider, 'id'>;
 
 export type ProviderTestResponse = {

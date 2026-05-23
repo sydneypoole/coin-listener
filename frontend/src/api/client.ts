@@ -11,6 +11,8 @@ import type {
   CreateWatchedAddressImportRequest,
   CreateWatchedAddressRequest,
   EventQuery,
+  EvmTransactionRescanRequest,
+  EvmTransactionRescanResponse,
   InAppNotification,
   InAppNotificationQuery,
   LoginResponse,
@@ -153,6 +155,13 @@ export function deleteWatchedAddress(id: string): Promise<void> {
 
 export function listEvents(filters: EventQuery = {}): Promise<AddressEvent[]> {
   return request<AddressEvent[]>(`/api/events${buildQuery(filters)}`);
+}
+
+export function rescanEvmTransaction(payload: EvmTransactionRescanRequest): Promise<EvmTransactionRescanResponse> {
+  return request<EvmTransactionRescanResponse>('/api/evm/transactions/rescan', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export function scanAddress(id: string): Promise<AddressEvent> {

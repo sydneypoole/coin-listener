@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Form, Select, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
-import { ApiRequestError, listAssets, listChains, listEvents, listWatchedAddresses, scanAddress } from '../api/client';
-import type { AddressEvent, EventQuery } from '../api/types';
+import { Banner, Button, Form, Input, Select, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { ApiRequestError, listAssets, listChains, listEvents, listWatchedAddresses, rescanEvmTransaction, scanAddress } from '../api/client';
+import type { AddressEvent, EventQuery, EvmTransactionRescanResponse } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
 import { FilterPanel } from '../components/FilterPanel';
@@ -37,6 +37,9 @@ const directionOptions = [
 export function EventsPage() {
   const [filters, setFilters] = useState<EventQuery>({});
   const [scanAddressId, setScanAddressId] = useState<string>();
+  const [rescanChainId, setRescanChainId] = useState<string>();
+  const [rescanTxHash, setRescanTxHash] = useState('');
+  const [rescanResult, setRescanResult] = useState<EvmTransactionRescanResponse>();
   const queryClient = useQueryClient();
 
   const eventsQuery = useQuery({
@@ -50,6 +53,10 @@ export function EventsPage() {
   const chainMap = useMemo(() => new Map((chainsQuery.data ?? []).map(chain => [chain.id, chain.name])), [chainsQuery.data]);
   const evmChainIds = useMemo(
     () => new Set((chainsQuery.data ?? []).filter(chain => chain.chain_type === 'evm').map(chain => chain.id)),
+    [chainsQuery.data],
+  );
+  const evmChains = useMemo(
+    () => (chainsQuery.data ?? []).filter(chain => chain.chain_type === 'evm'),
     [chainsQuery.data],
   );
   const evmAddresses = useMemo(
@@ -88,6 +95,25 @@ export function EventsPage() {
     },
   });
 
+  const rescanMutation = useMutation({
+    mutationFn: rescanEvmTransaction,
+    onSuccess: result => {
+      setRescanResult(result);
+      Toast.success(`交易回填完成：新增 ${result.summary.inserted_event_count} 条，跳过 ${result.summary.skipped_event_count} 条`);
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    },
+    onError: error => {
+      Toast.error(error instanceof Error ? error.message : '交易回填失败');
+    },
+  });
+
+  const normalizedRescanTxHash = rescanTxHash.trim();
+  const rescanDisabledReason = !rescanChainId
+    ? '请选择 EVM 链'
+    : !/^0x[0-9a-fA-F]{64}$/.test(normalizedRescanTxHash)
+      ? '请输入 0x 开头的 32 字节交易哈希'
+      : undefined;
+
   function handleFilterSubmit(values: Record<string, unknown>) {
     const form = values as FilterForm;
     setFilters({
@@ -109,6 +135,22 @@ export function EventsPage() {
     const address = addressMap.get(addressId);
     if (!address) return addressId;
     return address.label ? `${address.label} / ${address.address}` : address.address;
+  }
+
+  function renderEventType(event: AddressEvent) {
+    if (event.event_type === 'fee_only_change') return <Tag color="orange">Gas 消耗</Tag>;
+    if (event.event_type === 'balance_change') return <Tag color="blue">余额变化</Tag>;
+    if (event.event_type === 'transfer') return <Tag color="green">转账</Tag>;
+    return <Tag>{event.event_type}</Tag>;
+  }
+
+  function renderEventSource(event: AddressEvent) {
+    const source = typeof event.metadata?.source === 'string' ? event.metadata.source : undefined;
+    if (source === 'evm_tx_rescan') return <Tag color="purple">交易回填</Tag>;
+    if (source === 'evm_erc20_transfer_log') return <Tag color="green">EVM 日志</Tag>;
+    if (source === 'evm_balance_snapshot') return <Tag color="blue">余额快照</Tag>;
+    if (source === 'mock_evm_transfer') return <Tag color="grey">模拟</Tag>;
+    return <Tag color="grey">-</Tag>;
   }
 
   return (
@@ -193,6 +235,50 @@ export function EventsPage() {
         </Space>
       </FilterPanel>
 
+      <FilterPanel title="EVM 交易回填">
+        <Space vertical align="start">
+          <Space>
+            <Select
+              value={rescanChainId}
+              onChange={value => setRescanChainId(value as string | undefined)}
+              showClear
+              filter
+              placeholder="选择 EVM 链"
+              style={{ width: 220 }}
+              disabled={evmChains.length === 0}
+            >
+              {evmChains.map(chain => (
+                <Select.Option key={chain.id} value={chain.id}>{chain.name}</Select.Option>
+              ))}
+            </Select>
+            <Input
+              value={rescanTxHash}
+              onChange={value => setRescanTxHash(String(value))}
+              placeholder="0x...交易哈希"
+              style={{ width: 520 }}
+            />
+            <Button
+              type="primary"
+              loading={rescanMutation.isPending}
+              disabled={Boolean(rescanDisabledReason)}
+              onClick={() => rescanChainId && rescanMutation.mutate({ chain_id: rescanChainId, tx_hash: normalizedRescanTxHash })}
+            >
+              重扫交易
+            </Button>
+          </Space>
+          <Text type={rescanDisabledReason ? 'warning' : 'tertiary'}>
+            {rescanDisabledReason ?? '按 tx hash 拉取交易和 receipt，解析 Transfer logs 并为命中的监听地址回填事件。'}
+          </Text>
+          {rescanResult ? (
+            <Banner
+              type="info"
+              title={`回填结果：新增 ${rescanResult.summary.inserted_event_count} 条，跳过 ${rescanResult.summary.skipped_event_count} 条`}
+              description={`Token transfers: ${rescanResult.summary.token_transfer_count}; native value raw: ${rescanResult.summary.native_value_raw}; block: ${rescanResult.summary.block_number}`}
+            />
+          ) : null}
+        </Space>
+      </FilterPanel>
+
       <DataSurface title="事件中心">
         <DataTable<AddressEvent>
           tableId="events"
@@ -206,7 +292,8 @@ export function EventsPage() {
             { title: '链', dataIndex: 'chain_id', width: 120, render: value => chainMap.get(String(value)) ?? String(value) },
             { title: '地址', dataIndex: 'address_id', width: 280, ellipsis: { showTitle: true }, className: 'table-cell-mono', render: value => renderAddress(String(value)) },
             { title: '资产', dataIndex: 'asset_id', width: 100, render: value => assetMap.get(String(value)) ?? String(value) },
-            { title: '类型', dataIndex: 'event_type', width: 150, render: value => <Tag>{String(value)}</Tag> },
+            { title: '类型', width: 150, render: (_, event) => renderEventType(event) },
+            { title: '来源', width: 110, render: (_, event) => renderEventSource(event) },
             { title: '转账', dataIndex: 'is_transfer', width: 90, render: value => <Tag color={value ? 'green' : 'grey'}>{value ? '是' : '否'}</Tag> },
             { title: '方向', dataIndex: 'direction', width: 90 },
             { title: '金额', dataIndex: 'amount_decimal', width: 120, render: value => value ? String(value) : '-' },

@@ -11,15 +11,21 @@ use axum::{
     Json, Router,
 };
 use chrono::{Duration, Utc};
-use coin_listener_chain_providers::{btc::BtcClient, evm::EvmRpcClient, tron::TronClient};
+use coin_listener_chain_providers::{
+    btc::BtcClient,
+    evm::{self, EvmRpcClient},
+    tron::TronClient,
+};
 use coin_listener_core::{
     models::{
-        CreateNotificationChannelRequest, CreateNotificationRuleRequest, CreateProviderRequest,
-        CreateTelegramBindingRequest, CreateTelegramBotRequest, CreateWatchedAddressImportRequest,
-        CreateWatchedAddressRequest, EventQuery, InAppNotificationQuery, LoginRequest,
-        LoginResponse, NotificationChannelTestResponse, NotificationDeliveryListResponse,
+        AddressEventDraft, Asset, CreateNotificationChannelRequest, CreateNotificationRuleRequest,
+        CreateProviderRequest, CreateTelegramBindingRequest, CreateTelegramBotRequest,
+        CreateWatchedAddressImportRequest, CreateWatchedAddressRequest, EventQuery,
+        EvmTransactionRescanRequest, EvmTransactionRescanResponse, EvmTransactionRescanSummary,
+        EvmTransactionRescanTransferSummary, InAppNotificationQuery, LoginRequest, LoginResponse,
+        NotificationChannelTestResponse, NotificationDeliveryListResponse,
         NotificationDeliveryQuery, NotificationOutboxListResponse, NotificationOutboxQuery,
-        QueueStatus, RetryNotificationOutboxResponse, SystemStatus,
+        Provider, QueueStatus, RetryNotificationOutboxResponse, ScanAddressContext, SystemStatus,
         UpdateNotificationChannelRequest, UpdateTelegramBotRequest, UpdateTelegramSettingsRequest,
         UserSummary, VerificationResponse,
     },
@@ -123,6 +129,7 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
             put(update_address).delete(delete_address),
         )
         .route("/api/events", get(list_events))
+        .route("/api/evm/transactions/rescan", post(rescan_evm_transaction))
         .route(
             "/api/telegram-settings",
             get(get_telegram_settings).put(update_telegram_settings),
@@ -501,6 +508,345 @@ async fn list_events(
 ) -> Result<Response, ApiError> {
     let events = repositories::list_events(&state.postgres, auth.tenant_id, query).await?;
     Ok(Json(events).into_response())
+}
+
+async fn rescan_evm_transaction(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<EvmTransactionRescanRequest>,
+) -> Result<Response, ApiError> {
+    validate_evm_tx_hash(&request.tx_hash)?;
+
+    let chain = repositories::chain_by_id(&state.postgres, request.chain_id).await?;
+    if chain.chain_type != "evm" {
+        return Err(AppError::Validation("rescan only supports evm chains".to_string()).into());
+    }
+
+    let provider =
+        repositories::active_rpc_provider_for_chain(&state.postgres, request.chain_id).await?;
+    let rpc = EvmRpcClient::new(
+        provider.base_url.clone(),
+        provider_timeout_duration(&provider)?,
+    );
+    let tx = rpc.eth_get_transaction_by_hash(&request.tx_hash).await?;
+    let receipt = rpc.eth_get_transaction_receipt(&request.tx_hash).await?;
+    validate_evm_rescan_rpc_consistency(&request.tx_hash, &tx, &receipt)?;
+    let receipt_succeeded = evm_receipt_succeeded(&receipt)?;
+    let block_number = tx
+        .block_number
+        .as_deref()
+        .map(evm::parse_hex_quantity_to_i64)
+        .transpose()?
+        .ok_or_else(|| AppError::Validation("transaction is not mined".to_string()))?;
+    let native_value_raw = evm::parse_hex_u256_to_decimal_string(&tx.value)?;
+
+    let watched_addresses = repositories::rescan_watched_addresses_for_chain(
+        &state.postgres,
+        auth.tenant_id,
+        request.chain_id,
+    )
+    .await?;
+    let assets = repositories::assets_for_chain(&state.postgres, request.chain_id).await?;
+    let native_asset = assets
+        .iter()
+        .find(|asset| asset.asset_type == "native")
+        .cloned()
+        .ok_or_else(|| AppError::NotFound("native asset".to_string()))?;
+    let token_transfers = evm::decode_rescan_token_transfers(&receipt, &assets)?;
+
+    let mut inserted_events = Vec::new();
+    let mut skipped_event_count = 0usize;
+    let mut transfer_summaries = Vec::new();
+    for address in &watched_addresses {
+        let selected_assets =
+            repositories::selected_assets_for_address(&state.postgres, address.id).await?;
+        let context = ScanAddressContext {
+            id: address.id,
+            tenant_id: address.tenant_id,
+            chain_id: address.chain_id,
+            address: address.address.clone(),
+            scan_interval_seconds: address.scan_interval_seconds,
+            chain_type: chain.chain_type.clone(),
+        };
+        let watched = address.address.to_lowercase();
+
+        if receipt_succeeded {
+            for decoded in token_transfers
+                .iter()
+                .filter(|decoded| asset_selected(&selected_assets, decoded.asset.id))
+            {
+                let from = decoded.transfer.from_address.to_lowercase();
+                let to = decoded.transfer.to_address.to_lowercase();
+                if from != watched && to != watched {
+                    continue;
+                }
+
+                push_transfer_summary(&mut transfer_summaries, decoded);
+                let draft = evm::transfer_event_draft_with_source(
+                    &context,
+                    &decoded.asset,
+                    decoded.transfer.clone(),
+                    "evm_tx_rescan",
+                    &tx,
+                )?;
+                match repositories::insert_event_and_outbox_if_not_exists(&state.postgres, draft)
+                    .await?
+                {
+                    Some(event) => inserted_events.push(event),
+                    None => skipped_event_count += 1,
+                }
+            }
+        }
+
+        let native_asset_is_selected = asset_selected(&selected_assets, native_asset.id);
+        if should_insert_native_transfer_event(
+            receipt_succeeded,
+            native_asset_is_selected,
+            &native_value_raw,
+            &tx,
+            &address.address,
+        ) {
+            let draft = evm_native_transfer_event_draft(
+                &context,
+                &native_asset,
+                &tx,
+                block_number,
+                &native_value_raw,
+            )?;
+            match repositories::insert_event_and_outbox_if_not_exists(&state.postgres, draft)
+                .await?
+            {
+                Some(event) => inserted_events.push(event),
+                None => skipped_event_count += 1,
+            }
+        }
+
+        if should_insert_fee_only_event(
+            receipt_succeeded,
+            native_asset_is_selected,
+            &native_value_raw,
+            &tx,
+            &address.address,
+        ) {
+            let draft =
+                evm::evm_fee_only_event_draft(&context, &native_asset, &tx, "evm_tx_rescan")?;
+            match repositories::insert_event_and_outbox_if_not_exists(&state.postgres, draft)
+                .await?
+            {
+                Some(event) => inserted_events.push(event),
+                None => skipped_event_count += 1,
+            }
+        }
+    }
+
+    dedupe_transfer_summaries(&mut transfer_summaries);
+
+    Ok(Json(EvmTransactionRescanResponse {
+        summary: EvmTransactionRescanSummary {
+            chain_id: request.chain_id,
+            tx_hash: tx.hash,
+            tx_from: tx.from,
+            tx_to: tx.to,
+            native_value_raw,
+            block_number,
+            token_transfer_count: transfer_summaries.len(),
+            inserted_event_count: inserted_events.len(),
+            skipped_event_count,
+        },
+        token_transfers: transfer_summaries,
+        events: inserted_events,
+    })
+    .into_response())
+}
+
+fn validate_evm_tx_hash(tx_hash: &str) -> AppResult<()> {
+    let digits = tx_hash
+        .strip_prefix("0x")
+        .ok_or_else(|| AppError::Validation("tx_hash must start with 0x".to_string()))?;
+    if digits.len() != 64
+        || !digits
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return Err(AppError::Validation(
+            "tx_hash must be 32-byte hex".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn provider_timeout_duration(provider: &Provider) -> AppResult<StdDuration> {
+    let timeout_ms = u64::try_from(provider.timeout_ms)
+        .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
+    if timeout_ms == 0 {
+        return Err(AppError::Validation(
+            "timeout_ms must be positive".to_string(),
+        ));
+    }
+    Ok(StdDuration::from_millis(timeout_ms))
+}
+
+fn asset_selected(selected_assets: &[Asset], asset_id: Uuid) -> bool {
+    selected_assets.iter().any(|asset| asset.id == asset_id)
+}
+
+fn validate_evm_rescan_rpc_consistency(
+    requested_tx_hash: &str,
+    tx: &evm::EvmTransaction,
+    receipt: &evm::EvmTransactionReceipt,
+) -> AppResult<()> {
+    if !tx.hash.eq_ignore_ascii_case(requested_tx_hash) {
+        return Err(AppError::Validation(
+            "transaction hash does not match request".to_string(),
+        ));
+    }
+    if !tx.hash.eq_ignore_ascii_case(&receipt.transaction_hash) {
+        return Err(AppError::Validation(
+            "transaction hash does not match receipt".to_string(),
+        ));
+    }
+    if !tx.from.eq_ignore_ascii_case(&receipt.from)
+        || !optional_address_matches(&tx.to, &receipt.to)
+    {
+        return Err(AppError::Validation(
+            "transaction endpoints do not match receipt".to_string(),
+        ));
+    }
+    if tx.block_number != receipt.block_number || tx.block_hash != receipt.block_hash {
+        return Err(AppError::Validation(
+            "transaction block does not match receipt".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn optional_address_matches(left: &Option<String>, right: &Option<String>) -> bool {
+    match (left.as_deref(), right.as_deref()) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn evm_receipt_succeeded(receipt: &evm::EvmTransactionReceipt) -> AppResult<bool> {
+    match receipt.status.as_deref() {
+        Some("0x1") | Some("0X1") => Ok(true),
+        Some("0x0") | Some("0X0") => Ok(false),
+        Some(status) => Err(AppError::Validation(format!(
+            "unsupported transaction receipt status: {status}"
+        ))),
+        None => Ok(true),
+    }
+}
+
+fn native_transfer_matches(tx: &evm::EvmTransaction, watched_address: &str) -> bool {
+    tx.from.eq_ignore_ascii_case(watched_address)
+        || tx
+            .to
+            .as_deref()
+            .map(|to| to.eq_ignore_ascii_case(watched_address))
+            .unwrap_or(false)
+}
+
+fn should_insert_native_transfer_event(
+    receipt_succeeded: bool,
+    native_asset_is_selected: bool,
+    native_value_raw: &str,
+    tx: &evm::EvmTransaction,
+    watched_address: &str,
+) -> bool {
+    receipt_succeeded
+        && native_asset_is_selected
+        && native_value_raw != "0"
+        && native_transfer_matches(tx, watched_address)
+}
+
+fn should_insert_fee_only_event(
+    receipt_succeeded: bool,
+    native_asset_is_selected: bool,
+    native_value_raw: &str,
+    tx: &evm::EvmTransaction,
+    watched_address: &str,
+) -> bool {
+    native_asset_is_selected
+        && tx.from.eq_ignore_ascii_case(watched_address)
+        && (!receipt_succeeded || native_value_raw == "0")
+}
+
+fn evm_native_transfer_event_draft(
+    context: &ScanAddressContext,
+    native_asset: &Asset,
+    tx: &evm::EvmTransaction,
+    block_number: i64,
+    native_value_raw: &str,
+) -> AppResult<AddressEventDraft> {
+    let watched = context.address.to_lowercase();
+    let from = tx.from.to_lowercase();
+    let to = tx.to.clone().unwrap_or_default();
+    let to_lower = to.to_lowercase();
+    let direction = if from == watched && to_lower == watched {
+        "self"
+    } else if to_lower == watched {
+        "in"
+    } else if from == watched {
+        "out"
+    } else {
+        "unknown"
+    };
+
+    Ok(AddressEventDraft {
+        tenant_id: context.tenant_id,
+        chain_id: context.chain_id,
+        address_id: context.id,
+        asset_id: native_asset.id,
+        event_type: "transfer".to_string(),
+        direction: direction.to_string(),
+        is_transfer: true,
+        tx_hash: Some(tx.hash.clone()),
+        log_index: Some(-1),
+        block_number: Some(block_number),
+        block_hash: tx.block_hash.clone(),
+        confirmations: 0,
+        from_address: Some(tx.from.clone()),
+        to_address: tx.to.clone(),
+        amount_raw: Some(native_value_raw.to_string()),
+        amount_decimal: Some(evm::wei_to_decimal_string(
+            native_value_raw,
+            native_asset.decimals,
+        )?),
+        balance_before_raw: None,
+        balance_after_raw: None,
+        balance_delta_raw: None,
+        metadata: serde_json::json!({
+            "source": "evm_tx_rescan",
+            "native_value_raw": native_value_raw,
+        }),
+    })
+}
+
+fn push_transfer_summary(
+    summaries: &mut Vec<EvmTransactionRescanTransferSummary>,
+    decoded: &evm::DecodedRescanTokenTransfer,
+) {
+    summaries.push(EvmTransactionRescanTransferSummary {
+        asset_id: decoded.asset.id,
+        symbol: decoded.asset.symbol.clone(),
+        token_contract: decoded
+            .transfer
+            .token_contract
+            .clone()
+            .unwrap_or_else(|| decoded.asset.contract_address.clone().unwrap_or_default()),
+        from_address: decoded.transfer.from_address.clone(),
+        to_address: decoded.transfer.to_address.clone(),
+        amount_raw: decoded.transfer.amount_raw.clone(),
+        amount_decimal: decoded.transfer.amount_decimal.clone(),
+        log_index: decoded.transfer.log_index,
+    });
+}
+
+fn dedupe_transfer_summaries(summaries: &mut Vec<EvmTransactionRescanTransferSummary>) {
+    let mut seen = std::collections::HashSet::new();
+    summaries.retain(|summary| seen.insert((summary.asset_id, summary.log_index)));
 }
 
 async fn scan_address(
@@ -1430,6 +1776,237 @@ mod tests {
             .expect("request with asset_ids deserializes");
 
         assert_eq!(request.asset_ids, vec![uuid::Uuid::from_u128(0x101)]);
+    }
+
+    #[tokio::test]
+    async fn router_exposes_evm_transaction_rescan_route() {
+        let app = build_router(test_state());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/evm/transactions/rescan")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("router response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn evm_tx_hash_validation_accepts_32_byte_hex() {
+        super::validate_evm_tx_hash(
+            "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389",
+        )
+        .expect("valid tx hash");
+    }
+
+    #[test]
+    fn evm_tx_hash_validation_rejects_invalid_hashes() {
+        for tx_hash in [
+            "",
+            "7e88",
+            "0x1234",
+            "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        ] {
+            assert!(super::validate_evm_tx_hash(tx_hash).is_err(), "{tx_hash}");
+        }
+    }
+
+    #[test]
+    fn rescan_rpc_consistency_rejects_mismatched_receipt() {
+        let tx = super::evm::EvmTransaction {
+            hash: "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389".to_string(),
+            from: "0x0000000000000000000000000000000000000001".to_string(),
+            to: Some("0x0000000000000000000000000000000000000002".to_string()),
+            value: "0x0".to_string(),
+            block_number: Some("0x10".to_string()),
+            block_hash: Some("0xblock".to_string()),
+            input: "0x".to_string(),
+        };
+        let mut receipt = super::evm::EvmTransactionReceipt {
+            transaction_hash: tx.hash.clone(),
+            status: Some("0x1".to_string()),
+            block_number: tx.block_number.clone(),
+            block_hash: tx.block_hash.clone(),
+            from: tx.from.clone(),
+            to: tx.to.clone(),
+            logs: Vec::new(),
+        };
+
+        assert!(super::validate_evm_rescan_rpc_consistency(&tx.hash, &tx, &receipt).is_ok());
+
+        assert!(super::validate_evm_rescan_rpc_consistency(
+            "0x1111111111111111111111111111111111111111111111111111111111111111",
+            &tx,
+            &receipt,
+        )
+        .is_err());
+
+        receipt.transaction_hash =
+            "0x2222222222222222222222222222222222222222222222222222222222222222".to_string();
+        assert!(super::validate_evm_rescan_rpc_consistency(&tx.hash, &tx, &receipt).is_err());
+
+        receipt.transaction_hash = tx.hash.clone();
+        receipt.from = "0x0000000000000000000000000000000000000009".to_string();
+        assert!(super::validate_evm_rescan_rpc_consistency(&tx.hash, &tx, &receipt).is_err());
+    }
+
+    #[test]
+    fn failed_receipt_blocks_transfer_but_keeps_fee_only_decision() {
+        let tx = super::evm::EvmTransaction {
+            hash: "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389".to_string(),
+            from: "0x0000000000000000000000000000000000000001".to_string(),
+            to: Some("0x0000000000000000000000000000000000000002".to_string()),
+            value: "0xde0b6b3a7640000".to_string(),
+            block_number: Some("0x10".to_string()),
+            block_hash: Some("0xblock".to_string()),
+            input: "0x".to_string(),
+        };
+        let failed_receipt = super::evm::EvmTransactionReceipt {
+            transaction_hash: tx.hash.clone(),
+            status: Some("0x0".to_string()),
+            block_number: tx.block_number.clone(),
+            block_hash: tx.block_hash.clone(),
+            from: tx.from.clone(),
+            to: tx.to.clone(),
+            logs: Vec::new(),
+        };
+
+        assert!(!super::evm_receipt_succeeded(&failed_receipt).unwrap());
+        assert!(!super::should_insert_native_transfer_event(
+            false,
+            true,
+            "1000000000000000000",
+            &tx,
+            &tx.from,
+        ));
+        assert!(super::should_insert_fee_only_event(
+            false,
+            true,
+            "1000000000000000000",
+            &tx,
+            &tx.from,
+        ));
+        assert!(!super::should_insert_fee_only_event(
+            true,
+            true,
+            "1000000000000000000",
+            &tx,
+            &tx.from,
+        ));
+
+        let zero_value_tx = super::evm::EvmTransaction {
+            value: "0x0".to_string(),
+            ..tx
+        };
+        assert!(super::should_insert_fee_only_event(
+            true,
+            true,
+            "0",
+            &zero_value_tx,
+            &zero_value_tx.from,
+        ));
+    }
+
+    #[test]
+    fn native_transfer_draft_marks_value_transfer() {
+        let context = coin_listener_core::models::ScanAddressContext {
+            id: uuid::Uuid::from_u128(1),
+            tenant_id: uuid::Uuid::from_u128(2),
+            chain_id: uuid::Uuid::from_u128(3),
+            address: "0x0000000000000000000000000000000000000002".to_string(),
+            scan_interval_seconds: 300,
+            chain_type: "evm".to_string(),
+        };
+        let asset = coin_listener_core::models::Asset {
+            id: uuid::Uuid::from_u128(4),
+            chain_id: context.chain_id,
+            asset_type: "native".to_string(),
+            symbol: "ETH".to_string(),
+            name: "Ether".to_string(),
+            contract_address: None,
+            decimals: 18,
+            is_builtin: true,
+            status: "active".to_string(),
+        };
+        let tx = super::evm::EvmTransaction {
+            hash: "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389".to_string(),
+            from: "0x0000000000000000000000000000000000000001".to_string(),
+            to: Some(context.address.clone()),
+            value: "0xde0b6b3a7640000".to_string(),
+            block_number: Some("0x10".to_string()),
+            block_hash: Some("0xblock".to_string()),
+            input: "0x".to_string(),
+        };
+
+        let draft = super::evm_native_transfer_event_draft(
+            &context,
+            &asset,
+            &tx,
+            16,
+            "1000000000000000000",
+        )
+        .unwrap();
+
+        assert_eq!(draft.event_type, "transfer");
+        assert!(draft.is_transfer);
+        assert_eq!(draft.direction, "in");
+        assert_eq!(draft.asset_id, asset.id);
+        assert_eq!(draft.log_index, Some(-1));
+        assert_eq!(draft.amount_decimal.as_deref(), Some("1.0"));
+        assert_eq!(draft.metadata["source"], "evm_tx_rescan");
+    }
+
+    #[test]
+    fn transfer_summary_dedupe_keeps_unique_log_assets() {
+        let mut summaries = vec![
+            coin_listener_core::models::EvmTransactionRescanTransferSummary {
+                asset_id: uuid::Uuid::from_u128(1),
+                symbol: "USDC".to_string(),
+                token_contract: "0x1".to_string(),
+                from_address: "0x2".to_string(),
+                to_address: "0x3".to_string(),
+                amount_raw: "100".to_string(),
+                amount_decimal: "0.0001".to_string(),
+                log_index: 7,
+            },
+            coin_listener_core::models::EvmTransactionRescanTransferSummary {
+                asset_id: uuid::Uuid::from_u128(1),
+                symbol: "USDC".to_string(),
+                token_contract: "0x1".to_string(),
+                from_address: "0x2".to_string(),
+                to_address: "0x3".to_string(),
+                amount_raw: "100".to_string(),
+                amount_decimal: "0.0001".to_string(),
+                log_index: 7,
+            },
+        ];
+
+        super::dedupe_transfer_summaries(&mut summaries);
+
+        assert_eq!(summaries.len(), 1);
+    }
+
+    #[test]
+    fn rescan_selected_asset_gate_matches_by_asset_id() {
+        let selected = vec![coin_listener_core::models::Asset {
+            id: uuid::Uuid::from_u128(1),
+            chain_id: uuid::Uuid::from_u128(2),
+            asset_type: "erc20".to_string(),
+            symbol: "USDC".to_string(),
+            name: "USD Coin".to_string(),
+            contract_address: Some("0x0000000000000000000000000000000000000001".to_string()),
+            decimals: 6,
+            is_builtin: true,
+            status: "active".to_string(),
+        }];
+
+        assert!(super::asset_selected(&selected, uuid::Uuid::from_u128(1)));
+        assert!(!super::asset_selected(&selected, uuid::Uuid::from_u128(3)));
     }
 
     #[tokio::test]

@@ -139,6 +139,24 @@ WHERE tenant_id = $1
 ORDER BY created_at DESC
 "#;
 
+pub const RESCAN_WATCHED_ADDRESSES_FOR_CHAIN_QUERY: &str = r#"
+SELECT id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
+       transfer_filter_enabled, balance_change_filter_enabled, status
+FROM watched_addresses
+WHERE tenant_id = $1
+  AND chain_id = $2
+  AND status = 'active'
+ORDER BY address
+"#;
+
+pub const ASSETS_FOR_CHAIN_QUERY: &str = r#"
+SELECT id, chain_id, asset_type, symbol, name, contract_address, decimals, is_builtin, status
+FROM assets
+WHERE chain_id = $1
+  AND status = 'active'
+ORDER BY asset_type, symbol, name
+"#;
+
 pub const CREATE_WATCHED_ADDRESS_QUERY: &str = r#"
 INSERT INTO watched_addresses (
     tenant_id, chain_id, address, label, priority, scan_interval_seconds,
@@ -909,6 +927,27 @@ pub async fn list_watched_addresses(
         .collect())
 }
 
+pub async fn rescan_watched_addresses_for_chain(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    chain_id: Uuid,
+) -> AppResult<Vec<WatchedAddress>> {
+    sqlx::query_as::<_, WatchedAddress>(RESCAN_WATCHED_ADDRESSES_FOR_CHAIN_QUERY)
+        .bind(tenant_id)
+        .bind(chain_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
+pub async fn assets_for_chain(pool: &PgPool, chain_id: Uuid) -> AppResult<Vec<Asset>> {
+    sqlx::query_as::<_, Asset>(ASSETS_FOR_CHAIN_QUERY)
+        .bind(chain_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
+}
+
 pub async fn validate_watched_address_create_request(
     pool: &PgPool,
     request: &CreateWatchedAddressRequest,
@@ -1623,19 +1662,21 @@ mod tests {
         selected_assets_for_address, validate_assets_for_chain,
         validate_watched_address_create_request, ACTIVE_ASSETS_BY_TYPE_QUERY,
         ACTIVE_ERC20_ASSETS_QUERY, ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY,
-        ACTIVE_USER_QUERY, ASSET_IDS_FOR_ADDRESS_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
-        CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, CREATE_WATCHED_ADDRESS_QUERY,
-        DELETE_WATCHED_ADDRESS_QUERY, GET_NOTIFICATION_OUTBOX_ITEM_QUERY,
-        GET_WATCHED_ADDRESS_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
+        ACTIVE_USER_QUERY, ASSETS_FOR_CHAIN_QUERY, ASSET_IDS_FOR_ADDRESS_QUERY,
+        CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY, CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY,
+        CREATE_WATCHED_ADDRESS_QUERY, DELETE_WATCHED_ADDRESS_QUERY,
+        GET_NOTIFICATION_OUTBOX_ITEM_QUERY, GET_WATCHED_ADDRESS_QUERY,
+        INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
         INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY, LATEST_BALANCE_SNAPSHOT_QUERY,
         LIST_EVENTS_QUERY, LIST_NOTIFICATION_OUTBOX_QUERY, LIST_WATCHED_ADDRESSES_QUERY,
         MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY, MARK_CLAIMED_SCAN_ENQUEUED_QUERY,
         MARK_NOTIFICATION_OUTBOX_DELIVERED_QUERY, MARK_NOTIFICATION_OUTBOX_FAILED_QUERY,
         MARK_NOTIFICATION_OUTBOX_RETRYABLE_QUERY, NOTIFICATION_OUTBOX_STATUS_COUNTS_QUERY,
         RELEASE_STALE_NOTIFICATION_OUTBOX_QUERY, REPLACE_WATCHED_ADDRESS_ASSETS_DELETE_QUERY,
-        REPLACE_WATCHED_ADDRESS_ASSETS_INSERT_QUERY, SCAN_CURSOR_QUERY,
-        SELECTED_ASSETS_FOR_ADDRESS_QUERY, SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY,
-        UPDATE_WATCHED_ADDRESS_QUERY, UPSERT_SCAN_CURSOR_QUERY, VALIDATE_ASSETS_FOR_CHAIN_QUERY,
+        REPLACE_WATCHED_ADDRESS_ASSETS_INSERT_QUERY, RESCAN_WATCHED_ADDRESSES_FOR_CHAIN_QUERY,
+        SCAN_CURSOR_QUERY, SELECTED_ASSETS_FOR_ADDRESS_QUERY,
+        SELECT_NOTIFICATION_OUTBOX_STATUS_QUERY, UPDATE_WATCHED_ADDRESS_QUERY,
+        UPSERT_SCAN_CURSOR_QUERY, VALIDATE_ASSETS_FOR_CHAIN_QUERY,
         WATCHED_ADDRESS_ASSETS_MIGRATION, WATCHED_ADDRESS_ASSET_IDS_FOR_ADDRESSES_QUERY,
     };
     use chrono::{TimeZone, Utc};
@@ -1857,6 +1898,21 @@ mod tests {
         assert!(ACTIVE_ASSETS_BY_TYPE_QUERY.contains("asset_type = $2"));
         assert!(ACTIVE_ASSETS_BY_TYPE_QUERY.contains("status = 'active'"));
         assert!(ACTIVE_ASSETS_BY_TYPE_QUERY.contains("ORDER BY symbol, name"));
+    }
+
+    #[test]
+    fn rescan_watched_addresses_query_is_tenant_and_chain_scoped() {
+        assert!(RESCAN_WATCHED_ADDRESSES_FOR_CHAIN_QUERY.contains("tenant_id = $1"));
+        assert!(RESCAN_WATCHED_ADDRESSES_FOR_CHAIN_QUERY.contains("chain_id = $2"));
+        assert!(RESCAN_WATCHED_ADDRESSES_FOR_CHAIN_QUERY.contains("status = 'active'"));
+        assert!(RESCAN_WATCHED_ADDRESSES_FOR_CHAIN_QUERY.contains("ORDER BY address"));
+    }
+
+    #[test]
+    fn assets_for_chain_query_returns_active_assets() {
+        assert!(ASSETS_FOR_CHAIN_QUERY.contains("WHERE chain_id = $1"));
+        assert!(ASSETS_FOR_CHAIN_QUERY.contains("status = 'active'"));
+        assert!(ASSETS_FOR_CHAIN_QUERY.contains("ORDER BY asset_type, symbol, name"));
     }
 
     #[test]

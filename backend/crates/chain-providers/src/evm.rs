@@ -92,6 +92,33 @@ pub struct EvmLog {
     pub block_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EvmTransaction {
+    pub hash: String,
+    pub from: String,
+    pub to: Option<String>,
+    pub value: String,
+    #[serde(rename = "blockNumber")]
+    pub block_number: Option<String>,
+    #[serde(rename = "blockHash")]
+    pub block_hash: Option<String>,
+    pub input: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EvmTransactionReceipt {
+    #[serde(rename = "transactionHash")]
+    pub transaction_hash: String,
+    pub status: Option<String>,
+    #[serde(rename = "blockNumber")]
+    pub block_number: Option<String>,
+    #[serde(rename = "blockHash")]
+    pub block_hash: Option<String>,
+    pub from: String,
+    pub to: Option<String>,
+    pub logs: Vec<EvmLog>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedErc20Transfer {
     pub tx_hash: String,
@@ -105,10 +132,56 @@ pub struct DecodedErc20Transfer {
     pub token_contract: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedRescanTokenTransfer {
+    pub asset: Asset,
+    pub transfer: DecodedErc20Transfer,
+}
+
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
-    result: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_json_rpc_result")]
+    result: JsonRpcResult,
     error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Clone)]
+enum JsonRpcResult {
+    Missing,
+    Null,
+    Value(Value),
+}
+
+impl Default for JsonRpcResult {
+    fn default() -> Self {
+        Self::Missing
+    }
+}
+
+fn deserialize_json_rpc_result<'de, D>(deserializer: D) -> Result<JsonRpcResult, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if value.is_null() {
+        Ok(JsonRpcResult::Null)
+    } else {
+        Ok(JsonRpcResult::Value(value))
+    }
+}
+
+impl JsonRpcResult {
+    fn required(self, method: &str) -> AppResult<Value> {
+        match self {
+            Self::Missing => Err(AppError::Validation(format!(
+                "evm rpc {method} response missing result"
+            ))),
+            Self::Null => Err(AppError::Validation(format!(
+                "evm rpc {method} result is null"
+            ))),
+            Self::Value(value) => Ok(value),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +214,23 @@ impl EvmRpcClient {
             .rpc_result_body("eth_getLogs", filter.to_rpc_params()?)
             .await?;
         parse_json_rpc_logs_result(&body, "eth_getLogs")
+    }
+
+    pub async fn eth_get_transaction_by_hash(&self, tx_hash: &str) -> AppResult<EvmTransaction> {
+        let body = self
+            .rpc_result_body("eth_getTransactionByHash", json!([tx_hash]))
+            .await?;
+        parse_json_rpc_transaction_result(&body, "eth_getTransactionByHash")
+    }
+
+    pub async fn eth_get_transaction_receipt(
+        &self,
+        tx_hash: &str,
+    ) -> AppResult<EvmTransactionReceipt> {
+        let body = self
+            .rpc_result_body("eth_getTransactionReceipt", json!([tx_hash]))
+            .await?;
+        parse_json_rpc_transaction_receipt_result(&body, "eth_getTransactionReceipt")
     }
 
     async fn rpc_result_body(&self, method: &str, params: Value) -> AppResult<String> {
@@ -237,9 +327,7 @@ pub fn parse_json_rpc_hex_result(payload: &str, method: &str) -> AppResult<Strin
             error.code, error.message
         )));
     }
-    let result = response
-        .result
-        .ok_or_else(|| AppError::Validation(format!("evm rpc {method} response missing result")))?;
+    let result = response.result.required(method)?;
     result
         .as_str()
         .map(ToOwned::to_owned)
@@ -256,11 +344,68 @@ pub fn parse_json_rpc_logs_result(payload: &str, method: &str) -> AppResult<Vec<
             error.code, error.message
         )));
     }
-    let result = response
-        .result
-        .ok_or_else(|| AppError::Validation(format!("evm rpc {method} response missing result")))?;
+    let result = response.result.required(method)?;
     serde_json::from_value(result).map_err(|error| {
         AppError::Validation(format!("invalid evm rpc {method} logs result: {error}"))
+    })
+}
+
+pub fn parse_json_rpc_transaction_result(payload: &str, method: &str) -> AppResult<EvmTransaction> {
+    let response: JsonRpcResponse = serde_json::from_str(payload).map_err(|error| {
+        AppError::Validation(format!("invalid evm rpc {method} response json: {error}"))
+    })?;
+    if let Some(error) = response.error {
+        return Err(AppError::Validation(format!(
+            "evm rpc {method} error {}: {}",
+            error.code, error.message
+        )));
+    }
+    let result = match response.result {
+        JsonRpcResult::Missing => {
+            return Err(AppError::Validation(format!(
+                "evm rpc {method} response missing result"
+            )))
+        }
+        JsonRpcResult::Null => return Err(AppError::NotFound("evm transaction".to_string())),
+        JsonRpcResult::Value(value) => value,
+    };
+    serde_json::from_value(result).map_err(|error| {
+        AppError::Validation(format!(
+            "invalid evm rpc {method} transaction result: {error}"
+        ))
+    })
+}
+
+pub fn parse_json_rpc_transaction_receipt_result(
+    payload: &str,
+    method: &str,
+) -> AppResult<EvmTransactionReceipt> {
+    let response: JsonRpcResponse = serde_json::from_str(payload).map_err(|error| {
+        AppError::Validation(format!("invalid evm rpc {method} response json: {error}"))
+    })?;
+    if let Some(error) = response.error {
+        return Err(AppError::Validation(format!(
+            "evm rpc {method} error {}: {}",
+            error.code, error.message
+        )));
+    }
+    let result = match response.result {
+        JsonRpcResult::Missing => {
+            return Err(AppError::Validation(format!(
+                "evm rpc {method} response missing result"
+            )))
+        }
+        JsonRpcResult::Null => {
+            return Err(AppError::Validation(
+                "transaction receipt is not available yet".to_string(),
+            ))
+        }
+        JsonRpcResult::Value(value) => value,
+    };
+    serde_json::from_value(result).map_err(|error| {
+        AppError::Validation(format!(
+            "invalid evm rpc {method} transaction receipt result: {error}"
+        ))
     })
 }
 
@@ -368,10 +513,78 @@ pub fn decode_erc20_transfer_log(
     })
 }
 
+pub fn decode_rescan_token_transfers(
+    receipt: &EvmTransactionReceipt,
+    assets: &[Asset],
+) -> AppResult<Vec<DecodedRescanTokenTransfer>> {
+    let mut transfers = Vec::new();
+    for log in &receipt.logs {
+        if log.topics.first().map(|topic| topic.to_lowercase()) != Some(TRANSFER_TOPIC0.to_string())
+        {
+            continue;
+        }
+
+        let log_contract = normalize_hex(&log.address, 40, "address")?.to_ascii_lowercase();
+        let Some(asset) = assets.iter().find(|asset| {
+            asset.asset_type == "erc20"
+                && asset.status == "active"
+                && asset
+                    .contract_address
+                    .as_deref()
+                    .and_then(|contract| normalize_hex(contract, 40, "asset contract").ok())
+                    .map(|contract| contract.eq_ignore_ascii_case(&log_contract))
+                    .unwrap_or(false)
+        }) else {
+            continue;
+        };
+
+        transfers.push(DecodedRescanTokenTransfer {
+            asset: asset.clone(),
+            transfer: decode_erc20_transfer_log(log, asset.decimals)?,
+        });
+    }
+    Ok(transfers)
+}
+
 pub fn transfer_event_draft(
     context: &ScanAddressContext,
     asset: &Asset,
     transfer: DecodedErc20Transfer,
+) -> AddressEventDraft {
+    transfer_event_draft_with_metadata(
+        context,
+        asset,
+        transfer,
+        json!({ "source": "evm_erc20_transfer_log" }),
+    )
+}
+
+pub fn transfer_event_draft_with_source(
+    context: &ScanAddressContext,
+    asset: &Asset,
+    transfer: DecodedErc20Transfer,
+    source: &str,
+    tx: &EvmTransaction,
+) -> AppResult<AddressEventDraft> {
+    let native_value_raw = parse_hex_u256_to_decimal_string(&tx.value)?;
+    Ok(transfer_event_draft_with_metadata(
+        context,
+        asset,
+        transfer,
+        json!({
+            "source": source,
+            "tx_from": tx.from,
+            "tx_to": tx.to,
+            "native_value_raw": native_value_raw,
+        }),
+    ))
+}
+
+fn transfer_event_draft_with_metadata(
+    context: &ScanAddressContext,
+    asset: &Asset,
+    transfer: DecodedErc20Transfer,
+    metadata: Value,
 ) -> AddressEventDraft {
     let watched = context.address.to_lowercase();
     let from = transfer.from_address.to_lowercase();
@@ -384,6 +597,17 @@ pub fn transfer_event_draft(
         "out"
     } else {
         "unknown"
+    };
+    let token_contract = transfer.token_contract.clone();
+    let metadata = match metadata {
+        Value::Object(mut object) => {
+            object.insert("token_contract".to_string(), json!(token_contract));
+            Value::Object(object)
+        }
+        _ => json!({
+            "source": "evm_erc20_transfer_log",
+            "token_contract": token_contract,
+        }),
     };
 
     AddressEventDraft {
@@ -406,10 +630,7 @@ pub fn transfer_event_draft(
         balance_before_raw: None,
         balance_after_raw: None,
         balance_delta_raw: None,
-        metadata: json!({
-            "source": "evm_erc20_transfer_log",
-            "token_contract": transfer.token_contract,
-        }),
+        metadata,
     }
 }
 
@@ -457,6 +678,48 @@ pub fn evm_balance_change_event(
             "current_snapshot_id": current.id,
             "source_provider_id": current.source_provider_id,
             "block_number": current.block_number,
+        }),
+    })
+}
+
+pub fn evm_fee_only_event_draft(
+    context: &ScanAddressContext,
+    native_asset: &Asset,
+    tx: &EvmTransaction,
+    source: &str,
+) -> AppResult<AddressEventDraft> {
+    let native_value_raw = parse_hex_u256_to_decimal_string(&tx.value)?;
+    let block_number = tx
+        .block_number
+        .as_deref()
+        .map(parse_hex_quantity_to_i64)
+        .transpose()?;
+
+    Ok(AddressEventDraft {
+        tenant_id: context.tenant_id,
+        chain_id: context.chain_id,
+        address_id: context.id,
+        asset_id: native_asset.id,
+        event_type: "fee_only_change".to_string(),
+        direction: "out".to_string(),
+        is_transfer: false,
+        tx_hash: Some(tx.hash.clone()),
+        log_index: None,
+        block_number,
+        block_hash: tx.block_hash.clone(),
+        confirmations: 0,
+        from_address: Some(tx.from.clone()),
+        to_address: tx.to.clone(),
+        amount_raw: None,
+        amount_decimal: None,
+        balance_before_raw: None,
+        balance_after_raw: None,
+        balance_delta_raw: None,
+        metadata: json!({
+            "source": source,
+            "tx_from": tx.from,
+            "tx_to": tx.to,
+            "native_value_raw": native_value_raw,
         }),
     })
 }
@@ -605,10 +868,13 @@ fn mock_hash(kind: &str, address: &WatchedAddress, asset: &Asset, sequence: i64)
 mod tests {
     use super::{
         address_to_topic, build_json_rpc_request, decode_erc20_transfer_log,
-        evm_balance_change_event, format_rpc_request_error_with_sources, mock_evm_transfer,
-        parse_hex_quantity_to_i64, parse_hex_u256_to_decimal_string, parse_json_rpc_hex_result,
-        topic_to_address, transfer_event_draft, wei_to_decimal_string, DecodedErc20Transfer,
-        EvmBlockTag, EvmLog, EvmLogFilter, TRANSFER_TOPIC0,
+        decode_rescan_token_transfers, evm_balance_change_event, evm_fee_only_event_draft,
+        format_rpc_request_error_with_sources, mock_evm_transfer, parse_hex_quantity_to_i64,
+        parse_hex_u256_to_decimal_string, parse_json_rpc_hex_result,
+        parse_json_rpc_transaction_receipt_result, parse_json_rpc_transaction_result,
+        topic_to_address, transfer_event_draft, transfer_event_draft_with_source,
+        wei_to_decimal_string, DecodedErc20Transfer, EvmBlockTag, EvmLog, EvmLogFilter,
+        EvmTransaction, EvmTransactionReceipt, TRANSFER_TOPIC0,
     };
     use coin_listener_core::{
         models::{Asset, BalanceSnapshot, Provider, ScanAddressContext, WatchedAddress},
@@ -788,6 +1054,77 @@ mod tests {
     }
 
     #[test]
+    fn rescan_decodes_selected_usdc_transfer_from_receipt() {
+        let chain_id = Uuid::from_u128(103);
+        let usdc = Asset {
+            id: Uuid::from_u128(204),
+            chain_id,
+            asset_type: "erc20".to_string(),
+            symbol: "USDC".to_string(),
+            name: "USD Coin".to_string(),
+            contract_address: Some("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string()),
+            decimals: 6,
+            is_builtin: true,
+            status: "active".to_string(),
+        };
+        let receipt = sample_rescan_receipt();
+
+        let transfers =
+            decode_rescan_token_transfers(&receipt, std::slice::from_ref(&usdc)).unwrap();
+
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].asset.id, usdc.id);
+        assert_eq!(transfers[0].transfer.amount_raw, "100000");
+        assert_eq!(transfers[0].transfer.amount_decimal, "0.1");
+        assert_eq!(transfers[0].transfer.log_index, 937);
+    }
+
+    #[test]
+    fn rescan_transfer_event_marks_source_and_tx_context() {
+        let context = scan_context_with_address("0x65722a6603b00f31922bc39737cc7ee24cd3d862");
+        let asset = erc20_asset(context.chain_id);
+        let transfer = decoded_transfer(
+            "0x70196e53fa11b4621290144ccc8f4624ddff1058",
+            "0x65722a6603b00f31922bc39737cc7ee24cd3d862",
+        );
+        let tx = sample_rescan_transaction();
+
+        let draft =
+            transfer_event_draft_with_source(&context, &asset, transfer, "evm_tx_rescan", &tx)
+                .unwrap();
+
+        assert_eq!(draft.event_type, "transfer");
+        assert!(draft.is_transfer);
+        assert_eq!(draft.direction, "in");
+        assert_eq!(draft.asset_id, asset.id);
+        assert_eq!(draft.metadata["source"], "evm_tx_rescan");
+        assert_eq!(
+            draft.metadata["tx_from"],
+            "0xa9236f4950001355455a5b016a25fa27b947c9ac"
+        );
+        assert_eq!(draft.metadata["native_value_raw"], "0");
+    }
+
+    #[test]
+    fn fee_only_event_is_not_a_transfer_and_uses_native_asset() {
+        let context = scan_context_with_address("0xa9236f4950001355455a5b016a25fa27b947c9ac");
+        let native = native_asset(context.chain_id);
+        let tx = sample_rescan_transaction();
+
+        let draft = evm_fee_only_event_draft(&context, &native, &tx, "evm_tx_rescan").unwrap();
+
+        assert_eq!(draft.event_type, "fee_only_change");
+        assert!(!draft.is_transfer);
+        assert_eq!(draft.direction, "out");
+        assert_eq!(draft.asset_id, native.id);
+        assert_eq!(draft.tx_hash.as_deref(), Some(tx.hash.as_str()));
+        assert_eq!(draft.log_index, None);
+        assert_eq!(draft.amount_raw, None);
+        assert_eq!(draft.metadata["source"], "evm_tx_rescan");
+        assert_eq!(draft.metadata["native_value_raw"], "0");
+    }
+
+    #[test]
     fn transfer_event_draft_uses_scan_context_for_inbound_transfer() {
         let context = scan_context();
         let asset = native_asset(context.chain_id);
@@ -810,6 +1147,117 @@ mod tests {
         let payload = r#"{"jsonrpc":"2.0","id":1,"result":"0xde0b6b3a7640000"}"#;
         let result = parse_json_rpc_hex_result(payload, "eth_getBalance").unwrap();
         assert_eq!(result, "0xde0b6b3a7640000");
+    }
+
+    #[test]
+    fn evm_transaction_json_decodes_zero_native_value_contract_call() {
+        let payload = r#"{
+            "jsonrpc":"2.0",
+            "id":1,
+            "result":{
+                "hash":"0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389",
+                "from":"0xa9236f4950001355455a5b016a25fa27b947c9ac",
+                "to":"0x887749abb233682aa7d5594a54659c51501445b1",
+                "value":"0x0",
+                "blockNumber":"0x2c32daa",
+                "blockHash":"0x000000000000000000000000000000000000000000000000000000002c32daa",
+                "input":"0xa9059cbb00000000000000000000000011111111111111111111111111111111111111110000000000000000000000000000000000000000000000000000000000000001"
+            }
+        }"#;
+
+        let transaction =
+            parse_json_rpc_transaction_result(payload, "eth_getTransactionByHash").unwrap();
+
+        assert_eq!(
+            transaction.hash,
+            "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389"
+        );
+        assert_eq!(
+            transaction.from,
+            "0xa9236f4950001355455a5b016a25fa27b947c9ac"
+        );
+        assert_eq!(
+            transaction.to,
+            Some("0x887749abb233682aa7d5594a54659c51501445b1".to_string())
+        );
+        assert_eq!(transaction.value, "0x0");
+        assert_eq!(transaction.block_number, Some("0x2c32daa".to_string()));
+        assert_eq!(
+            transaction.block_hash,
+            Some("0x000000000000000000000000000000000000000000000000000000002c32daa".to_string())
+        );
+        assert!(transaction.input.starts_with("0xa9059cbb"));
+    }
+
+    #[test]
+    fn evm_transaction_receipt_json_decodes_transfer_logs() {
+        let payload = r#"{
+            "jsonrpc":"2.0",
+            "id":1,
+            "result":{
+                "transactionHash":"0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389",
+                "status":"0x1",
+                "blockNumber":"0x2c32daa",
+                "blockHash":"0x000000000000000000000000000000000000000000000000000000002c32daa",
+                "from":"0xa9236f4950001355455a5b016a25fa27b947c9ac",
+                "to":"0x887749abb233682aa7d5594a54659c51501445b1",
+                "logs":[{
+                    "address":"0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                    "topics":[
+                        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                        "0x000000000000000000000000a9236f4950001355455a5b016a25fa27b947c9ac",
+                        "0x000000000000000000000000887749abb233682aa7d5594a54659c51501445b1"
+                    ],
+                    "data":"0x00000000000000000000000000000000000000000000000000000000000f4240",
+                    "transactionHash":"0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389",
+                    "logIndex":"0x3a9",
+                    "blockNumber":"0x2c32daa",
+                    "blockHash":"0x000000000000000000000000000000000000000000000000000000002c32daa"
+                }]
+            }
+        }"#;
+
+        let receipt =
+            parse_json_rpc_transaction_receipt_result(payload, "eth_getTransactionReceipt")
+                .unwrap();
+
+        assert_eq!(
+            receipt.transaction_hash,
+            "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389"
+        );
+        assert_eq!(receipt.status, Some("0x1".to_string()));
+        assert_eq!(receipt.block_number, Some("0x2c32daa".to_string()));
+        assert_eq!(receipt.from, "0xa9236f4950001355455a5b016a25fa27b947c9ac");
+        assert_eq!(
+            receipt.to,
+            Some("0x887749abb233682aa7d5594a54659c51501445b1".to_string())
+        );
+        assert_eq!(receipt.logs.len(), 1);
+        assert_eq!(receipt.logs[0].log_index, Some("0x3a9".to_string()));
+    }
+
+    #[test]
+    fn evm_transaction_null_result_maps_to_not_found() {
+        let payload = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+
+        let result = parse_json_rpc_transaction_result(payload, "eth_getTransactionByHash");
+
+        assert!(
+            matches!(result, Err(AppError::NotFound(resource)) if resource == "evm transaction")
+        );
+    }
+
+    #[test]
+    fn evm_transaction_receipt_null_result_reports_pending_receipt() {
+        let payload = r#"{"jsonrpc":"2.0","id":1,"result":null}"#;
+
+        let result =
+            parse_json_rpc_transaction_receipt_result(payload, "eth_getTransactionReceipt");
+
+        assert!(matches!(
+            result,
+            Err(AppError::Validation(message)) if message.contains("receipt is not available")
+        ));
     }
 
     #[test]
@@ -984,11 +1432,15 @@ mod tests {
     }
 
     fn scan_context() -> ScanAddressContext {
+        scan_context_with_address("0x1111111111111111111111111111111111111111")
+    }
+
+    fn scan_context_with_address(address: &str) -> ScanAddressContext {
         ScanAddressContext {
             id: Uuid::from_u128(101),
             tenant_id: Uuid::from_u128(102),
             chain_id: Uuid::from_u128(103),
-            address: "0x1111111111111111111111111111111111111111".to_string(),
+            address: address.to_string(),
             scan_interval_seconds: 300,
             chain_type: "evm".to_string(),
         }
@@ -1003,6 +1455,20 @@ mod tests {
             name: "Ether".to_string(),
             contract_address: None,
             decimals: 18,
+            is_builtin: true,
+            status: "active".to_string(),
+        }
+    }
+
+    fn erc20_asset(chain_id: Uuid) -> Asset {
+        Asset {
+            id: Uuid::from_u128(204),
+            chain_id,
+            asset_type: "erc20".to_string(),
+            symbol: "USDC".to_string(),
+            name: "USD Coin".to_string(),
+            contract_address: Some("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913".to_string()),
+            decimals: 6,
             is_builtin: true,
             status: "active".to_string(),
         }
@@ -1049,6 +1515,54 @@ mod tests {
             log_index: Some("0x2".to_string()),
             block_number: Some("0x1312d00".to_string()),
             block_hash: Some(evm_hash(2)),
+        }
+    }
+
+    fn sample_rescan_transaction() -> EvmTransaction {
+        EvmTransaction {
+            hash: "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389".to_string(),
+            from: "0xa9236f4950001355455a5b016a25fa27b947c9ac".to_string(),
+            to: Some("0x887749abb233682aa7d5594a54659c51501445b1".to_string()),
+            value: "0x0".to_string(),
+            block_number: Some("0x2c32daa".to_string()),
+            block_hash: Some(
+                "0xb1aa002fc5fc438301e27470e81ad06c69e601565d730b8c8a66d5ced9090c8f".to_string(),
+            ),
+            input: "0xcccbb34c".to_string(),
+        }
+    }
+
+    fn sample_rescan_receipt() -> EvmTransactionReceipt {
+        EvmTransactionReceipt {
+            transaction_hash: "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389"
+                .to_string(),
+            status: Some("0x1".to_string()),
+            block_number: Some("0x2c32daa".to_string()),
+            block_hash: Some(
+                "0xb1aa002fc5fc438301e27470e81ad06c69e601565d730b8c8a66d5ced9090c8f".to_string(),
+            ),
+            from: "0xa9236f4950001355455a5b016a25fa27b947c9ac".to_string(),
+            to: Some("0x887749abb233682aa7d5594a54659c51501445b1".to_string()),
+            logs: vec![EvmLog {
+                address: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913".to_string(),
+                topics: vec![
+                    TRANSFER_TOPIC0.to_string(),
+                    address_to_topic("0x70196e53fa11b4621290144ccc8f4624ddff1058").unwrap(),
+                    address_to_topic("0x65722a6603b00f31922bc39737cc7ee24cd3d862").unwrap(),
+                ],
+                data: "0x00000000000000000000000000000000000000000000000000000000000186a0"
+                    .to_string(),
+                transaction_hash: Some(
+                    "0x7e88e5d67ead0c0605f3bed96071ec4be14112bed2d929ee57e5b161bf6f2389"
+                        .to_string(),
+                ),
+                log_index: Some("0x3a9".to_string()),
+                block_number: Some("0x2c32daa".to_string()),
+                block_hash: Some(
+                    "0xb1aa002fc5fc438301e27470e81ad06c69e601565d730b8c8a66d5ced9090c8f"
+                        .to_string(),
+                ),
+            }],
         }
     }
 
