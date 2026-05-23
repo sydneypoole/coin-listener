@@ -137,6 +137,15 @@ WHERE attempt.id = $1
       attempt.status = 'pending'
       OR (attempt.status = 'skipped' AND task.status = 'cancelled')
   )
+  AND (
+      ($5::uuid IS NULL AND $6::text IS NULL)
+      OR (
+          task.id = $5
+          AND task.locked_by = $6
+          AND task.status = 'running'
+      )
+      OR task.status = 'cancelled'
+  )
 "#;
 
 pub const REFRESH_IMPORT_TASK_COUNTS_QUERY: &str = r#"
@@ -772,11 +781,34 @@ pub async fn mark_import_attempt_failed(
     error_code: &str,
     error_message: &str,
 ) -> AppResult<()> {
+    mark_import_attempt_failed_with_lock(
+        pool,
+        tenant_id,
+        attempt_id,
+        None,
+        None,
+        error_code,
+        error_message,
+    )
+    .await
+}
+
+pub async fn mark_import_attempt_failed_with_lock(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    attempt_id: Uuid,
+    task_id: Option<Uuid>,
+    worker_id: Option<&str>,
+    error_code: &str,
+    error_message: &str,
+) -> AppResult<()> {
     let result = sqlx::query(MARK_IMPORT_ATTEMPT_FAILED_QUERY)
         .bind(attempt_id)
         .bind(tenant_id)
         .bind(error_code)
         .bind(error_message)
+        .bind(task_id)
+        .bind(worker_id)
         .execute(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
@@ -1231,6 +1263,15 @@ mod tests {
         assert!(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY.contains("task.status = 'running'"));
         assert!(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY.contains("$4::uuid IS NULL"));
         assert!(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY.contains("$5::text IS NULL"));
+    }
+
+    #[test]
+    fn import_attempt_failure_query_can_require_task_lock_owner() {
+        assert!(MARK_IMPORT_ATTEMPT_FAILED_QUERY.contains("task.id = $5"));
+        assert!(MARK_IMPORT_ATTEMPT_FAILED_QUERY.contains("task.locked_by = $6"));
+        assert!(MARK_IMPORT_ATTEMPT_FAILED_QUERY.contains("task.status = 'running'"));
+        assert!(MARK_IMPORT_ATTEMPT_FAILED_QUERY.contains("$5::uuid IS NULL"));
+        assert!(MARK_IMPORT_ATTEMPT_FAILED_QUERY.contains("$6::text IS NULL"));
     }
 
     #[test]

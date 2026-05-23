@@ -984,10 +984,12 @@ pub async fn process_one_address_import_task(
         {
             Ok(_) => {}
             Err(error) => {
-                address_imports::mark_import_attempt_failed(
+                address_imports::mark_import_attempt_failed_with_lock(
                     pool,
                     task.tenant_id,
                     attempt.attempt_id,
+                    Some(task.id),
+                    Some(worker_id),
                     "create_failed",
                     &error.to_string(),
                 )
@@ -1889,7 +1891,9 @@ mod tests {
         assert!(body.contains("create_watched_address_for_import_attempt"));
         assert!(body.contains("task.id"));
         assert!(body.contains("worker_id"));
-        assert!(body.contains("mark_import_attempt_failed"));
+        assert!(body.contains("mark_import_attempt_failed_with_lock"));
+        assert!(body.contains("Some(task.id)"));
+        assert!(body.contains("Some(worker_id)"));
         assert!(!body.contains("chain_id: task.chain_id"));
         assert!(!body.contains("asset_ids: task.asset_ids.clone()"));
     }
