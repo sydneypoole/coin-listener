@@ -76,6 +76,14 @@ pub fn worker_shutdown_requested(shutdown: &AtomicBool) -> bool {
     shutdown.load(Ordering::Relaxed)
 }
 
+pub fn scan_task_outcome_log_status(outcome: &ScanTaskOutcome) -> &'static str {
+    match outcome {
+        ScanTaskOutcome::Locked => "locked",
+        ScanTaskOutcome::Scanned => "success",
+        ScanTaskOutcome::UnsupportedChain(_) => "unsupported",
+    }
+}
+
 pub fn should_emit_balance_change(
     previous: Option<&BalanceSnapshot>,
     current: &BalanceSnapshot,
@@ -1061,12 +1069,14 @@ pub async fn run_worker(
                     Ok(outcome) => info!(
                         task_id = %task_id,
                         address_id = %address_id,
+                        scan_status = scan_task_outcome_log_status(&outcome),
                         ?outcome,
                         "scan task processed"
                     ),
                     Err(error) => warn!(
                         task_id = %task_id,
                         address_id = %address_id,
+                        scan_status = "failed",
                         error = %error,
                         "scan task failed"
                     ),
@@ -1106,6 +1116,47 @@ mod tests {
                 scan_plan_for_chain("solana"),
                 ScanPlan::Unsupported("solana".to_string())
             );
+        }
+    }
+
+    mod scan_task_logging {
+        use crate::{scan_task_outcome_log_status, ScanTaskOutcome};
+
+        #[test]
+        fn scan_outcomes_have_explicit_log_statuses() {
+            assert_eq!(
+                scan_task_outcome_log_status(&ScanTaskOutcome::Scanned),
+                "success"
+            );
+            assert_eq!(
+                scan_task_outcome_log_status(&ScanTaskOutcome::Locked),
+                "locked"
+            );
+            assert_eq!(
+                scan_task_outcome_log_status(&ScanTaskOutcome::UnsupportedChain(
+                    "solana".to_string()
+                )),
+                "unsupported"
+            );
+        }
+
+        #[test]
+        fn worker_logs_explicit_scan_success_and_failure_status() {
+            let source = include_str!("lib.rs");
+            let start = source
+                .find("pub async fn run_worker(")
+                .expect("worker loop exists");
+            let end = source[start..]
+                .find("\n#[cfg(test)]")
+                .expect("test module marker")
+                + start;
+            let worker = &source[start..end];
+
+            assert!(worker.contains("scan_status = scan_task_outcome_log_status(&outcome)"));
+            assert!(worker.contains("scan_status = \"failed\""));
+            assert!(worker.contains("\"scan task processed\""));
+            assert!(worker.contains("\"scan task failed\""));
+            assert!(!worker.contains("\"scan task succeeded\""));
         }
     }
 

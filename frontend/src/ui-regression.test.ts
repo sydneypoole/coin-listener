@@ -259,6 +259,19 @@ describe('frontend UI regressions', () => {
     }
   });
 
+  test('service heartbeat status renders Chinese labels', () => {
+    const page = readSource('pages/SystemStatusPage.tsx');
+
+    expectContains(page, 'function serviceStatusText');
+    expectContains(page, "return '离线';");
+    expectContains(page, "if (item.status === 'online') return '在线';");
+    expectContains(page, 'serviceStatusText(record)');
+    expectContains(page, 'hint={`离线 ${status?.services.stale ?? 0}`}');
+    expectContains(page, '在线 {status?.services.online ?? 0} / 离线 {status?.services.stale ?? 0}');
+    expectNotContains(page, "record.is_stale ? 'stale' : record.status");
+    expectNotContains(page, 'stale {status?.services.stale ?? 0}');
+  });
+
   test('business pages use DataTable for table overflow control', () => {
     const pagePaths = [
       'pages/ChainsPage.tsx',

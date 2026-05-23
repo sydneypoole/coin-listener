@@ -40,6 +40,12 @@ function serviceStatusColor(item: ServiceHeartbeatStatusItem): 'green' | 'red' {
   return item.is_stale ? 'red' : 'green';
 }
 
+function serviceStatusText(item: ServiceHeartbeatStatusItem) {
+  if (item.is_stale) return '离线';
+  if (item.status === 'online') return '在线';
+  return item.status;
+}
+
 function shortInstanceId(instanceId: string) {
   return instanceId.length > 12 ? `${instanceId.slice(0, 8)}…` : instanceId;
 }
@@ -111,7 +117,7 @@ export function SystemStatusPage() {
         <MetricCard
           title="服务在线"
           value={status?.services.online ?? 0}
-          hint={`stale ${status?.services.stale ?? 0}`}
+          hint={`离线 ${status?.services.stale ?? 0}`}
           tone={status?.services.stale ? 'danger' : 'success'}
         />
       </MetricGrid>
@@ -133,7 +139,7 @@ export function SystemStatusPage() {
         </div>
       </DataSurface>
 
-      <DataSurface title="服务心跳" actions={<Text type="tertiary">online {status?.services.online ?? 0} / stale {status?.services.stale ?? 0}</Text>}>
+      <DataSurface title="服务心跳" actions={<Text type="tertiary">在线 {status?.services.online ?? 0} / 离线 {status?.services.stale ?? 0}</Text>}>
         <DataTable<ServiceHeartbeatStatusItem>
           tableId="system-service-heartbeats"
           loading={statusQuery.isLoading}
@@ -147,7 +153,7 @@ export function SystemStatusPage() {
               title: '状态',
               dataIndex: 'status',
               width: 120,
-              render: (_value, record) => <Tag color={serviceStatusColor(record)}>{record.is_stale ? 'stale' : record.status}</Tag>,
+              render: (_value, record) => <Tag color={serviceStatusColor(record)}>{serviceStatusText(record)}</Tag>,
             },
             { title: '实例', dataIndex: 'instance_id', width: 140, render: value => shortInstanceId(String(value)) },
             { title: '启动时间', dataIndex: 'started_at', width: 190, render: value => formatTime(String(value)) },
