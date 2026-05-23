@@ -3,13 +3,15 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use coin_listener_core::{
     models::{
-        CreateWatchedAddressImportRequest, WatchedAddressImportChainConfig,
-        WatchedAddressImportDefaults, WatchedAddressImportErrorRow, WatchedAddressImportRowRequest,
-        WatchedAddressImportTask,
+        CreateWatchedAddressImportRequest, CreateWatchedAddressRequest, WatchedAddress,
+        WatchedAddressImportChainConfig, WatchedAddressImportDefaults,
+        WatchedAddressImportErrorRow, WatchedAddressImportRowRequest, WatchedAddressImportTask,
     },
     AppError, AppResult,
 };
 use sqlx::{types::Json, PgPool, Postgres, Transaction};
+
+use crate::repositories;
 use uuid::Uuid;
 
 pub const CLAIM_WATCHED_ADDRESS_IMPORT_QUERY: &str = r#"
@@ -25,13 +27,6 @@ WITH next_task AS (
            task.status = 'running'
            AND task.locked_at < $1 - INTERVAL '5 minutes'
        ))
-      AND EXISTS (
-          SELECT 1
-          FROM watched_address_import_attempts attempt
-          WHERE attempt.import_task_id = task.id
-            AND attempt.tenant_id = task.tenant_id
-            AND attempt.status = 'pending'
-      )
     ORDER BY CASE
         WHEN task.status = 'running' AND task.locked_by = $2 THEN 0
         WHEN task.status = 'running' AND task.locked_at < $1 - INTERVAL '5 minutes' THEN 1
@@ -60,6 +55,16 @@ RETURNING task.id, task.tenant_id, task.status, task.chain_id, task.asset_ids,
 
 // Attempts have no per-row processing lock in migration 0018; selection is guarded by
 // the import task lock owner, so this queue assumes one active worker per task lock.
+pub const RENEW_WATCHED_ADDRESS_IMPORT_LOCK_QUERY: &str = r#"
+UPDATE watched_address_import_tasks
+SET locked_at = $4,
+    updated_at = NOW()
+WHERE id = $1
+  AND tenant_id = $2
+  AND locked_by = $3
+  AND status = 'running'
+"#;
+
 pub const PENDING_IMPORT_ATTEMPTS_QUERY: &str = r#"
 SELECT attempt.id AS attempt_id,
        attempt.row_number,
@@ -105,6 +110,15 @@ WHERE attempt.id = $1
   AND (
       attempt.status = 'pending'
       OR (attempt.status = 'skipped' AND task.status = 'cancelled')
+  )
+  AND (
+      ($4::uuid IS NULL AND $5::text IS NULL)
+      OR (
+          task.id = $4
+          AND task.locked_by = $5
+          AND task.status = 'running'
+      )
+      OR task.status = 'cancelled'
   )
 "#;
 
@@ -641,6 +655,76 @@ pub async fn claim_next_watched_address_import(
         .map_err(|error| AppError::Database(error.to_string()))
 }
 
+pub async fn create_watched_address_for_import_attempt(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    task_id: Uuid,
+    worker_id: &str,
+    attempt_id: Uuid,
+    request: CreateWatchedAddressRequest,
+) -> AppResult<WatchedAddress> {
+    let asset_ids = repositories::validate_watched_address_create_request(pool, &request).await?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    let address_response =
+        repositories::create_watched_address_in_transaction(&mut transaction, request, asset_ids)
+            .await?;
+    let result = sqlx::query(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY)
+        .bind(attempt_id)
+        .bind(tenant_id)
+        .bind(address_response.id)
+        .bind(task_id)
+        .bind(worker_id)
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    ensure_import_attempt_updated(result.rows_affected())?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(WatchedAddress {
+        id: address_response.id,
+        tenant_id: address_response.tenant_id,
+        chain_id: address_response.chain_id,
+        address: address_response.address,
+        label: address_response.label,
+        priority: address_response.priority,
+        scan_interval_seconds: address_response.scan_interval_seconds,
+        transfer_filter_enabled: address_response.transfer_filter_enabled,
+        balance_change_filter_enabled: address_response.balance_change_filter_enabled,
+        status: address_response.status,
+    })
+}
+
+pub async fn renew_watched_address_import_lock(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    task_id: Uuid,
+    worker_id: &str,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    let result = sqlx::query(RENEW_WATCHED_ADDRESS_IMPORT_LOCK_QUERY)
+        .bind(task_id)
+        .bind(tenant_id)
+        .bind(worker_id)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("watched address import".to_string()));
+    }
+
+    Ok(())
+}
+
 pub async fn pending_import_attempts(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -672,6 +756,8 @@ pub async fn mark_import_attempt_success(
         .bind(attempt_id)
         .bind(tenant_id)
         .bind(watched_address_id)
+        .bind(Option::<Uuid>::None)
+        .bind(Option::<String>::None)
         .execute(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
@@ -771,7 +857,7 @@ mod tests {
         CREATE_WATCHED_ADDRESS_IMPORT_QUERY, INSERT_IMPORT_ATTEMPT_QUERY,
         LIST_WATCHED_ADDRESS_IMPORT_ERRORS_QUERY, MARK_IMPORT_ATTEMPT_FAILED_QUERY,
         MARK_IMPORT_ATTEMPT_SUCCESS_QUERY, PENDING_IMPORT_ATTEMPTS_QUERY,
-        REFRESH_IMPORT_TASK_COUNTS_QUERY,
+        REFRESH_IMPORT_TASK_COUNTS_QUERY, RENEW_WATCHED_ADDRESS_IMPORT_LOCK_QUERY,
     };
     use coin_listener_core::models::{
         CreateWatchedAddressImportRequest, WatchedAddressImportChainConfig,
@@ -1021,9 +1107,8 @@ mod tests {
     }
 
     #[test]
-    fn claim_query_resumes_running_tasks_from_pending_attempts() {
-        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("watched_address_import_attempts"));
-        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("attempt.status = 'pending'"));
+    fn claim_query_resumes_running_tasks_by_lock_owner() {
+        assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("status = 'pending'"));
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("locked_by = $2"));
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("FOR UPDATE SKIP LOCKED"));
     }
@@ -1032,6 +1117,45 @@ mod tests {
     fn claim_query_recovers_stale_running_import_locks() {
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("locked_at < $1 - INTERVAL"));
         assert!(CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("status = 'running'"));
+    }
+
+    #[test]
+    fn claim_query_can_recover_running_imports_without_pending_attempts() {
+        assert!(!CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("AND EXISTS ("));
+        assert!(!CLAIM_WATCHED_ADDRESS_IMPORT_QUERY.contains("attempt.status = 'pending'"));
+    }
+
+    #[test]
+    fn storage_exposes_import_lock_renewal_query() {
+        assert!(RENEW_WATCHED_ADDRESS_IMPORT_LOCK_QUERY.contains("SET locked_at = $4"));
+        assert!(RENEW_WATCHED_ADDRESS_IMPORT_LOCK_QUERY.contains("locked_by = $3"));
+        assert!(RENEW_WATCHED_ADDRESS_IMPORT_LOCK_QUERY.contains("status = 'running'"));
+    }
+
+    #[test]
+    fn import_attempt_create_marks_success_in_single_transaction() {
+        let source = include_str!("address_imports.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("test module")];
+        let start = production
+            .find("pub async fn create_watched_address_for_import_attempt")
+            .expect("import create helper");
+        let end = production[start..]
+            .find("pub async fn renew_watched_address_import_lock")
+            .expect("next helper")
+            + start;
+        let body = &production[start..end];
+
+        assert!(body.contains("validate_watched_address_create_request"));
+        assert!(body.contains("create_watched_address_in_transaction"));
+        assert!(body.contains("MARK_IMPORT_ATTEMPT_SUCCESS_QUERY"));
+        assert!(body.contains(".bind(task_id)"));
+        assert!(body.contains(".bind(worker_id)"));
+        let validate_index = body
+            .find("validate_watched_address_create_request")
+            .unwrap();
+        let begin_index = body.find(".begin()").unwrap();
+        assert!(validate_index < begin_index);
+        assert!(!body.contains("repositories::create_watched_address(pool"));
     }
 
     #[test]
@@ -1098,6 +1222,15 @@ mod tests {
             assert!(query.contains("task.status = 'cancelled'"), "{query}");
             assert!(query.contains("attempt.status = 'skipped'"), "{query}");
         }
+    }
+
+    #[test]
+    fn import_attempt_success_query_can_require_task_lock_owner() {
+        assert!(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY.contains("task.id = $4"));
+        assert!(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY.contains("task.locked_by = $5"));
+        assert!(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY.contains("task.status = 'running'"));
+        assert!(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY.contains("$4::uuid IS NULL"));
+        assert!(MARK_IMPORT_ATTEMPT_SUCCESS_QUERY.contains("$5::text IS NULL"));
     }
 
     #[test]

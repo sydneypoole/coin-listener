@@ -924,6 +924,14 @@ pub async fn process_one_address_import_task(
         return Ok(false);
     };
 
+    address_imports::renew_watched_address_import_lock(
+        pool,
+        task.tenant_id,
+        task.id,
+        worker_id,
+        now,
+    )
+    .await?;
     let attempts = address_imports::pending_import_attempts(
         pool,
         task.tenant_id,
@@ -934,10 +942,19 @@ pub async fn process_one_address_import_task(
     .await?;
 
     for attempt in attempts {
+        address_imports::renew_watched_address_import_lock(
+            pool,
+            task.tenant_id,
+            task.id,
+            worker_id,
+            Utc::now(),
+        )
+        .await?;
+        let address_text = attempt.address.clone();
         let request = CreateWatchedAddressRequest {
             tenant_id: Some(task.tenant_id),
             chain_id: attempt.chain_id,
-            address: attempt.address,
+            address: address_text.clone(),
             label: attempt.label,
             priority: attempt.priority.unwrap_or_else(|| task.priority.clone()),
             scan_interval_seconds: attempt
@@ -955,16 +972,17 @@ pub async fn process_one_address_import_task(
             asset_ids: attempt.asset_ids.clone(),
         };
 
-        match repositories::create_watched_address(pool, request).await {
-            Ok(address) => {
-                address_imports::mark_import_attempt_success(
-                    pool,
-                    task.tenant_id,
-                    attempt.attempt_id,
-                    address.id,
-                )
-                .await?;
-            }
+        match address_imports::create_watched_address_for_import_attempt(
+            pool,
+            task.tenant_id,
+            task.id,
+            worker_id,
+            attempt.attempt_id,
+            request,
+        )
+        .await
+        {
+            Ok(_) => {}
             Err(error) => {
                 address_imports::mark_import_attempt_failed(
                     pool,
@@ -1868,7 +1886,9 @@ mod tests {
         assert!(body.contains("pending_import_attempts"));
         assert!(body.contains("chain_id: attempt.chain_id"));
         assert!(body.contains("asset_ids: attempt.asset_ids.clone()"));
-        assert!(body.contains("mark_import_attempt_success"));
+        assert!(body.contains("create_watched_address_for_import_attempt"));
+        assert!(body.contains("task.id"));
+        assert!(body.contains("worker_id"));
         assert!(body.contains("mark_import_attempt_failed"));
         assert!(!body.contains("chain_id: task.chain_id"));
         assert!(!body.contains("asset_ids: task.asset_ids.clone()"));
@@ -1893,6 +1913,30 @@ mod tests {
         ] {
             assert!(!body.contains(row_api), "worker still calls {row_api}");
         }
+    }
+
+    #[test]
+    fn address_import_worker_renews_task_lock_before_attempt_batch() {
+        let body = address_import_worker_source();
+        let renew_index = body.find("renew_watched_address_import_lock").unwrap();
+        let attempts_index = body.find("pending_import_attempts").unwrap();
+
+        assert!(renew_index < attempts_index);
+    }
+
+    #[test]
+    fn address_import_worker_renews_task_lock_during_attempt_batch() {
+        let body = address_import_worker_source();
+
+        assert!(body.matches("renew_watched_address_import_lock").count() >= 2);
+    }
+
+    #[test]
+    fn address_import_worker_does_not_treat_duplicate_create_as_success() {
+        let body = address_import_worker_source();
+
+        assert!(!body.contains("duplicate key value violates unique constraint"));
+        assert!(!body.contains("imported_watched_address"));
     }
 
     #[test]

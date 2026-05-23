@@ -139,6 +139,16 @@ WHERE tenant_id = $1
 ORDER BY created_at DESC
 "#;
 
+pub const CREATE_WATCHED_ADDRESS_QUERY: &str = r#"
+INSERT INTO watched_addresses (
+    tenant_id, chain_id, address, label, priority, scan_interval_seconds,
+    transfer_filter_enabled, balance_change_filter_enabled, status
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
+          transfer_filter_enabled, balance_change_filter_enabled, status
+"#;
+
 pub const UPDATE_WATCHED_ADDRESS_QUERY: &str = r#"
 UPDATE watched_addresses
 SET chain_id = $2,
@@ -899,52 +909,59 @@ pub async fn list_watched_addresses(
         .collect())
 }
 
+pub async fn validate_watched_address_create_request(
+    pool: &PgPool,
+    request: &CreateWatchedAddressRequest,
+) -> AppResult<Vec<Uuid>> {
+    let chain = get_chain(pool, request.chain_id).await?;
+    validate_address_for_chain(&chain, &request.address)?;
+    validate_watched_address(request)?;
+    validate_assets_for_chain(pool, request.chain_id, &request.asset_ids).await
+}
+
+pub async fn create_watched_address_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: CreateWatchedAddressRequest,
+    asset_ids: Vec<Uuid>,
+) -> AppResult<WatchedAddressResponse> {
+    let address = sqlx::query_as::<_, WatchedAddress>(CREATE_WATCHED_ADDRESS_QUERY)
+        .bind(request.tenant_id.unwrap_or(DEFAULT_TENANT_ID))
+        .bind(request.chain_id)
+        .bind(request.address)
+        .bind(request.label)
+        .bind(request.priority)
+        .bind(request.scan_interval_seconds)
+        .bind(request.transfer_filter_enabled)
+        .bind(request.balance_change_filter_enabled)
+        .bind(request.status)
+        .fetch_one(transaction.as_mut())
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    replace_watched_address_assets(transaction, address.id, &asset_ids).await?;
+
+    Ok(watched_address_response(address, asset_ids))
+}
+
 pub async fn create_watched_address(
     pool: &PgPool,
     request: CreateWatchedAddressRequest,
 ) -> AppResult<WatchedAddressResponse> {
-    let chain = get_chain(pool, request.chain_id).await?;
-    validate_address_for_chain(&chain, &request.address)?;
-    validate_watched_address(&request)?;
-    let asset_ids = validate_assets_for_chain(pool, request.chain_id, &request.asset_ids).await?;
-
+    let asset_ids = validate_watched_address_create_request(pool, &request).await?;
     let mut transaction = pool
         .begin()
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    let address = sqlx::query_as::<_, WatchedAddress>(
-        r#"
-        INSERT INTO watched_addresses (
-            tenant_id, chain_id, address, label, priority, scan_interval_seconds,
-            transfer_filter_enabled, balance_change_filter_enabled, status
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, tenant_id, chain_id, address, label, priority, scan_interval_seconds,
-                  transfer_filter_enabled, balance_change_filter_enabled, status
-        "#,
-    )
-    .bind(request.tenant_id.unwrap_or(DEFAULT_TENANT_ID))
-    .bind(request.chain_id)
-    .bind(request.address)
-    .bind(request.label)
-    .bind(request.priority)
-    .bind(request.scan_interval_seconds)
-    .bind(request.transfer_filter_enabled)
-    .bind(request.balance_change_filter_enabled)
-    .bind(request.status)
-    .fetch_one(transaction.as_mut())
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))?;
-
-    replace_watched_address_assets(&mut transaction, address.id, &asset_ids).await?;
+    let address =
+        create_watched_address_in_transaction(&mut transaction, request, asset_ids).await?;
 
     transaction
         .commit()
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    Ok(watched_address_response(address, asset_ids))
+    Ok(address)
 }
 
 pub async fn update_watched_address(
@@ -1602,13 +1619,14 @@ fn validate_address_for_chain(chain: &Chain, address: &str) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_ids_for_address, next_scan_at_from, selected_assets_for_address,
-        validate_assets_for_chain, ACTIVE_ASSETS_BY_TYPE_QUERY, ACTIVE_ERC20_ASSETS_QUERY,
-        ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY, ACTIVE_USER_QUERY,
-        ASSET_IDS_FOR_ADDRESS_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
-        CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, DELETE_WATCHED_ADDRESS_QUERY,
-        GET_NOTIFICATION_OUTBOX_ITEM_QUERY, GET_WATCHED_ADDRESS_QUERY,
-        INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
+        asset_ids_for_address, create_watched_address_in_transaction, next_scan_at_from,
+        selected_assets_for_address, validate_assets_for_chain,
+        validate_watched_address_create_request, ACTIVE_ASSETS_BY_TYPE_QUERY,
+        ACTIVE_ERC20_ASSETS_QUERY, ACTIVE_RPC_PROVIDER_QUERY, ACTIVE_TENANT_MEMBERSHIP_QUERY,
+        ACTIVE_USER_QUERY, ASSET_IDS_FOR_ADDRESS_QUERY, CLAIM_DUE_NOTIFICATION_OUTBOX_QUERY,
+        CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY, CREATE_WATCHED_ADDRESS_QUERY,
+        DELETE_WATCHED_ADDRESS_QUERY, GET_NOTIFICATION_OUTBOX_ITEM_QUERY,
+        GET_WATCHED_ADDRESS_QUERY, INSERT_BALANCE_SNAPSHOT_QUERY, INSERT_EVENT_IF_NOT_EXISTS_QUERY,
         INSERT_NOTIFICATION_OUTBOX_FOR_EVENT_QUERY, LATEST_BALANCE_SNAPSHOT_QUERY,
         LIST_EVENTS_QUERY, LIST_NOTIFICATION_OUTBOX_QUERY, LIST_WATCHED_ADDRESSES_QUERY,
         MANUAL_RETRY_NOTIFICATION_OUTBOX_QUERY, MARK_CLAIMED_SCAN_ENQUEUED_QUERY,
@@ -1635,6 +1653,36 @@ mod tests {
         assert!(WATCHED_ADDRESS_ASSET_IDS_FOR_ADDRESSES_QUERY.contains("address_id = ANY($1)"));
         assert!(WATCHED_ADDRESS_ASSET_IDS_FOR_ADDRESSES_QUERY
             .contains("ORDER BY address_id, created_at, asset_id"));
+    }
+
+    #[test]
+    fn create_watched_address_query_is_not_globally_idempotent() {
+        assert!(
+            !CREATE_WATCHED_ADDRESS_QUERY.contains("ON CONFLICT (tenant_id, chain_id, address)")
+        );
+    }
+
+    #[allow(dead_code)]
+    async fn assert_validate_watched_address_create_request_signature(
+        pool: &PgPool,
+        request: &coin_listener_core::models::CreateWatchedAddressRequest,
+    ) -> AppResult<Vec<uuid::Uuid>> {
+        validate_watched_address_create_request(pool, request).await
+    }
+
+    #[allow(dead_code)]
+    async fn assert_create_watched_address_in_transaction_signature(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        request: coin_listener_core::models::CreateWatchedAddressRequest,
+        asset_ids: Vec<uuid::Uuid>,
+    ) -> AppResult<coin_listener_core::models::WatchedAddressResponse> {
+        create_watched_address_in_transaction(transaction, request, asset_ids).await
+    }
+
+    #[test]
+    fn create_watched_address_in_transaction_signature_is_stable() {
+        let _ = assert_validate_watched_address_create_request_signature;
+        let _ = assert_create_watched_address_in_transaction_signature;
     }
 
     #[test]
