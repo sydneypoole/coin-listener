@@ -37,7 +37,7 @@ use tracing::{info, warn};
 
 pub const EVM_ERC20_TRANSFER_CURSOR: &str = "evm_erc20_transfer";
 pub const EVM_TRANSFER_INITIAL_WINDOW_BLOCKS: i64 = 1_000;
-pub const EVM_LOG_MAX_BLOCK_SPAN: i64 = 10_000;
+pub const EVM_LOG_MAX_BLOCK_SPAN: i64 = EVM_TRANSFER_INITIAL_WINDOW_BLOCKS;
 pub const TRON_TRX_TRANSFER_CURSOR: &str = "tron_trx_transfer";
 pub const TRON_TRC20_TRANSFER_CURSOR: &str = "tron_trc20_transfer";
 pub const BTC_TRANSACTION_CURSOR: &str = "btc_transaction";
@@ -1400,7 +1400,7 @@ mod tests {
 
         use crate::{
             bounded_block_ranges, evm_transfer_scan_range, BlockRange, EVM_ERC20_TRANSFER_CURSOR,
-            EVM_LOG_MAX_BLOCK_SPAN,
+            EVM_LOG_MAX_BLOCK_SPAN, EVM_TRANSFER_INITIAL_WINDOW_BLOCKS,
         };
 
         fn cursor(last_scanned_block: i64) -> ScanCursor {
@@ -1468,15 +1468,20 @@ mod tests {
 
         #[test]
         fn bounded_block_ranges_keep_exact_limit_as_one_range() {
-            let ranges = bounded_block_ranges(5, 10_004, EVM_LOG_MAX_BLOCK_SPAN).unwrap();
+            let ranges = bounded_block_ranges(5, 1_004, EVM_LOG_MAX_BLOCK_SPAN).unwrap();
 
             assert_eq!(
                 ranges,
                 vec![BlockRange {
                     from_block: 5,
-                    to_block: 10_004,
+                    to_block: 1_004,
                 }]
             );
+        }
+
+        #[test]
+        fn evm_log_max_block_span_matches_initial_window() {
+            assert_eq!(EVM_LOG_MAX_BLOCK_SPAN, EVM_TRANSFER_INITIAL_WINDOW_BLOCKS);
         }
 
         #[test]
