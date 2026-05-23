@@ -280,6 +280,7 @@ describe('frontend UI regressions', () => {
       'pages/AddressesPage.tsx',
       'pages/EventsPage.tsx',
       'pages/SystemStatusPage.tsx',
+      'pages/ScanAuditPage.tsx',
       'pages/NotificationRulesPage.tsx',
       'pages/NotificationOperationsPage.tsx',
       'pages/InAppNotificationsPage.tsx',
@@ -506,5 +507,89 @@ describe('frontend UI regressions', () => {
 
     const chainFieldResult = parseAddressImportInput('address,chain_id\n0x0000000000000000000000000000000000000005,base');
     if (!chainFieldResult.warnings.some(warning => warning.includes('chain_id'))) throw new Error('chain_id CSV field should remain unknown');
+  });
+
+  test('scan audit API contracts are exposed to frontend', () => {
+    const types = readSource('api/types.ts');
+    const client = readSource('api/client.ts');
+
+    for (const expected of [
+      'export type ScanRunStatus',
+      'export type ScanAddressTask',
+      'export type ScanRunListItem',
+      'export type ScanRunDetail',
+      'export type ScanRunQuery',
+      'export type ScanRunListResponse',
+      'export type RetryScanRunResponse',
+      'last_success_at?: string | null',
+      'last_failed_at?: string | null',
+      'last_24h_success: number',
+      'last_24h_failed: number',
+      'recent_runs: ScanRunListItem[]',
+    ]) {
+      expectContains(types, expected);
+    }
+
+    for (const expected of [
+      'listScanRuns',
+      'getScanRun',
+      'retryScanRun',
+      '/api/scan-runs',
+      '/api/scan-runs/${id}',
+      '/api/scan-runs/${id}/retry',
+    ]) {
+      expectContains(client, expected);
+    }
+  });
+
+  test('scan audit page is wired into navigation with Chinese statuses and retry rules', () => {
+    const app = readSource('App.tsx');
+    const page = readSource('pages/ScanAuditPage.tsx');
+
+    expectContains(app, "'scan-audit'");
+    expectContains(app, 'ScanAuditPage');
+    expectContains(app, '扫描审计');
+
+    for (const expected of [
+      'listScanRuns',
+      'getScanRun',
+      'retryScanRun',
+      'tableId="scan-runs"',
+      '扫描中',
+      '成功',
+      '失败',
+      '跳过：锁占用',
+      '不支持',
+      'retryableScanRun(row.status) ? ',
+      'JSON.stringify(detail.metadata, null, 2)',
+      'queryClient.invalidateQueries({ queryKey: [\'scan-runs\'] })',
+      'queryClient.invalidateQueries({ queryKey: [\'system-status\'] })',
+      'function handlePageChange(page: number)',
+      'const pageSize = filters.limit ?? 50',
+      'offset: (page - 1) * pageSize',
+      'pagination={{ pageSize: filters.limit ?? 50, currentPage: currentPage(filters), onPageChange: handlePageChange }}',
+    ]) {
+      expectContains(page, expected);
+    }
+  });
+
+  test('system status page shows scan audit health summary and recent runs', () => {
+    const page = readSource('pages/SystemStatusPage.tsx');
+
+    for (const expected of [
+      'last_24h_success',
+      'last_24h_failed',
+      'last_success_at',
+      'last_failed_at',
+      'recent_runs',
+      '扫描成功',
+      '扫描失败',
+      '最近扫描记录',
+      'tableId="system-recent-scan-runs"',
+      'scanRunStatusText',
+      '跳过：锁占用',
+    ]) {
+      expectContains(page, expected);
+    }
   });
 });

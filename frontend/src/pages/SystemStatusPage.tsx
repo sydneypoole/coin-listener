@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Banner, Space, Tag, Typography } from '@douyinfe/semi-ui';
 import { getSystemStatus } from '../api/client';
-import type { ProviderChainStatus, ProviderStatusItem, ServiceHeartbeatStatusItem } from '../api/types';
+import type { ProviderChainStatus, ProviderStatusItem, ScanRunListItem, ServiceHeartbeatStatusItem } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
 import { MetricCard, MetricGrid } from '../components/MetricGrid';
@@ -44,6 +44,24 @@ function serviceStatusText(item: ServiceHeartbeatStatusItem) {
   if (item.is_stale) return '离线';
   if (item.status === 'online') return '在线';
   return item.status;
+}
+
+function scanRunStatusText(status: string) {
+  if (status === 'running') return '扫描中';
+  if (status === 'success') return '成功';
+  if (status === 'failed') return '失败';
+  if (status === 'locked') return '跳过：锁占用';
+  if (status === 'unsupported') return '不支持';
+  return status;
+}
+
+function scanRunStatusColor(status: string): 'blue' | 'green' | 'red' | 'orange' | 'grey' {
+  if (status === 'running') return 'blue';
+  if (status === 'success') return 'green';
+  if (status === 'failed') return 'red';
+  if (status === 'locked') return 'grey';
+  if (status === 'unsupported') return 'orange';
+  return 'grey';
 }
 
 function shortInstanceId(instanceId: string) {
@@ -101,6 +119,18 @@ export function SystemStatusPage() {
           hint={`last scan ${formatTime(status?.scans.last_scanned_at)}`}
           tone={status?.scans.overdue_addresses ? 'warning' : 'neutral'}
         />
+        <MetricCard
+          title="扫描成功"
+          value={status?.scans.last_24h_success ?? 0}
+          hint={`last ${formatTime(status?.scans.last_success_at)}`}
+          tone="success"
+        />
+        <MetricCard
+          title="扫描失败"
+          value={status?.scans.last_24h_failed ?? 0}
+          hint={`last ${formatTime(status?.scans.last_failed_at)}`}
+          tone={status?.scans.last_24h_failed ? 'danger' : 'neutral'}
+        />
         <MetricCard title="24h 事件" value={status?.events.last_24h_total ?? 0} hint={`transfer ${status?.events.last_24h_transfers ?? 0}`} />
         <MetricCard
           title="Outbox Failed"
@@ -125,6 +155,7 @@ export function SystemStatusPage() {
       <DataSurface title="扫描与通知摘要" actions={<Text type="tertiary">生成时间 {formatTime(status?.generated_at)}</Text>}>
         <div className="status-summary-grid">
           <SummaryItem label="扫描" value={`due ${status?.scans.due_addresses ?? 0} / overdue ${status?.scans.overdue_addresses ?? 0}`} />
+          <SummaryItem label="扫描审计" value={`success ${status?.scans.last_24h_success ?? 0} / failed ${status?.scans.last_24h_failed ?? 0}`} />
           <SummaryItem label="事件" value={`transfer ${status?.events.last_24h_transfers ?? 0} / non-transfer ${status?.events.last_24h_non_transfers ?? 0}`} />
           <SummaryItem
             label="24h 通知"
@@ -137,6 +168,26 @@ export function SystemStatusPage() {
           />
           <SummaryItem label="下一次通知" value={formatTime(status?.notifications.outbox.next_due_at)} />
         </div>
+      </DataSurface>
+
+      <DataSurface title="最近扫描记录" actions={<Text type="tertiary">最近 {status?.scans.recent_runs.length ?? 0} 条</Text>}>
+        <DataTable<ScanRunListItem>
+          tableId="system-recent-scan-runs"
+          loading={statusQuery.isLoading}
+          dataSource={status?.scans.recent_runs ?? []}
+          rowKey="id"
+          pagination={false}
+          scroll={{ x: 1100 }}
+          columns={[
+            { title: '开始时间', dataIndex: 'started_at', width: 180, render: value => formatTime(String(value)) },
+            { title: '链', dataIndex: 'chain_name', width: 150, ellipsis: { showTitle: true } },
+            { title: '地址', dataIndex: 'address', width: 240, ellipsis: { showTitle: true }, render: value => <span className="table-cell-mono">{String(value)}</span> },
+            { title: '状态', dataIndex: 'status', width: 140, render: value => <Tag color={scanRunStatusColor(String(value))}>{scanRunStatusText(String(value))}</Tag> },
+            { title: '耗时', dataIndex: 'duration_ms', width: 100, render: value => value === null || value === undefined ? '-' : `${String(value)}ms` },
+            { title: '事件数', dataIndex: 'event_count', width: 90 },
+            { title: '错误', dataIndex: 'error_message', width: 260, ellipsis: { showTitle: true }, render: value => truncateError(value ? String(value) : null) },
+          ]}
+        />
       </DataSurface>
 
       <DataSurface title="服务心跳" actions={<Text type="tertiary">在线 {status?.services.online ?? 0} / 离线 {status?.services.stale ?? 0}</Text>}>

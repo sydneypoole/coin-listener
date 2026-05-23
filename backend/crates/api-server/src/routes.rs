@@ -25,7 +25,8 @@ use coin_listener_core::{
         EvmTransactionRescanTransferSummary, InAppNotificationQuery, LoginRequest, LoginResponse,
         NotificationChannelTestResponse, NotificationDeliveryListResponse,
         NotificationDeliveryQuery, NotificationOutboxListResponse, NotificationOutboxQuery,
-        Provider, QueueStatus, RetryNotificationOutboxResponse, ScanAddressContext, SystemStatus,
+        Provider, QueueStatus, RetryNotificationOutboxResponse, RetryScanRunResponse,
+        ScanAddressContext, ScanRunListResponse, ScanRunQuery, SystemStatus,
         UpdateNotificationChannelRequest, UpdateTelegramBotRequest, UpdateTelegramSettingsRequest,
         UserSummary, VerificationResponse,
     },
@@ -36,7 +37,7 @@ use coin_listener_storage::{
     notify_queue::{connect_notify_queue, NotifyQueue},
     repositories,
     scan_queue::{connect_scan_queue, ScanQueue},
-    system_status, telegram_settings,
+    scan_runs, system_status, telegram_settings,
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -81,6 +82,8 @@ pub enum ProviderTestKind {
     TronRest,
     BtcRest,
 }
+
+pub const SCAN_RETRY_CLAIM_STALE_MINUTES: i64 = 15;
 
 pub fn provider_test_kind(chain_type: &str, provider_type: &str) -> AppResult<ProviderTestKind> {
     match (chain_type, provider_type) {
@@ -129,6 +132,9 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
             put(update_address).delete(delete_address),
         )
         .route("/api/events", get(list_events))
+        .route("/api/scan-runs", get(list_scan_runs))
+        .route("/api/scan-runs/:id", get(get_scan_run))
+        .route("/api/scan-runs/:id/retry", post(retry_scan_run))
         .route("/api/evm/transactions/rescan", post(rescan_evm_transaction))
         .route(
             "/api/telegram-settings",
@@ -239,9 +245,12 @@ async fn realtime_notifications(
         .into_response())
 }
 
-async fn system_status_handler(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
+async fn system_status_handler(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Response, ApiError> {
     let queues = queue_status(&state).await;
-    let scans = system_status::system_scan_status(&state.postgres).await?;
+    let scans = system_status::system_scan_status(&state.postgres, auth.tenant_id).await?;
     let events = system_status::system_event_status(&state.postgres).await?;
     let notifications = system_status::system_notification_status(&state.postgres).await?;
     let providers = system_status::system_provider_status(&state.postgres).await?;
@@ -1248,6 +1257,91 @@ fn notification_ops_stale_before() -> chrono::DateTime<Utc> {
     Utc::now() - Duration::minutes(15)
 }
 
+async fn list_scan_runs(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Query(query): Query<ScanRunQuery>,
+) -> Result<Response, ApiError> {
+    let limit = scan_runs::scan_runs_limit(query.limit);
+    let offset = scan_runs::scan_runs_offset(query.offset);
+    let items = scan_runs::list_scan_runs(&state.postgres, auth.tenant_id, query).await?;
+
+    Ok(Json(ScanRunListResponse {
+        items,
+        limit,
+        offset,
+    })
+    .into_response())
+}
+
+async fn get_scan_run(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let detail = scan_runs::get_scan_run_detail(&state.postgres, auth.tenant_id, id).await?;
+    Ok(Json(detail).into_response())
+}
+
+async fn retry_scan_run(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let now = Utc::now();
+    let stale_claim_before = now - Duration::minutes(SCAN_RETRY_CLAIM_STALE_MINUTES);
+    let task = scan_runs::retry_scan_run_task(
+        &state.postgres,
+        auth.tenant_id,
+        id,
+        now,
+        stale_claim_before,
+    )
+    .await?;
+    let enqueue_result = async {
+        let redis_client = state
+            .redis
+            .as_ref()
+            .ok_or_else(|| AppError::Redis("redis unavailable".to_string()))?;
+        let mut connection = connect_scan_queue(redis_client).await?;
+        let queue = ScanQueue::new(state.scan_queue_key.clone(), 1);
+        queue.enqueue(&mut connection, &task).await
+    }
+    .await;
+
+    if let Err(error) = enqueue_result {
+        let error_message = error.to_string();
+        if let Err(cleanup_error) = scan_runs::clear_retry_scan_run_claim(
+            &state.postgres,
+            auth.tenant_id,
+            id,
+            task.task_id,
+            &error_message,
+        )
+        .await
+        {
+            tracing::warn!(
+                scan_run_id = %id,
+                task_id = %task.task_id,
+                error = %cleanup_error,
+                "failed to clear scan retry claim after enqueue failure"
+            );
+        }
+        return Err(error.into());
+    }
+
+    scan_runs::mark_retry_scan_run_enqueued(
+        &state.postgres,
+        auth.tenant_id,
+        id,
+        task.task_id,
+        Utc::now(),
+    )
+    .await?;
+
+    Ok(Json(RetryScanRunResponse { task }).into_response())
+}
+
 async fn list_notification_outbox(
     State(state): State<Arc<ApiState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1431,6 +1525,16 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("production source is present")
+    }
+
+    #[test]
+    fn system_status_handler_scopes_scan_runs_to_authenticated_tenant() {
+        let source = production_source();
+
+        assert!(source.contains("async fn system_status_handler("));
+        assert!(source.contains("Extension(auth): Extension<AuthContext>"));
+        assert!(source
+            .contains("system_status::system_scan_status(&state.postgres, auth.tenant_id).await?"));
     }
 
     #[test]
@@ -2194,6 +2298,61 @@ mod tests {
 
             assert_eq!(response.status(), status, "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn router_exposes_scan_run_routes() {
+        let app = build_router(test_state());
+
+        for (method, uri, status) in [
+            (
+                Method::GET,
+                "/api/scan-runs?status=failed&limit=50&offset=0",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::GET,
+                "/api/scan-runs/not-a-uuid",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                Method::POST,
+                "/api/scan-runs/not-a-uuid/retry",
+                StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("valid request"),
+                )
+                .await
+                .expect("router response");
+
+            assert_eq!(response.status(), status, "{uri}");
+        }
+    }
+
+    #[test]
+    fn scan_run_handlers_use_tenant_scope_and_scan_queue_retry() {
+        let source = production_source();
+
+        assert!(source.contains("Extension(auth): Extension<AuthContext>"));
+        assert!(source.contains("scan_runs::list_scan_runs(&state.postgres, auth.tenant_id"));
+        assert!(source.contains("scan_runs::get_scan_run_detail(&state.postgres, auth.tenant_id"));
+        assert!(source.contains("scan_runs::retry_scan_run_task("));
+        assert!(source.contains("stale_claim_before"));
+        assert!(source.contains("SCAN_RETRY_CLAIM_STALE_MINUTES"));
+        assert!(source.contains("ScanQueue::new(state.scan_queue_key.clone(), 1)"));
+        assert!(source.contains("queue.enqueue(&mut connection, &task).await"));
+        assert!(source.contains("scan_runs::clear_retry_scan_run_claim("));
+        assert!(source.contains("failed to clear scan retry claim after enqueue failure"));
+        assert!(source.contains("return Err(error.into())"));
+        assert!(source.contains("scan_runs::mark_retry_scan_run_enqueued("));
     }
 
     #[tokio::test]

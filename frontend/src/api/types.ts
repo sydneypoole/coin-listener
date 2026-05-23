@@ -464,6 +464,61 @@ export type RetryNotificationOutboxResponse = {
   outbox: NotificationOutboxItem;
 };
 
+export type ScanRunStatus = 'running' | 'success' | 'failed' | 'locked' | 'unsupported' | string;
+
+export type ScanAddressTask = {
+  task_id: string;
+  address_id: string;
+  tenant_id: string;
+  chain_id: string;
+  attempt: number;
+  enqueued_at: string;
+};
+
+export type ScanRunListItem = {
+  id: string;
+  tenant_id: string;
+  task_id: string;
+  address_id: string;
+  chain_id: string;
+  chain_name: string;
+  address: string;
+  address_label?: string | null;
+  chain_type: string;
+  status: ScanRunStatus;
+  event_count: number;
+  started_at: string;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  error_message?: string | null;
+};
+
+export type ScanRunDetail = ScanRunListItem & {
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ScanRunQuery = {
+  chain_id?: string;
+  address_id?: string;
+  status?: ScanRunStatus;
+  started_after?: string;
+  started_before?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type ScanRunListResponse = {
+  items: ScanRunListItem[];
+  limit: number;
+  offset: number;
+};
+
+export type RetryScanRunResponse = {
+  task: ScanAddressTask;
+};
+
 export type QueueStatus = {
   scan_queue_key: string;
   scan_queue_depth?: number | null;
@@ -477,6 +532,11 @@ export type ScanStatus = {
   due_addresses: number;
   overdue_addresses: number;
   last_scanned_at?: string | null;
+  last_success_at?: string | null;
+  last_failed_at?: string | null;
+  last_24h_success: number;
+  last_24h_failed: number;
+  recent_runs: ScanRunListItem[];
 };
 
 export type EventStatus = {

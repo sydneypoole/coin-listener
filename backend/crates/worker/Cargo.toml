@@ -11,6 +11,7 @@ coin-listener-chain-providers = { path = "../chain-providers" }
 coin-listener-core = { path = "../core" }
 coin-listener-storage = { path = "../storage" }
 redis.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true

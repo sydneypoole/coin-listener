@@ -27,6 +27,10 @@ import type {
   Provider,
   ProviderTestResponse,
   RetryNotificationOutboxResponse,
+  RetryScanRunResponse,
+  ScanRunDetail,
+  ScanRunListResponse,
+  ScanRunQuery,
   SystemStatus,
   TelegramBindingRequest,
   TelegramBot,
@@ -155,6 +159,20 @@ export function deleteWatchedAddress(id: string): Promise<void> {
 
 export function listEvents(filters: EventQuery = {}): Promise<AddressEvent[]> {
   return request<AddressEvent[]>(`/api/events${buildQuery(filters)}`);
+}
+
+export function listScanRuns(filters: ScanRunQuery = {}): Promise<ScanRunListResponse> {
+  return request<ScanRunListResponse>(`/api/scan-runs${buildQuery(filters)}`);
+}
+
+export function getScanRun(id: string): Promise<ScanRunDetail> {
+  return request<ScanRunDetail>(`/api/scan-runs/${id}`);
+}
+
+export function retryScanRun(id: string): Promise<RetryScanRunResponse> {
+  return request<RetryScanRunResponse>(`/api/scan-runs/${id}/retry`, {
+    method: 'POST',
+  });
 }
 
 export function rescanEvmTransaction(payload: EvmTransactionRescanRequest): Promise<EvmTransactionRescanResponse> {

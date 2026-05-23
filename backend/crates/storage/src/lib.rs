@@ -6,6 +6,7 @@ pub mod provider_health;
 pub mod redis;
 pub mod repositories;
 pub mod scan_queue;
+pub mod scan_runs;
 pub mod service_heartbeats;
 pub mod system_status;
 pub mod telegram_bindings;

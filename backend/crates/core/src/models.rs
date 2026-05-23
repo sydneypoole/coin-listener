@@ -348,6 +348,94 @@ pub struct ScanStatus {
     pub due_addresses: i64,
     pub overdue_addresses: i64,
     pub last_scanned_at: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_failed_at: Option<DateTime<Utc>>,
+    pub last_24h_success: i64,
+    pub last_24h_failed: i64,
+    pub recent_runs: Vec<ScanRunListItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ScanRun {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub task_id: Uuid,
+    pub address_id: Uuid,
+    pub chain_id: Uuid,
+    pub chain_type: String,
+    pub status: String,
+    pub event_count: i32,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub duration_ms: Option<i64>,
+    pub error_message: Option<String>,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ScanRunListItem {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub task_id: Uuid,
+    pub address_id: Uuid,
+    pub chain_id: Uuid,
+    pub chain_name: String,
+    pub address: String,
+    pub address_label: Option<String>,
+    pub chain_type: String,
+    pub status: String,
+    pub event_count: i32,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub duration_ms: Option<i64>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ScanRunDetail {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub task_id: Uuid,
+    pub address_id: Uuid,
+    pub chain_id: Uuid,
+    pub chain_name: String,
+    pub address: String,
+    pub address_label: Option<String>,
+    pub chain_type: String,
+    pub status: String,
+    pub event_count: i32,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub duration_ms: Option<i64>,
+    pub error_message: Option<String>,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScanRunQuery {
+    pub chain_id: Option<Uuid>,
+    pub address_id: Option<Uuid>,
+    pub status: Option<String>,
+    pub started_after: Option<DateTime<Utc>>,
+    pub started_before: Option<DateTime<Utc>>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanRunListResponse {
+    pub items: Vec<ScanRunListItem>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryScanRunResponse {
+    pub task: ScanAddressTask,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -832,8 +920,9 @@ mod tests {
         NotificationOutboxListResponse, NotificationOutboxQuery, NotificationStatus,
         NotifyEventTask, OutboxStatusCounts, ProviderChainStatus, ProviderHealthStatus,
         ProviderStatus, ProviderStatusItem, QueueStatus, RetryNotificationOutboxResponse,
-        ScanAddressTask, ScanCursor, ScanStatus, ServiceHealthStatus, ServiceHeartbeatStatusItem,
-        SystemStatus, TelegramBindingRequest, UpdateTelegramBotRequest,
+        RetryScanRunResponse, ScanAddressTask, ScanCursor, ScanRun, ScanRunDetail, ScanRunListItem,
+        ScanRunListResponse, ScanRunQuery, ScanStatus, ServiceHealthStatus,
+        ServiceHeartbeatStatusItem, SystemStatus, TelegramBindingRequest, UpdateTelegramBotRequest,
         WatchedAddressImportChainConfig, WatchedAddressImportDefaults,
         WatchedAddressImportErrorRow, WatchedAddressImportTask, WatchedAddressResponse,
     };
@@ -1224,6 +1313,11 @@ mod tests {
                 due_addresses: 2,
                 overdue_addresses: 1,
                 last_scanned_at: Some(Utc.with_ymd_and_hms(2026, 5, 17, 9, 58, 0).unwrap()),
+                last_success_at: Some(Utc.with_ymd_and_hms(2026, 5, 17, 9, 58, 0).unwrap()),
+                last_failed_at: None,
+                last_24h_success: 3,
+                last_24h_failed: 0,
+                recent_runs: vec![],
             },
             events: EventStatus {
                 last_24h_total: 40,
@@ -1299,6 +1393,158 @@ mod tests {
         assert!(payload.contains("\"unread_in_app\":4"));
         assert!(payload.contains("\"services\""));
         assert!(payload.contains("\"health\""));
+    }
+
+    #[test]
+    fn scan_run_responses_round_trip_as_json() {
+        let started_at = Utc.with_ymd_and_hms(2026, 5, 24, 8, 0, 0).unwrap();
+        let finished_at = Utc.with_ymd_and_hms(2026, 5, 24, 8, 0, 2).unwrap();
+        let list_item = ScanRunListItem {
+            id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            task_id: Uuid::from_u128(3),
+            address_id: Uuid::from_u128(4),
+            chain_id: Uuid::from_u128(5),
+            chain_name: "Base".to_string(),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            address_label: Some("Hot wallet".to_string()),
+            chain_type: "evm".to_string(),
+            status: "failed".to_string(),
+            event_count: 0,
+            started_at,
+            finished_at: Some(finished_at),
+            duration_ms: Some(2_000),
+            error_message: Some("provider request failed: timeout".to_string()),
+        };
+        let detail = ScanRunDetail {
+            id: list_item.id,
+            tenant_id: list_item.tenant_id,
+            task_id: list_item.task_id,
+            address_id: list_item.address_id,
+            chain_id: list_item.chain_id,
+            chain_name: list_item.chain_name.clone(),
+            address: list_item.address.clone(),
+            address_label: list_item.address_label.clone(),
+            chain_type: list_item.chain_type.clone(),
+            status: list_item.status.clone(),
+            event_count: list_item.event_count,
+            started_at,
+            finished_at: Some(finished_at),
+            duration_ms: Some(2_000),
+            error_message: list_item.error_message.clone(),
+            metadata: serde_json::json!({ "outcome": "failed", "provider": "base-rpc" }),
+            created_at: started_at,
+            updated_at: finished_at,
+        };
+        let run = ScanRun {
+            id: detail.id,
+            tenant_id: detail.tenant_id,
+            task_id: detail.task_id,
+            address_id: detail.address_id,
+            chain_id: detail.chain_id,
+            chain_type: detail.chain_type.clone(),
+            status: detail.status.clone(),
+            event_count: detail.event_count,
+            started_at: detail.started_at,
+            finished_at: detail.finished_at,
+            duration_ms: detail.duration_ms,
+            error_message: detail.error_message.clone(),
+            metadata: detail.metadata.clone(),
+            created_at: detail.created_at,
+            updated_at: detail.updated_at,
+        };
+        let list = ScanRunListResponse {
+            items: vec![list_item.clone()],
+            limit: 50,
+            offset: 0,
+        };
+        let retry = RetryScanRunResponse {
+            task: ScanAddressTask {
+                task_id: Uuid::from_u128(6),
+                address_id: list_item.address_id,
+                tenant_id: list_item.tenant_id,
+                chain_id: list_item.chain_id,
+                attempt: 1,
+                enqueued_at: finished_at,
+            },
+        };
+
+        let payload = serde_json::to_string(&(list, detail, retry, run))
+            .expect("serialize scan run responses");
+        let decoded: (
+            ScanRunListResponse,
+            ScanRunDetail,
+            RetryScanRunResponse,
+            ScanRun,
+        ) = serde_json::from_str(&payload).expect("deserialize scan run responses");
+
+        assert_eq!(decoded.0.items[0], list_item);
+        assert_eq!(decoded.1.metadata["outcome"], "failed");
+        assert_eq!(decoded.2.task.address_id, Uuid::from_u128(4));
+        assert_eq!(decoded.3.id, Uuid::from_u128(1));
+        assert!(payload.contains("\"chain_name\":\"Base\""));
+        assert!(payload.contains("\"duration_ms\":2000"));
+    }
+
+    #[test]
+    fn scan_run_query_deserializes_filters() {
+        let query: ScanRunQuery = serde_json::from_str(
+            r#"{
+                "chain_id":"00000000-0000-0000-0000-000000000005",
+                "address_id":"00000000-0000-0000-0000-000000000004",
+                "status":"failed",
+                "started_after":"2026-05-24T00:00:00Z",
+                "started_before":"2026-05-25T00:00:00Z",
+                "limit":25,
+                "offset":50
+            }"#,
+        )
+        .expect("deserialize scan run query");
+
+        assert_eq!(query.chain_id, Some(Uuid::from_u128(5)));
+        assert_eq!(query.address_id, Some(Uuid::from_u128(4)));
+        assert_eq!(query.status.as_deref(), Some("failed"));
+        assert_eq!(query.limit, Some(25));
+        assert_eq!(query.offset, Some(50));
+    }
+
+    #[test]
+    fn scan_status_round_trips_scan_run_health() {
+        let run_time = Utc.with_ymd_and_hms(2026, 5, 24, 8, 0, 0).unwrap();
+        let status = ScanStatus {
+            active_addresses: 12,
+            due_addresses: 2,
+            overdue_addresses: 1,
+            last_scanned_at: Some(run_time),
+            last_success_at: Some(run_time),
+            last_failed_at: Some(run_time),
+            last_24h_success: 7,
+            last_24h_failed: 3,
+            recent_runs: vec![ScanRunListItem {
+                id: Uuid::from_u128(1),
+                tenant_id: Uuid::from_u128(2),
+                task_id: Uuid::from_u128(3),
+                address_id: Uuid::from_u128(4),
+                chain_id: Uuid::from_u128(5),
+                chain_name: "Base".to_string(),
+                address: "0x0000000000000000000000000000000000000001".to_string(),
+                address_label: None,
+                chain_type: "evm".to_string(),
+                status: "success".to_string(),
+                event_count: 2,
+                started_at: run_time,
+                finished_at: Some(run_time),
+                duration_ms: Some(350),
+                error_message: None,
+            }],
+        };
+
+        let payload = serde_json::to_string(&status).expect("serialize scan status");
+        let decoded: ScanStatus = serde_json::from_str(&payload).expect("deserialize scan status");
+
+        assert_eq!(decoded, status);
+        assert!(payload.contains("\"last_24h_success\":7"));
+        assert!(payload.contains("\"recent_runs\""));
     }
 
     #[test]

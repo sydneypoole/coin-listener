@@ -30,6 +30,7 @@ use coin_listener_storage::{
     },
     repositories,
     scan_queue::ScanQueue,
+    scan_runs,
 };
 use redis::aio::MultiplexedConnection;
 use sqlx::PgPool;
@@ -59,7 +60,7 @@ pub enum ScanPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScanTaskOutcome {
     Locked,
-    Scanned,
+    Scanned { event_count: usize },
     UnsupportedChain(String),
 }
 
@@ -79,7 +80,7 @@ pub fn worker_shutdown_requested(shutdown: &AtomicBool) -> bool {
 pub fn scan_task_outcome_log_status(outcome: &ScanTaskOutcome) -> &'static str {
     match outcome {
         ScanTaskOutcome::Locked => "locked",
-        ScanTaskOutcome::Scanned => "success",
+        ScanTaskOutcome::Scanned { .. } => "success",
         ScanTaskOutcome::UnsupportedChain(_) => "unsupported",
     }
 }
@@ -921,6 +922,76 @@ pub async fn process_scan_task(
     outcome
 }
 
+pub fn scan_task_event_count(outcome: &ScanTaskOutcome) -> i32 {
+    match outcome {
+        ScanTaskOutcome::Scanned { event_count } => (*event_count).min(i32::MAX as usize) as i32,
+        ScanTaskOutcome::Locked | ScanTaskOutcome::UnsupportedChain(_) => 0,
+    }
+}
+
+pub fn scan_task_update_metadata(outcome: &ScanTaskOutcome) -> serde_json::Value {
+    match outcome {
+        ScanTaskOutcome::Scanned { .. } => serde_json::json!({ "outcome": "scanned" }),
+        ScanTaskOutcome::Locked => serde_json::json!({ "outcome": "locked" }),
+        ScanTaskOutcome::UnsupportedChain(chain_type) => {
+            serde_json::json!({ "outcome": "unsupported", "chain_type": chain_type })
+        }
+    }
+}
+
+async fn create_scan_run_for_task(
+    pool: &PgPool,
+    task: &ScanAddressTask,
+    started_at: DateTime<Utc>,
+    worker_id: &str,
+) -> AppResult<coin_listener_core::models::ScanRun> {
+    let context = scan_runs::scan_run_context(pool, task).await?;
+    scan_runs::create_scan_run(
+        pool,
+        task,
+        &context,
+        started_at,
+        serde_json::json!({ "worker_id": worker_id }),
+    )
+    .await
+}
+
+async fn finish_scan_run_for_result(
+    pool: &PgPool,
+    scan_run_id: uuid::Uuid,
+    result: &AppResult<ScanTaskOutcome>,
+    finished_at: DateTime<Utc>,
+) -> AppResult<()> {
+    match result {
+        Ok(outcome) => {
+            scan_runs::finish_scan_run(
+                pool,
+                scan_run_id,
+                scan_task_outcome_log_status(outcome),
+                scan_task_event_count(outcome),
+                finished_at,
+                None,
+                scan_task_update_metadata(outcome),
+            )
+            .await?;
+        }
+        Err(error) => {
+            let error_message = error.to_string();
+            scan_runs::finish_scan_run(
+                pool,
+                scan_run_id,
+                scan_runs::SCAN_RUN_STATUS_FAILED,
+                0,
+                finished_at,
+                Some(error_message.as_str()),
+                serde_json::json!({ "outcome": "failed" }),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn process_one_address_import_task(
     pool: &PgPool,
     worker_id: &str,
@@ -1017,24 +1088,30 @@ async fn process_locked_scan_task(
     task: &ScanAddressTask,
     now: DateTime<Utc>,
 ) -> AppResult<ScanTaskOutcome> {
-    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
+    let context = scan_runs::scan_run_context(pool, task).await?;
     let next_scan_at = repositories::next_scan_at_from(now, context.scan_interval_seconds);
 
     match scan_plan_for_chain(&context.chain_type) {
         ScanPlan::EvmNativeBalance => {
-            let _events = scan_evm_address(pool, redis, task, now).await?;
+            let events = scan_evm_address(pool, redis, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
-            Ok(ScanTaskOutcome::Scanned)
+            Ok(ScanTaskOutcome::Scanned {
+                event_count: events.len(),
+            })
         }
         ScanPlan::Tron => {
-            let _events = scan_tron_address(pool, redis, task, now).await?;
+            let events = scan_tron_address(pool, redis, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
-            Ok(ScanTaskOutcome::Scanned)
+            Ok(ScanTaskOutcome::Scanned {
+                event_count: events.len(),
+            })
         }
         ScanPlan::Btc => {
-            let _events = scan_btc_address(pool, redis, task, now).await?;
+            let events = scan_btc_address(pool, redis, task, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
-            Ok(ScanTaskOutcome::Scanned)
+            Ok(ScanTaskOutcome::Scanned {
+                event_count: events.len(),
+            })
         }
         ScanPlan::Unsupported(chain_type) => {
             warn!(
@@ -1065,10 +1142,43 @@ pub async fn run_worker(
             Ok(Some(task)) => {
                 let task_id = task.task_id;
                 let address_id = task.address_id;
-                match process_scan_task(&pool, &mut redis, &scan_queue, task, Utc::now()).await {
+                let started_at = Utc::now();
+                let scan_run =
+                    match create_scan_run_for_task(&pool, &task, started_at, &worker_id).await {
+                        Ok(run) => Some(run),
+                        Err(error) => {
+                            warn!(
+                                task_id = %task_id,
+                                address_id = %address_id,
+                                error = %error,
+                                "failed to create scan run audit"
+                            );
+                            None
+                        }
+                    };
+                let scan_run_id = scan_run.as_ref().map(|run| run.id);
+                let result =
+                    process_scan_task(&pool, &mut redis, &scan_queue, task, started_at).await;
+
+                if let Some(scan_run_id) = scan_run_id {
+                    if let Err(error) =
+                        finish_scan_run_for_result(&pool, scan_run_id, &result, Utc::now()).await
+                    {
+                        warn!(
+                            task_id = %task_id,
+                            address_id = %address_id,
+                            scan_run_id = %scan_run_id,
+                            error = %error,
+                            "failed to update scan run audit"
+                        );
+                    }
+                }
+
+                match result {
                     Ok(outcome) => info!(
                         task_id = %task_id,
                         address_id = %address_id,
+                        scan_run_id = ?scan_run_id,
                         scan_status = scan_task_outcome_log_status(&outcome),
                         ?outcome,
                         "scan task processed"
@@ -1076,6 +1186,7 @@ pub async fn run_worker(
                     Err(error) => warn!(
                         task_id = %task_id,
                         address_id = %address_id,
+                        scan_run_id = ?scan_run_id,
                         scan_status = "failed",
                         error = %error,
                         "scan task failed"
@@ -1120,12 +1231,15 @@ mod tests {
     }
 
     mod scan_task_logging {
-        use crate::{scan_task_outcome_log_status, ScanTaskOutcome};
+        use crate::{
+            scan_task_event_count, scan_task_outcome_log_status, scan_task_update_metadata,
+            ScanTaskOutcome,
+        };
 
         #[test]
         fn scan_outcomes_have_explicit_log_statuses() {
             assert_eq!(
-                scan_task_outcome_log_status(&ScanTaskOutcome::Scanned),
+                scan_task_outcome_log_status(&ScanTaskOutcome::Scanned { event_count: 2 }),
                 "success"
             );
             assert_eq!(
@@ -1137,6 +1251,36 @@ mod tests {
                     "solana".to_string()
                 )),
                 "unsupported"
+            );
+        }
+
+        #[test]
+        fn scan_outcomes_expose_event_counts_for_audit() {
+            assert_eq!(
+                scan_task_event_count(&ScanTaskOutcome::Scanned { event_count: 2 }),
+                2
+            );
+            assert_eq!(scan_task_event_count(&ScanTaskOutcome::Locked), 0);
+            assert_eq!(
+                scan_task_event_count(&ScanTaskOutcome::UnsupportedChain("solana".to_string())),
+                0
+            );
+        }
+
+        #[test]
+        fn scan_outcome_metadata_records_audit_outcome() {
+            assert_eq!(
+                scan_task_update_metadata(&ScanTaskOutcome::Scanned { event_count: 2 })["outcome"],
+                "scanned"
+            );
+            assert_eq!(
+                scan_task_update_metadata(&ScanTaskOutcome::Locked)["outcome"],
+                "locked"
+            );
+            assert_eq!(
+                scan_task_update_metadata(&ScanTaskOutcome::UnsupportedChain("solana".to_string()))
+                    ["chain_type"],
+                "solana"
             );
         }
 
@@ -1154,9 +1298,64 @@ mod tests {
 
             assert!(worker.contains("scan_status = scan_task_outcome_log_status(&outcome)"));
             assert!(worker.contains("scan_status = \"failed\""));
+            assert!(worker.contains("scan_run_id = ?scan_run_id"));
             assert!(worker.contains("\"scan task processed\""));
             assert!(worker.contains("\"scan task failed\""));
             assert!(!worker.contains("\"scan task succeeded\""));
+        }
+
+        #[test]
+        fn worker_creates_and_finishes_scan_run_audit_records() {
+            let source = include_str!("lib.rs");
+            let start = source
+                .find("pub async fn run_worker(")
+                .expect("worker loop exists");
+            let end = source[start..]
+                .find("\n#[cfg(test)]")
+                .expect("test module marker")
+                + start;
+            let worker = &source[start..end];
+
+            assert!(worker.contains("create_scan_run_for_task"));
+            assert!(worker.contains("finish_scan_run_for_result"));
+            assert!(worker.contains("failed to create scan run audit"));
+            assert!(worker.contains("failed to update scan run audit"));
+        }
+
+        #[test]
+        fn process_locked_scan_task_reports_inserted_event_count() {
+            let source = include_str!("lib.rs");
+            let start = source
+                .find("async fn process_locked_scan_task")
+                .expect("process_locked_scan_task exists");
+            let end = source[start..]
+                .find("pub async fn run_worker")
+                .expect("run_worker follows process_locked_scan_task")
+                + start;
+            let function = &source[start..end];
+
+            assert!(function.contains("let events = scan_evm_address"));
+            assert!(function.contains("let events = scan_tron_address"));
+            assert!(function.contains("let events = scan_btc_address"));
+            assert!(function.contains("ScanTaskOutcome::Scanned {"));
+            assert!(function.contains("event_count: events.len()"));
+        }
+
+        #[test]
+        fn process_locked_scan_task_loads_context_by_task_scope() {
+            let source = include_str!("lib.rs");
+            let start = source
+                .find("async fn process_locked_scan_task")
+                .expect("process_locked_scan_task exists");
+            let end = source[start..]
+                .find("pub async fn run_worker")
+                .expect("run_worker follows process_locked_scan_task")
+                + start;
+            let function = &source[start..end];
+
+            assert!(function.contains("scan_runs::scan_run_context(pool, task).await?"));
+            assert!(!function
+                .contains("repositories::get_scan_address_context(pool, task.address_id).await?"));
         }
     }
 

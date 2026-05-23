@@ -21,6 +21,7 @@ import { NotificationOperationsPage } from './pages/NotificationOperationsPage';
 import { NotificationRulesPage } from './pages/NotificationRulesPage';
 import { TelegramBotsPage } from './pages/TelegramBotsPage';
 import { ProvidersPage } from './pages/ProvidersPage';
+import { ScanAuditPage } from './pages/ScanAuditPage';
 import { SystemStatusPage } from './pages/SystemStatusPage';
 import { connectRealtimeNotifications } from './realtime/notifications';
 import { applyThemeMode, loadThemeMode, saveThemeMode, subscribeSystemTheme, type ThemeMode } from './themeMode';
@@ -30,6 +31,7 @@ const { Text } = Typography;
 type PageKey =
   | 'dashboard'
   | 'system-status'
+  | 'scan-audit'
   | 'chains'
   | 'assets'
   | 'providers'
@@ -131,6 +133,7 @@ export function App() {
   const navItems = useMemo(() => [
     { itemKey: 'dashboard', text: '仪表盘', icon: <IconPulse /> },
     { itemKey: 'system-status', text: '系统状态', icon: <IconPulse /> },
+    { itemKey: 'scan-audit', text: '扫描审计', icon: <IconPulse /> },
     { itemKey: 'chains', text: '链配置', icon: <IconServer /> },
     { itemKey: 'assets', text: '资产配置', icon: <IconSetting /> },
     { itemKey: 'providers', text: 'Provider', icon: <IconServer /> },
@@ -174,6 +177,7 @@ function renderPage(
   setRealtimeUnreadCount: (count: number) => void,
 ) {
   if (page === 'system-status') return <SystemStatusPage />;
+  if (page === 'scan-audit') return <ScanAuditPage />;
   if (page === 'chains') return <ChainsPage />;
   if (page === 'assets') return <AssetsPage />;
   if (page === 'providers') return <ProvidersPage />;

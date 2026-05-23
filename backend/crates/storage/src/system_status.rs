@@ -9,7 +9,7 @@ use coin_listener_core::{
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use crate::repositories;
+use crate::{repositories, scan_runs};
 
 pub const NOTIFICATION_STATUS_STALE_MINUTES: i64 = 15;
 pub const PROVIDER_STATUS_DEFAULT_FAILURES: i32 = 0;
@@ -24,6 +24,7 @@ pub const SCAN_STATUS_QUERY: &str = r#"
         ) AS overdue_addresses,
         MAX(last_scanned_at) AS last_scanned_at
     FROM watched_addresses
+    WHERE tenant_id = $1
 "#;
 
 pub const EVENT_STATUS_QUERY: &str = r#"
@@ -145,17 +146,26 @@ struct ProviderStatusItemRow {
     is_circuit_open: bool,
 }
 
-pub async fn system_scan_status(pool: &PgPool) -> AppResult<ScanStatus> {
+pub async fn system_scan_status(pool: &PgPool, tenant_id: Uuid) -> AppResult<ScanStatus> {
     let row = sqlx::query_as::<_, ScanStatusRow>(SCAN_STATUS_QUERY)
+        .bind(tenant_id)
         .fetch_one(pool)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
+
+    let summary = scan_runs::scan_run_health_summary(pool, tenant_id).await?;
+    let recent_runs = scan_runs::recent_scan_runs(pool, tenant_id, 5).await?;
 
     Ok(ScanStatus {
         active_addresses: row.active_addresses,
         due_addresses: row.due_addresses,
         overdue_addresses: row.overdue_addresses,
         last_scanned_at: row.last_scanned_at,
+        last_success_at: summary.last_success_at,
+        last_failed_at: summary.last_failed_at,
+        last_24h_success: summary.last_24h_success,
+        last_24h_failed: summary.last_24h_failed,
+        recent_runs,
     })
 }
 
@@ -259,6 +269,7 @@ pub async fn system_provider_status(pool: &PgPool) -> AppResult<ProviderStatus> 
 #[cfg(test)]
 mod tests {
     use crate::{
+        scan_runs::{RECENT_SCAN_RUNS_QUERY, SCAN_RUN_HEALTH_SUMMARY_QUERY},
         service_heartbeats::SERVICE_HEARTBEAT_STALE_SECONDS,
         system_status::{
             EVENT_STATUS_QUERY, NOTIFICATION_STATUS_QUERY, NOTIFICATION_STATUS_STALE_MINUTES,
@@ -268,10 +279,51 @@ mod tests {
     };
 
     #[test]
-    fn scan_status_query_counts_active_due_and_overdue_addresses() {
+    fn scan_status_query_counts_active_due_and_overdue_addresses_for_tenant() {
         assert!(SCAN_STATUS_QUERY.contains("status = 'active'"));
         assert!(SCAN_STATUS_QUERY.contains("next_scan_at <= NOW()"));
         assert!(SCAN_STATUS_QUERY.contains("last_scanned_at"));
+        assert!(SCAN_STATUS_QUERY.contains("WHERE tenant_id = $1"));
+    }
+
+    #[test]
+    fn scan_status_uses_scan_run_health_summary() {
+        assert!(SCAN_RUN_HEALTH_SUMMARY_QUERY.contains("WHERE tenant_id = $1"));
+        assert!(SCAN_RUN_HEALTH_SUMMARY_QUERY.contains("status = 'success'"));
+        assert!(SCAN_RUN_HEALTH_SUMMARY_QUERY.contains("status = 'failed'"));
+        assert!(SCAN_RUN_HEALTH_SUMMARY_QUERY.contains("last_success_at"));
+        assert!(SCAN_RUN_HEALTH_SUMMARY_QUERY.contains("last_failed_at"));
+        assert!(SCAN_RUN_HEALTH_SUMMARY_QUERY.contains("last_24h_success"));
+        assert!(SCAN_RUN_HEALTH_SUMMARY_QUERY.contains("last_24h_failed"));
+    }
+
+    #[test]
+    fn scan_status_recent_runs_are_compact_limited_and_tenant_scoped() {
+        assert!(RECENT_SCAN_RUNS_QUERY.contains("WHERE sr.tenant_id = $1"));
+        assert!(RECENT_SCAN_RUNS_QUERY.contains("ORDER BY sr.started_at DESC"));
+        assert!(RECENT_SCAN_RUNS_QUERY.contains("LIMIT $2"));
+        assert!(RECENT_SCAN_RUNS_QUERY.contains("JOIN chains c"));
+        assert!(RECENT_SCAN_RUNS_QUERY.contains("JOIN watched_addresses wa"));
+        assert!(RECENT_SCAN_RUNS_QUERY.contains("wa.tenant_id = sr.tenant_id"));
+        assert!(RECENT_SCAN_RUNS_QUERY.contains("wa.chain_id = sr.chain_id"));
+    }
+
+    #[test]
+    fn system_scan_status_attaches_recent_five_scan_runs() {
+        let source = include_str!("system_status.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production source is present");
+
+        assert!(source.contains("tenant_id: Uuid"));
+        assert!(source.contains(".bind(tenant_id)"));
+        assert!(source.contains("scan_runs::scan_run_health_summary(pool, tenant_id).await?"));
+        assert!(source.contains("scan_runs::recent_scan_runs(pool, tenant_id, 5).await?"));
+        assert!(source.contains("last_success_at: summary.last_success_at"));
+        assert!(source.contains("last_failed_at: summary.last_failed_at"));
+        assert!(source.contains("last_24h_success: summary.last_24h_success"));
+        assert!(source.contains("last_24h_failed: summary.last_24h_failed"));
+        assert!(source.contains("recent_runs"));
     }
 
     #[test]
