@@ -366,6 +366,19 @@ fn normalize_custody_account_address(address: &str, chain_types: &[String]) -> S
     address.to_string()
 }
 
+fn legacy_chain_id_for_create_request(request: &CreateCustodyAccountRequest) -> AppResult<Uuid> {
+    if request
+        .chain_configs
+        .iter()
+        .any(|config| config.chain_id == request.chain_id)
+    {
+        return Ok(request.chain_id);
+    }
+    Err(AppError::Validation(
+        "legacy chain_id must be included in custody chain_configs".to_string(),
+    ))
+}
+
 pub fn validate_custody_source(source: &str) -> AppResult<()> {
     if !matches!(source, CUSTODY_SOURCE_POOL | CUSTODY_SOURCE_USER) {
         return Err(AppError::Validation(
@@ -598,7 +611,7 @@ pub async fn create_custody_account(
     }
     let chain_type_values = chain_types.values().cloned().collect::<Vec<_>>();
     let normalized = normalize_custody_account_address(&address, &chain_type_values);
-    let legacy_chain_id = request.chain_configs[0].chain_id;
+    let legacy_chain_id = legacy_chain_id_for_create_request(&request)?;
 
     let row = sqlx::query_as::<_, CustodyAccountRow>(INSERT_CUSTODY_ACCOUNT_QUERY)
         .bind(tenant_id)
@@ -1169,6 +1182,38 @@ mod tests {
     }
 
     #[test]
+    fn create_request_legacy_chain_must_exist_in_configs() {
+        let chain_a = Uuid::from_u128(20);
+        let chain_b = Uuid::from_u128(21);
+        let asset = Uuid::from_u128(22);
+        let mut request = CreateCustodyAccountRequest {
+            chain_id: chain_b,
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            label: None,
+            source: CUSTODY_SOURCE_POOL.to_string(),
+            status: Some(CUSTODY_ACCOUNT_STATUS_AVAILABLE.to_string()),
+            chain_configs: vec![
+                CustodyAccountChainConfigRequest {
+                    chain_id: chain_a,
+                    asset_ids: vec![asset],
+                },
+                CustodyAccountChainConfigRequest {
+                    chain_id: chain_b,
+                    asset_ids: vec![asset],
+                },
+            ],
+        };
+
+        assert_eq!(
+            legacy_chain_id_for_create_request(&request).unwrap(),
+            chain_b
+        );
+
+        request.chain_id = Uuid::from_u128(23);
+        assert!(legacy_chain_id_for_create_request(&request).is_err());
+    }
+
+    #[test]
     fn existing_user_assignment_rejects_legacy_chain_mismatch_until_multi_chain_assignment() {
         let now = chrono::Utc::now();
         let account = CustodyAccountRow {
@@ -1186,6 +1231,25 @@ mod tests {
 
         assert!(validate_legacy_assignment_chain(&account, Uuid::from_u128(12)).is_ok());
         assert!(validate_legacy_assignment_chain(&account, Uuid::from_u128(13)).is_err());
+    }
+
+    #[test]
+    fn existing_user_assignment_wires_legacy_chain_guard() {
+        let source = include_str!("custody_accounts.rs");
+        let assignment_body = source
+            .split("async fn claim_or_create_account_for_assignment")
+            .nth(1)
+            .expect("claim_or_create_account_for_assignment should exist")
+            .split("async fn custody_address_normalized_for_request")
+            .next()
+            .expect("custody_address_normalized_for_request should follow assignment selection");
+
+        assert_eq!(
+            assignment_body
+                .matches("validate_legacy_assignment_chain(&existing, chain_id)?")
+                .count(),
+            2
+        );
     }
 
     #[test]
