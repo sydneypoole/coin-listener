@@ -819,6 +819,7 @@ async fn claim_or_create_account_for_assignment(
 
     if let Some(existing) = existing {
         validate_assignable_custody_account(transaction, tenant_id, &existing).await?;
+        validate_legacy_assignment_chain(&existing, chain_id)?;
         if existing.source != CUSTODY_SOURCE_USER {
             return Err(AppError::Validation(
                 "custody account source does not match user request".to_string(),
@@ -849,6 +850,7 @@ async fn claim_or_create_account_for_assignment(
             .await
             .map_err(|error| AppError::Database(error.to_string()))?;
     validate_assignable_custody_account(transaction, tenant_id, &existing).await?;
+    validate_legacy_assignment_chain(&existing, chain_id)?;
     if existing.source != CUSTODY_SOURCE_USER {
         return Err(AppError::Validation(
             "custody account source does not match user request".to_string(),
@@ -873,6 +875,15 @@ async fn custody_address_normalized_for_request(
         AppError::Validation("address is required for user custody account".to_string())
     })?;
     Ok(normalize_custody_address_for_chain(&chain_type, address))
+}
+
+fn validate_legacy_assignment_chain(account: &CustodyAccountRow, chain_id: Uuid) -> AppResult<()> {
+    if account.chain_id != chain_id {
+        return Err(AppError::Validation(
+            "custody account chain does not match assignment chain".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn validate_assignable_custody_account(
@@ -1155,6 +1166,26 @@ mod tests {
 
         assert!(create_body.contains("repositories::get_chain_in_transaction"));
         assert!(!create_body.contains("repositories::get_chain(pool"));
+    }
+
+    #[test]
+    fn existing_user_assignment_rejects_legacy_chain_mismatch_until_multi_chain_assignment() {
+        let now = chrono::Utc::now();
+        let account = CustodyAccountRow {
+            id: Uuid::from_u128(10),
+            tenant_id: Uuid::from_u128(11),
+            chain_id: Uuid::from_u128(12),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            label: None,
+            source: CUSTODY_SOURCE_USER.to_string(),
+            status: CUSTODY_ACCOUNT_STATUS_ASSIGNED.to_string(),
+            watched_address_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        assert!(validate_legacy_assignment_chain(&account, Uuid::from_u128(12)).is_ok());
+        assert!(validate_legacy_assignment_chain(&account, Uuid::from_u128(13)).is_err());
     }
 
     #[test]
