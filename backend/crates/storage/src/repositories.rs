@@ -696,7 +696,7 @@ async fn asset_ids_by_address(
 }
 
 pub async fn validate_assets_for_chain(
-    pool: &PgPool,
+    executor: impl sqlx::Executor<'_, Database = Postgres>,
     chain_id: Uuid,
     asset_ids: &[Uuid],
 ) -> AppResult<Vec<Uuid>> {
@@ -712,7 +712,7 @@ pub async fn validate_assets_for_chain(
 
     let assets = sqlx::query_as::<_, Asset>(VALIDATE_ASSETS_FOR_CHAIN_QUERY)
         .bind(&deduped)
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 

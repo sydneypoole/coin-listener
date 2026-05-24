@@ -1,8 +1,11 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, Utc};
 use coin_listener_core::{
     models::{
         AssignCustodyAccountRequest, AssignCustodyAccountResponse, CreateCustodyAccountRequest,
-        CreateWatchedAddressRequest, CustodyAccount, CustodyAccountAssignment, CustodyAccountQuery,
+        CreateWatchedAddressRequest, CustodyAccount, CustodyAccountAssignment,
+        CustodyAccountChainConfig, CustodyAccountChainConfigRequest, CustodyAccountQuery,
         CustodyAssignmentQuery, CustodyAssignmentWatchedAddress, WatchedAddress,
     },
     AppError, AppResult,
@@ -83,11 +86,47 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id, tenant_id, chain_id, address, label, source, status, watched_address_id, created_at, updated_at
 "#;
 
+pub const LIST_CUSTODY_ACCOUNT_CONFIGS_QUERY: &str = r#"
+SELECT config.id,
+       config.custody_account_id,
+       config.chain_id,
+       chain.name AS chain_name,
+       COALESCE(array_agg(asset.id ORDER BY asset.symbol) FILTER (WHERE asset.id IS NOT NULL), ARRAY[]::uuid[]) AS asset_ids,
+       COALESCE(array_agg(asset.symbol ORDER BY asset.symbol) FILTER (WHERE asset.id IS NOT NULL), ARRAY[]::text[]) AS asset_symbols
+FROM custody_account_chain_configs config
+JOIN chains chain ON chain.id = config.chain_id
+LEFT JOIN custody_account_chain_config_assets config_asset ON config_asset.chain_config_id = config.id
+LEFT JOIN assets asset ON asset.id = config_asset.asset_id
+WHERE config.tenant_id = $1
+  AND config.custody_account_id = ANY($2)
+GROUP BY config.id, config.custody_account_id, config.chain_id, chain.name
+ORDER BY chain.name ASC
+"#;
+
+pub const INSERT_CUSTODY_ACCOUNT_CHAIN_CONFIG_QUERY: &str = r#"
+INSERT INTO custody_account_chain_configs (tenant_id, custody_account_id, chain_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (tenant_id, custody_account_id, chain_id) DO UPDATE
+SET updated_at = NOW()
+RETURNING id
+"#;
+
+pub const INSERT_CUSTODY_ACCOUNT_CHAIN_CONFIG_ASSET_QUERY: &str = r#"
+INSERT INTO custody_account_chain_config_assets (chain_config_id, asset_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+"#;
+
+pub const SELECT_CHAIN_TYPES_FOR_CONFIGS_QUERY: &str = r#"
+SELECT id, chain_type
+FROM chains
+WHERE id = ANY($1)
+"#;
+
 pub const CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY: &str = r#"
 SELECT id, tenant_id, chain_id, address, label, source, status, watched_address_id, created_at, updated_at
 FROM custody_accounts
 WHERE tenant_id = $1
-  AND chain_id = $2
   AND source = 'pool'
   AND status = 'available'
 ORDER BY created_at ASC
@@ -99,8 +138,7 @@ pub const SELECT_USER_CUSTODY_ACCOUNT_FOR_UPDATE_QUERY: &str = r#"
 SELECT id, tenant_id, chain_id, address, label, source, status, watched_address_id, created_at, updated_at
 FROM custody_accounts
 WHERE tenant_id = $1
-  AND chain_id = $2
-  AND address_normalized = $3
+  AND address_normalized = $2
 FOR UPDATE
 "#;
 
@@ -109,7 +147,7 @@ INSERT INTO custody_accounts (
     tenant_id, chain_id, address, address_normalized, label, source, status
 )
 VALUES ($1, $2, $3, $4, NULL, 'user', 'assigned')
-ON CONFLICT (tenant_id, chain_id, address_normalized) DO NOTHING
+ON CONFLICT (tenant_id, address_normalized) DO NOTHING
 RETURNING id, tenant_id, chain_id, address, label, source, status, watched_address_id, created_at, updated_at
 "#;
 
@@ -220,6 +258,27 @@ struct CustodyAccountListRow {
 }
 
 #[derive(Debug, FromRow)]
+struct CustodyAccountChainConfigRow {
+    id: Uuid,
+    custody_account_id: Uuid,
+    chain_id: Uuid,
+    chain_name: String,
+    asset_ids: Vec<Uuid>,
+    asset_symbols: Vec<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct InsertedChainConfigRow {
+    id: Uuid,
+}
+
+#[derive(Debug, FromRow)]
+struct ChainTypeRow {
+    id: Uuid,
+    chain_type: String,
+}
+
+#[derive(Debug, FromRow)]
 struct InsertedAssignmentRow {
     id: Uuid,
 }
@@ -244,6 +303,48 @@ pub fn normalize_custody_address_for_chain(chain_type: &str, address: &str) -> S
 
 pub fn normalize_custody_address(address: &str) -> String {
     normalize_custody_address_for_chain("evm", address)
+}
+
+fn validate_custody_chain_config_shape(
+    configs: &[CustodyAccountChainConfigRequest],
+) -> AppResult<()> {
+    if configs.is_empty() {
+        return Err(AppError::Validation(
+            "at least one custody chain config is required".to_string(),
+        ));
+    }
+
+    let mut chain_ids = HashSet::new();
+    for config in configs {
+        if !chain_ids.insert(config.chain_id) {
+            return Err(AppError::Validation(
+                "custody chain configs cannot repeat chain_id".to_string(),
+            ));
+        }
+        if config.asset_ids.is_empty() {
+            return Err(AppError::Validation(
+                "each custody chain config requires at least one asset".to_string(),
+            ));
+        }
+        let mut asset_ids = HashSet::new();
+        for asset_id in &config.asset_ids {
+            if !asset_ids.insert(*asset_id) {
+                return Err(AppError::Validation(
+                    "custody chain config asset_ids cannot contain duplicates".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_custody_account_address(address: &str, chain_types: &[String]) -> String {
+    let address = address.trim();
+    if chain_types.iter().any(|chain_type| chain_type == "evm") {
+        return address.to_lowercase();
+    }
+    address.to_string()
 }
 
 pub fn validate_custody_source(source: &str) -> AppResult<()> {
@@ -302,6 +403,101 @@ fn validate_business_ref(business_ref: &str) -> AppResult<()> {
     Ok(())
 }
 
+async fn chain_types_for_configs(
+    transaction: &mut Transaction<'_, Postgres>,
+    configs: &[CustodyAccountChainConfigRequest],
+) -> AppResult<HashMap<Uuid, String>> {
+    let chain_ids = configs
+        .iter()
+        .map(|config| config.chain_id)
+        .collect::<Vec<_>>();
+    let rows = sqlx::query_as::<_, ChainTypeRow>(SELECT_CHAIN_TYPES_FOR_CONFIGS_QUERY)
+        .bind(&chain_ids)
+        .fetch_all(transaction.as_mut())
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let chain_types = rows
+        .into_iter()
+        .map(|row| (row.id, row.chain_type))
+        .collect::<HashMap<_, _>>();
+    if chain_types.len() != chain_ids.len() {
+        return Err(AppError::Validation(
+            "custody chain config contains unknown chain".to_string(),
+        ));
+    }
+    Ok(chain_types)
+}
+
+async fn validate_and_insert_custody_chain_configs(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    custody_account_id: Uuid,
+    configs: &[CustodyAccountChainConfigRequest],
+) -> AppResult<()> {
+    validate_custody_chain_config_shape(configs)?;
+
+    for config in configs {
+        repositories::validate_assets_for_chain(
+            transaction.as_mut(),
+            config.chain_id,
+            &config.asset_ids,
+        )
+        .await?;
+        let inserted =
+            sqlx::query_as::<_, InsertedChainConfigRow>(INSERT_CUSTODY_ACCOUNT_CHAIN_CONFIG_QUERY)
+                .bind(tenant_id)
+                .bind(custody_account_id)
+                .bind(config.chain_id)
+                .fetch_one(transaction.as_mut())
+                .await
+                .map_err(|error| AppError::Database(error.to_string()))?;
+
+        for asset_id in &config.asset_ids {
+            sqlx::query(INSERT_CUSTODY_ACCOUNT_CHAIN_CONFIG_ASSET_QUERY)
+                .bind(inserted.id)
+                .bind(asset_id)
+                .execute(transaction.as_mut())
+                .await
+                .map_err(|error| AppError::Database(error.to_string()))?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn configs_for_accounts(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    account_ids: &[Uuid],
+) -> AppResult<HashMap<Uuid, Vec<CustodyAccountChainConfig>>> {
+    if account_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows =
+        sqlx::query_as::<_, CustodyAccountChainConfigRow>(LIST_CUSTODY_ACCOUNT_CONFIGS_QUERY)
+            .bind(tenant_id)
+            .bind(account_ids)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| AppError::Database(error.to_string()))?;
+
+    let mut grouped: HashMap<Uuid, Vec<CustodyAccountChainConfig>> = HashMap::new();
+    for row in rows {
+        grouped
+            .entry(row.custody_account_id)
+            .or_default()
+            .push(CustodyAccountChainConfig {
+                id: row.id,
+                chain_id: row.chain_id,
+                chain_name: row.chain_name,
+                asset_ids: row.asset_ids,
+                asset_symbols: row.asset_symbols,
+            });
+    }
+    Ok(grouped)
+}
+
 pub async fn list_custody_accounts(
     pool: &PgPool,
     tenant_id: Uuid,
@@ -323,9 +519,15 @@ pub async fn list_custody_accounts(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
+    let account_ids = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+    let mut config_map = configs_for_accounts(pool, tenant_id, &account_ids).await?;
+
     Ok(rows
         .into_iter()
-        .map(custody_account_from_list_row)
+        .map(|row| {
+            let chain_configs = config_map.remove(&row.id).unwrap_or_default();
+            custody_account_from_list_row(row, chain_configs)
+        })
         .collect())
 }
 
@@ -354,7 +556,8 @@ pub async fn create_custody_account(
     request: CreateCustodyAccountRequest,
 ) -> AppResult<CustodyAccount> {
     validate_custody_source(&request.source)?;
-    let status = request.status.unwrap_or_else(|| {
+    validate_custody_chain_config_shape(&request.chain_configs)?;
+    let status = request.status.clone().unwrap_or_else(|| {
         if request.source == CUSTODY_SOURCE_POOL {
             CUSTODY_ACCOUNT_STATUS_AVAILABLE.to_string()
         } else {
@@ -362,25 +565,60 @@ pub async fn create_custody_account(
         }
     });
     validate_custody_account_status(&status)?;
-    let chain_id = request.chain_id;
-    let chain = repositories::get_chain(pool, chain_id).await?;
     let address = request.address.trim().to_string();
-    repositories::validate_address_for_chain(&chain, &address)?;
-    let normalized = normalize_custody_address_for_chain(&chain.chain_type, &address);
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let chain_types = chain_types_for_configs(&mut transaction, &request.chain_configs).await?;
+    for config in &request.chain_configs {
+        let chain = repositories::get_chain(pool, config.chain_id).await?;
+        repositories::validate_address_for_chain(&chain, &address)?;
+    }
+    let chain_type_values = chain_types.values().cloned().collect::<Vec<_>>();
+    let normalized = normalize_custody_account_address(&address, &chain_type_values);
+    let legacy_chain_id = request.chain_configs[0].chain_id;
 
     let row = sqlx::query_as::<_, CustodyAccountRow>(INSERT_CUSTODY_ACCOUNT_QUERY)
         .bind(tenant_id)
-        .bind(chain_id)
-        .bind(address)
+        .bind(legacy_chain_id)
+        .bind(&address)
         .bind(normalized)
         .bind(request.label)
         .bind(request.source)
         .bind(status)
-        .fetch_one(pool)
+        .fetch_one(transaction.as_mut())
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let account_id = row.id;
+
+    validate_and_insert_custody_chain_configs(
+        &mut transaction,
+        tenant_id,
+        account_id,
+        &request.chain_configs,
+    )
+    .await?;
+
+    transaction
+        .commit()
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
-    custody_account_from_row(row, chain.name, None, None)
+    list_custody_accounts(
+        pool,
+        tenant_id,
+        CustodyAccountQuery {
+            chain_id: Some(legacy_chain_id),
+            source: None,
+            status: None,
+        },
+    )
+    .await?
+    .into_iter()
+    .find(|candidate| candidate.id == account_id)
+    .ok_or_else(|| AppError::NotFound("custody account".to_string()))
 }
 
 pub async fn assign_custody_account(
@@ -540,7 +778,6 @@ async fn claim_or_create_account_for_assignment(
     if request.source == CUSTODY_SOURCE_POOL {
         return sqlx::query_as::<_, CustodyAccountRow>(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY)
             .bind(tenant_id)
-            .bind(chain_id)
             .fetch_optional(transaction.as_mut())
             .await
             .map_err(|error| AppError::Database(error.to_string()))?
@@ -554,7 +791,6 @@ async fn claim_or_create_account_for_assignment(
     let existing =
         sqlx::query_as::<_, CustodyAccountRow>(SELECT_USER_CUSTODY_ACCOUNT_FOR_UPDATE_QUERY)
             .bind(tenant_id)
-            .bind(chain_id)
             .bind(&normalized)
             .fetch_optional(transaction.as_mut())
             .await
@@ -587,7 +823,6 @@ async fn claim_or_create_account_for_assignment(
     let existing =
         sqlx::query_as::<_, CustodyAccountRow>(SELECT_USER_CUSTODY_ACCOUNT_FOR_UPDATE_QUERY)
             .bind(tenant_id)
-            .bind(chain_id)
             .bind(&normalized)
             .fetch_one(transaction.as_mut())
             .await
@@ -747,6 +982,7 @@ fn custody_account_from_row(
     chain_name: String,
     current_assignment_id: Option<Uuid>,
     current_business_ref: Option<String>,
+    chain_configs: Vec<CustodyAccountChainConfig>,
 ) -> AppResult<CustodyAccount> {
     Ok(CustodyAccount {
         id: row.id,
@@ -760,29 +996,38 @@ fn custody_account_from_row(
         watched_address_id: row.watched_address_id,
         current_assignment_id,
         current_business_ref,
-        chain_configs: vec![],
+        chain_configs,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
 }
 
-fn custody_account_from_list_row(row: CustodyAccountListRow) -> CustodyAccount {
-    CustodyAccount {
-        id: row.id,
-        tenant_id: row.tenant_id,
-        chain_id: row.chain_id,
-        chain_name: row.chain_name,
-        address: row.address,
-        label: row.label,
-        source: row.source,
-        status: row.status,
-        watched_address_id: row.watched_address_id,
-        current_assignment_id: row.current_assignment_id,
-        current_business_ref: row.current_business_ref,
-        chain_configs: vec![],
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }
+fn custody_account_from_list_row(
+    row: CustodyAccountListRow,
+    chain_configs: Vec<CustodyAccountChainConfig>,
+) -> CustodyAccount {
+    let chain_name = row.chain_name;
+    let current_assignment_id = row.current_assignment_id;
+    let current_business_ref = row.current_business_ref;
+    custody_account_from_row(
+        CustodyAccountRow {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            chain_id: row.chain_id,
+            address: row.address,
+            label: row.label,
+            source: row.source,
+            status: row.status,
+            watched_address_id: row.watched_address_id,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        },
+        chain_name,
+        current_assignment_id,
+        current_business_ref,
+        chain_configs,
+    )
+    .expect("custody account row conversion should not fail")
 }
 
 #[cfg(test)]
@@ -816,6 +1061,63 @@ mod tests {
     }
 
     #[test]
+    fn custody_chain_config_validation_requires_unique_chains_and_assets() {
+        use coin_listener_core::models::CustodyAccountChainConfigRequest;
+        use uuid::Uuid;
+
+        let chain_a = Uuid::from_u128(1);
+        let asset_a = Uuid::from_u128(2);
+
+        let empty_configs: Vec<CustodyAccountChainConfigRequest> = vec![];
+        assert!(validate_custody_chain_config_shape(&empty_configs).is_err());
+
+        let duplicate_chain = vec![
+            CustodyAccountChainConfigRequest {
+                chain_id: chain_a,
+                asset_ids: vec![asset_a],
+            },
+            CustodyAccountChainConfigRequest {
+                chain_id: chain_a,
+                asset_ids: vec![Uuid::from_u128(3)],
+            },
+        ];
+        assert!(validate_custody_chain_config_shape(&duplicate_chain).is_err());
+
+        let empty_assets = vec![CustodyAccountChainConfigRequest {
+            chain_id: chain_a,
+            asset_ids: vec![],
+        }];
+        assert!(validate_custody_chain_config_shape(&empty_assets).is_err());
+
+        let duplicate_assets = vec![CustodyAccountChainConfigRequest {
+            chain_id: chain_a,
+            asset_ids: vec![asset_a, asset_a],
+        }];
+        assert!(validate_custody_chain_config_shape(&duplicate_assets).is_err());
+
+        let valid = vec![CustodyAccountChainConfigRequest {
+            chain_id: chain_a,
+            asset_ids: vec![asset_a],
+        }];
+        assert!(validate_custody_chain_config_shape(&valid).is_ok());
+    }
+
+    #[test]
+    fn custody_chain_config_queries_join_assets_and_support_account_level_uniqueness() {
+        assert!(LIST_CUSTODY_ACCOUNT_CONFIGS_QUERY.contains("custody_account_chain_configs"));
+        assert!(LIST_CUSTODY_ACCOUNT_CONFIGS_QUERY.contains("custody_account_chain_config_assets"));
+        assert!(LIST_CUSTODY_ACCOUNT_CONFIGS_QUERY.contains("array_agg"));
+        assert!(INSERT_CUSTODY_ACCOUNT_CHAIN_CONFIG_QUERY.contains("custody_account_chain_configs"));
+        assert!(INSERT_CUSTODY_ACCOUNT_CHAIN_CONFIG_ASSET_QUERY
+            .contains("custody_account_chain_config_assets"));
+        assert!(INSERT_USER_CUSTODY_ACCOUNT_FOR_ASSIGNMENT_QUERY
+            .contains("ON CONFLICT (tenant_id, address_normalized) DO NOTHING"));
+        assert!(SELECT_USER_CUSTODY_ACCOUNT_FOR_UPDATE_QUERY.contains("address_normalized = $2"));
+        assert!(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("source = 'pool'"));
+        assert!(!CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("chain_id = $2"));
+    }
+
+    #[test]
     fn custody_status_and_source_validation_is_explicit() {
         assert!(validate_custody_source("pool").is_ok());
         assert!(validate_custody_source("user").is_ok());
@@ -839,7 +1141,7 @@ mod tests {
         assert!(INSERT_CUSTODY_ASSIGNMENT_QUERY.contains("'active'"));
         assert!(INSERT_CUSTODY_ASSIGNMENT_QUERY.contains("ON CONFLICT DO NOTHING"));
         assert!(INSERT_USER_CUSTODY_ACCOUNT_FOR_ASSIGNMENT_QUERY
-            .contains("ON CONFLICT (tenant_id, chain_id, address_normalized) DO NOTHING"));
+            .contains("ON CONFLICT (tenant_id, address_normalized) DO NOTHING"));
         assert!(SELECT_ACTIVE_CUSTODY_ASSIGNMENT_FOR_ACCOUNT_QUERY.contains("status = 'active'"));
         assert!(ENSURE_WATCHED_ADDRESS_SELECT_QUERY.contains("tenant_id = $1"));
         assert!(ENSURE_WATCHED_ADDRESS_SELECT_QUERY.contains("chain_id = $2"));
