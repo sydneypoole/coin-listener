@@ -153,6 +153,26 @@ export type CustodyAccountStatus = 'available' | 'assigned' | 'disabled' | strin
 export type CustodyAssignmentStatus = 'active' | 'released' | 'cancelled' | string;
 export type CustodyApplicantType = 'api' | 'internal' | string;
 
+export type CustodyAccountChainConfigRequest = {
+  chain_id: string;
+  asset_ids: string[];
+};
+
+export type CustodyAccountChainConfig = {
+  id: string;
+  chain_id: string;
+  chain_name: string;
+  asset_ids: string[];
+  asset_symbols: string[];
+};
+
+export type CustodyAssignmentWatchedAddress = {
+  chain_id: string;
+  chain_name: string;
+  watched_address_id: string;
+  asset_ids: string[];
+};
+
 export type CustodyAccount = {
   id: string;
   tenant_id: string;
@@ -165,6 +185,7 @@ export type CustodyAccount = {
   watched_address_id?: string | null;
   current_assignment_id?: string | null;
   current_business_ref?: string | null;
+  chain_configs: CustodyAccountChainConfig[];
   created_at: string;
   updated_at: string;
 };
@@ -193,15 +214,17 @@ export type CreateCustodyAccountRequest = {
   label?: string | null;
   source: CustodyAccountSource;
   status?: CustodyAccountStatus;
+  chain_configs: CustodyAccountChainConfigRequest[];
 };
 
 export type AssignCustodyAccountRequest = {
-  chain_id: string;
+  chain_id?: string | null;
   source: CustodyAccountSource;
   address?: string | null;
   applicant_type: CustodyApplicantType;
   business_ref: string;
   purpose?: string | null;
+  chain_configs?: CustodyAccountChainConfigRequest[] | null;
 };
 
 export type CustodyAccountQuery = {
@@ -219,6 +242,7 @@ export type CustodyAssignmentQuery = {
 export type AssignCustodyAccountResponse = {
   account: CustodyAccount;
   assignment: CustodyAccountAssignment;
+  watched_addresses: CustodyAssignmentWatchedAddress[];
 };
 
 export type TelegramBot = {
