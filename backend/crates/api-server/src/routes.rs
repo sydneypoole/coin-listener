@@ -2425,6 +2425,138 @@ mod tests {
     }
 
     #[test]
+    fn custody_api_uses_multi_chain_request_and_response_contracts() {
+        use chrono::{TimeZone, Utc};
+        use coin_listener_core::models::{
+            AssignCustodyAccountRequest, AssignCustodyAccountResponse, CreateCustodyAccountRequest,
+            CustodyAccount, CustodyAccountAssignment, CustodyAccountChainConfig,
+            CustodyAssignmentWatchedAddress,
+        };
+        use uuid::Uuid;
+
+        let source = production_source();
+
+        assert!(source.contains("Json(request): Json<CreateCustodyAccountRequest>"));
+        assert!(source.contains("Json(request): Json<AssignCustodyAccountRequest>"));
+        assert!(source.contains("async fn assign_custody_account("));
+        assert!(source.contains("async fn create_custody_account("));
+        assert!(source.contains("Json(response)"));
+
+        let create_request =
+            serde_json::from_value::<CreateCustodyAccountRequest>(serde_json::json!({
+                "chain_id": "00000000-0000-0000-0000-000000000003",
+                "address": "0x0000000000000000000000000000000000000001",
+                "label": "pool address 1",
+                "source": "pool",
+                "status": "available",
+                "chain_configs": [{
+                    "chain_id": "00000000-0000-0000-0000-000000000003",
+                    "asset_ids": [
+                        "00000000-0000-0000-0000-000000000011",
+                        "00000000-0000-0000-0000-000000000012"
+                    ]
+                }]
+            }))
+            .expect("create request supports chain_configs");
+        assert_eq!(create_request.chain_configs.len(), 1);
+        assert_eq!(
+            create_request.chain_configs[0].asset_ids,
+            vec![Uuid::from_u128(0x11), Uuid::from_u128(0x12)]
+        );
+
+        let assign_request =
+            serde_json::from_value::<AssignCustodyAccountRequest>(serde_json::json!({
+                "chain_id": "00000000-0000-0000-0000-000000000003",
+                "source": "user",
+                "address": "0x0000000000000000000000000000000000000001",
+                "applicant_type": "api",
+                "business_ref": "order_10001",
+                "purpose": "deposit_address",
+                "chain_configs": [{
+                    "chain_id": "00000000-0000-0000-0000-000000000003",
+                    "asset_ids": ["00000000-0000-0000-0000-000000000011"]
+                }]
+            }))
+            .expect("assign request supports optional chain_id and chain_configs");
+        assert_eq!(assign_request.chain_id, Some(Uuid::from_u128(0x3)));
+        assert_eq!(
+            assign_request.chain_configs.expect("chain configs")[0].asset_ids,
+            vec![Uuid::from_u128(0x11)]
+        );
+
+        let now = Utc.with_ymd_and_hms(2026, 5, 24, 12, 0, 0).unwrap();
+        let chain_config = CustodyAccountChainConfig {
+            id: Uuid::from_u128(0x10),
+            chain_id: Uuid::from_u128(0x3),
+            chain_name: "Ethereum".to_string(),
+            asset_ids: vec![Uuid::from_u128(0x11), Uuid::from_u128(0x12)],
+            asset_symbols: vec!["ETH".to_string(), "USDT".to_string()],
+        };
+        let response = AssignCustodyAccountResponse {
+            account: CustodyAccount {
+                id: Uuid::from_u128(0x1),
+                tenant_id: Uuid::from_u128(0x2),
+                chain_id: Uuid::from_u128(0x3),
+                chain_name: "Ethereum".to_string(),
+                address: "0x0000000000000000000000000000000000000001".to_string(),
+                label: Some("pool address 1".to_string()),
+                source: "pool".to_string(),
+                status: "assigned".to_string(),
+                watched_address_id: Some(Uuid::from_u128(0x4)),
+                current_assignment_id: Some(Uuid::from_u128(0x6)),
+                current_business_ref: Some("order_10001".to_string()),
+                chain_configs: vec![chain_config],
+                created_at: now,
+                updated_at: now,
+            },
+            assignment: CustodyAccountAssignment {
+                id: Uuid::from_u128(0x6),
+                tenant_id: Uuid::from_u128(0x2),
+                custody_account_id: Uuid::from_u128(0x1),
+                chain_id: Uuid::from_u128(0x3),
+                chain_name: "Ethereum".to_string(),
+                address: "0x0000000000000000000000000000000000000001".to_string(),
+                applicant_type: "api".to_string(),
+                business_ref: "order_10001".to_string(),
+                purpose: Some("deposit_address".to_string()),
+                status: "active".to_string(),
+                watched_address_id: Some(Uuid::from_u128(0x4)),
+                assigned_at: now,
+                released_at: None,
+                created_at: now,
+                updated_at: now,
+            },
+            watched_addresses: vec![CustodyAssignmentWatchedAddress {
+                chain_id: Uuid::from_u128(0x3),
+                chain_name: "Ethereum".to_string(),
+                watched_address_id: Uuid::from_u128(0x4),
+                asset_ids: vec![Uuid::from_u128(0x11), Uuid::from_u128(0x12)],
+            }],
+        };
+        let response_json = serde_json::to_value(response).expect("response serializes");
+
+        assert_eq!(
+            response_json["account"]["chain_configs"][0]["chain_name"],
+            "Ethereum"
+        );
+        assert_eq!(
+            response_json["account"]["chain_configs"][0]["asset_symbols"][1],
+            "USDT"
+        );
+        assert_eq!(
+            response_json["watched_addresses"][0]["chain_name"],
+            "Ethereum"
+        );
+        assert_eq!(
+            response_json["watched_addresses"][0]["asset_ids"]
+                .as_array()
+                .expect("watched address asset ids")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn scan_run_handlers_use_tenant_scope_and_scan_queue_retry() {
         let source = production_source();
 
