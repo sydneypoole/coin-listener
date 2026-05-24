@@ -93,7 +93,30 @@ pub struct WatchedAddressResponse {
     pub asset_ids: Vec<Uuid>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustodyAccountChainConfigRequest {
+    pub chain_id: Uuid,
+    pub asset_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustodyAccountChainConfig {
+    pub id: Uuid,
+    pub chain_id: Uuid,
+    pub chain_name: String,
+    pub asset_ids: Vec<Uuid>,
+    pub asset_symbols: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustodyAssignmentWatchedAddress {
+    pub chain_id: Uuid,
+    pub chain_name: String,
+    pub watched_address_id: Uuid,
+    pub asset_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustodyAccount {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -106,6 +129,7 @@ pub struct CustodyAccount {
     pub watched_address_id: Option<Uuid>,
     pub current_assignment_id: Option<Uuid>,
     pub current_business_ref: Option<String>,
+    pub chain_configs: Vec<CustodyAccountChainConfig>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -136,16 +160,18 @@ pub struct CreateCustodyAccountRequest {
     pub label: Option<String>,
     pub source: String,
     pub status: Option<String>,
+    pub chain_configs: Vec<CustodyAccountChainConfigRequest>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AssignCustodyAccountRequest {
-    pub chain_id: Uuid,
+    pub chain_id: Option<Uuid>,
     pub source: String,
     pub address: Option<String>,
     pub applicant_type: String,
     pub business_ref: String,
     pub purpose: Option<String>,
+    pub chain_configs: Option<Vec<CustodyAccountChainConfigRequest>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -166,15 +192,136 @@ pub struct CustodyAssignmentQuery {
 pub struct AssignCustodyAccountResponse {
     pub account: CustodyAccount,
     pub assignment: CustodyAccountAssignment,
+    pub watched_addresses: Vec<CustodyAssignmentWatchedAddress>,
 }
 
 #[cfg(test)]
 mod custody_model_tests {
     #[test]
+    fn custody_models_include_multi_chain_configs_and_watched_addresses() {
+        use crate::models::{
+            AssignCustodyAccountRequest, AssignCustodyAccountResponse, CreateCustodyAccountRequest,
+            CustodyAccount, CustodyAccountAssignment, CustodyAccountChainConfig,
+            CustodyAccountChainConfigRequest, CustodyAssignmentWatchedAddress,
+        };
+        use chrono::{TimeZone, Utc};
+        use uuid::Uuid;
+
+        let now = Utc.with_ymd_and_hms(2026, 5, 24, 12, 0, 0).unwrap();
+        let chain_config = CustodyAccountChainConfig {
+            id: Uuid::from_u128(10),
+            chain_id: Uuid::from_u128(3),
+            chain_name: "Ethereum".to_string(),
+            asset_ids: vec![Uuid::from_u128(11), Uuid::from_u128(12)],
+            asset_symbols: vec!["ETH".to_string(), "USDT".to_string()],
+        };
+        let account = CustodyAccount {
+            id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            chain_id: Uuid::from_u128(3),
+            chain_name: "Ethereum".to_string(),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            label: Some("池地址 1".to_string()),
+            source: "pool".to_string(),
+            status: "available".to_string(),
+            watched_address_id: Some(Uuid::from_u128(4)),
+            current_assignment_id: Some(Uuid::from_u128(5)),
+            current_business_ref: Some("order_10001".to_string()),
+            chain_configs: vec![chain_config.clone()],
+            created_at: now,
+            updated_at: now,
+        };
+        let account_json = serde_json::to_value(account).unwrap();
+        assert_eq!(account_json["chain_configs"][0]["chain_name"], "Ethereum");
+        assert_eq!(account_json["chain_configs"][0]["asset_symbols"][1], "USDT");
+
+        let create_request = CreateCustodyAccountRequest {
+            chain_id: Uuid::from_u128(3),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            label: Some("池地址 1".to_string()),
+            source: "pool".to_string(),
+            status: Some("available".to_string()),
+            chain_configs: vec![CustodyAccountChainConfigRequest {
+                chain_id: Uuid::from_u128(3),
+                asset_ids: vec![Uuid::from_u128(11), Uuid::from_u128(12)],
+            }],
+        };
+        assert_eq!(create_request.chain_configs[0].asset_ids.len(), 2);
+
+        let assign_request = AssignCustodyAccountRequest {
+            chain_id: Some(Uuid::from_u128(3)),
+            source: "user".to_string(),
+            address: Some("0x0000000000000000000000000000000000000001".to_string()),
+            applicant_type: "api".to_string(),
+            business_ref: "order_10001".to_string(),
+            purpose: Some("deposit_address".to_string()),
+            chain_configs: Some(vec![CustodyAccountChainConfigRequest {
+                chain_id: Uuid::from_u128(3),
+                asset_ids: vec![Uuid::from_u128(11)],
+            }]),
+        };
+        assert_eq!(
+            assign_request.chain_configs.unwrap()[0].asset_ids[0],
+            Uuid::from_u128(11)
+        );
+
+        let assignment = CustodyAccountAssignment {
+            id: Uuid::from_u128(6),
+            tenant_id: Uuid::from_u128(2),
+            custody_account_id: Uuid::from_u128(1),
+            chain_id: Uuid::from_u128(3),
+            chain_name: "Ethereum".to_string(),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            applicant_type: "api".to_string(),
+            business_ref: "order_10001".to_string(),
+            purpose: Some("deposit_address".to_string()),
+            status: "active".to_string(),
+            watched_address_id: Some(Uuid::from_u128(4)),
+            assigned_at: now,
+            released_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let response = AssignCustodyAccountResponse {
+            account: CustodyAccount {
+                id: Uuid::from_u128(1),
+                tenant_id: Uuid::from_u128(2),
+                chain_id: Uuid::from_u128(3),
+                chain_name: "Ethereum".to_string(),
+                address: "0x0000000000000000000000000000000000000001".to_string(),
+                label: None,
+                source: "pool".to_string(),
+                status: "assigned".to_string(),
+                watched_address_id: Some(Uuid::from_u128(4)),
+                current_assignment_id: Some(Uuid::from_u128(6)),
+                current_business_ref: Some("order_10001".to_string()),
+                chain_configs: vec![chain_config],
+                created_at: now,
+                updated_at: now,
+            },
+            assignment,
+            watched_addresses: vec![CustodyAssignmentWatchedAddress {
+                chain_id: Uuid::from_u128(3),
+                chain_name: "Ethereum".to_string(),
+                watched_address_id: Uuid::from_u128(4),
+                asset_ids: vec![Uuid::from_u128(11), Uuid::from_u128(12)],
+            }],
+        };
+        let response_json = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            response_json["watched_addresses"][0]["asset_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn custody_models_serialize_expected_status_and_source_fields() {
         use crate::models::{
             AssignCustodyAccountRequest, CreateCustodyAccountRequest, CustodyAccount,
-            CustodyAccountAssignment,
+            CustodyAccountAssignment, CustodyAccountChainConfigRequest,
         };
         use chrono::{TimeZone, Utc};
         use uuid::Uuid;
@@ -192,6 +339,7 @@ mod custody_model_tests {
             watched_address_id: Some(Uuid::from_u128(4)),
             current_assignment_id: Some(Uuid::from_u128(5)),
             current_business_ref: Some("order_10001".to_string()),
+            chain_configs: vec![],
             created_at: now,
             updated_at: now,
         };
@@ -227,16 +375,21 @@ mod custody_model_tests {
             label: Some("池地址 1".to_string()),
             source: "pool".to_string(),
             status: Some("available".to_string()),
+            chain_configs: vec![CustodyAccountChainConfigRequest {
+                chain_id: Uuid::from_u128(3),
+                asset_ids: vec![Uuid::from_u128(4)],
+            }],
         };
         assert_eq!(create_request.source, "pool");
 
         let assign_request = AssignCustodyAccountRequest {
-            chain_id: Uuid::from_u128(3),
+            chain_id: Some(Uuid::from_u128(3)),
             source: "pool".to_string(),
             address: None,
             applicant_type: "api".to_string(),
             business_ref: "order_10001".to_string(),
             purpose: Some("deposit_address".to_string()),
+            chain_configs: None,
         };
         assert_eq!(assign_request.applicant_type, "api");
     }

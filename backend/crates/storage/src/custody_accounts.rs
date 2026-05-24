@@ -3,7 +3,7 @@ use coin_listener_core::{
     models::{
         AssignCustodyAccountRequest, AssignCustodyAccountResponse, CreateCustodyAccountRequest,
         CreateWatchedAddressRequest, CustodyAccount, CustodyAccountAssignment, CustodyAccountQuery,
-        CustodyAssignmentQuery, WatchedAddress,
+        CustodyAssignmentQuery, CustodyAssignmentWatchedAddress, WatchedAddress,
     },
     AppError, AppResult,
 };
@@ -203,6 +203,23 @@ struct CustodyAccountRow {
 }
 
 #[derive(Debug, FromRow)]
+struct CustodyAccountListRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    chain_id: Uuid,
+    chain_name: String,
+    address: String,
+    label: Option<String>,
+    source: String,
+    status: String,
+    watched_address_id: Option<Uuid>,
+    current_assignment_id: Option<Uuid>,
+    current_business_ref: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow)]
 struct InsertedAssignmentRow {
     id: Uuid,
 }
@@ -297,14 +314,19 @@ pub async fn list_custody_accounts(
         validate_custody_account_status(status)?;
     }
 
-    sqlx::query_as::<_, CustodyAccount>(LIST_CUSTODY_ACCOUNTS_QUERY)
+    let rows = sqlx::query_as::<_, CustodyAccountListRow>(LIST_CUSTODY_ACCOUNTS_QUERY)
         .bind(tenant_id)
         .bind(query.chain_id)
         .bind(query.source)
         .bind(query.status)
         .fetch_all(pool)
         .await
-        .map_err(|error| AppError::Database(error.to_string()))
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(rows
+        .into_iter()
+        .map(custody_account_from_list_row)
+        .collect())
 }
 
 pub async fn list_custody_assignments(
@@ -340,14 +362,15 @@ pub async fn create_custody_account(
         }
     });
     validate_custody_account_status(&status)?;
-    let chain = repositories::get_chain(pool, request.chain_id).await?;
+    let chain_id = request.chain_id;
+    let chain = repositories::get_chain(pool, chain_id).await?;
     let address = request.address.trim().to_string();
     repositories::validate_address_for_chain(&chain, &address)?;
     let normalized = normalize_custody_address_for_chain(&chain.chain_type, &address);
 
     let row = sqlx::query_as::<_, CustodyAccountRow>(INSERT_CUSTODY_ACCOUNT_QUERY)
         .bind(tenant_id)
-        .bind(request.chain_id)
+        .bind(chain_id)
         .bind(address)
         .bind(normalized)
         .bind(request.label)
@@ -369,7 +392,10 @@ pub async fn assign_custody_account(
     validate_custody_applicant_type(&request.applicant_type)?;
     let business_ref = request.business_ref.trim().to_string();
     validate_business_ref(&business_ref)?;
-    let chain = repositories::get_chain(pool, request.chain_id).await?;
+    let chain_id = request.chain_id.ok_or_else(|| {
+        AppError::Validation("chain_id is required for custody assignment".to_string())
+    })?;
+    let chain = repositories::get_chain(pool, chain_id).await?;
     let address = request
         .address
         .as_deref()
@@ -380,6 +406,7 @@ pub async fn assign_custody_account(
         repositories::validate_address_for_chain(&chain, address)?;
     }
     let request = AssignCustodyAccountRequest {
+        chain_id: Some(chain_id),
         business_ref,
         address,
         ..request
@@ -437,7 +464,7 @@ pub async fn assign_custody_account(
         pool,
         tenant_id,
         CustodyAccountQuery {
-            chain_id: Some(request.chain_id),
+            chain_id: Some(chain_id),
             source: None,
             status: None,
         },
@@ -451,7 +478,7 @@ pub async fn assign_custody_account(
         pool,
         tenant_id,
         CustodyAssignmentQuery {
-            chain_id: Some(request.chain_id),
+            chain_id: Some(chain_id),
             status: Some(CUSTODY_ASSIGNMENT_STATUS_ACTIVE.to_string()),
             business_ref: Some(request.business_ref),
         },
@@ -464,6 +491,12 @@ pub async fn assign_custody_account(
     Ok(AssignCustodyAccountResponse {
         account,
         assignment,
+        watched_addresses: vec![CustodyAssignmentWatchedAddress {
+            chain_id,
+            chain_name: chain.name,
+            watched_address_id,
+            asset_ids: vec![],
+        }],
     })
 }
 
@@ -501,10 +534,13 @@ async fn claim_or_create_account_for_assignment(
     tenant_id: Uuid,
     request: &AssignCustodyAccountRequest,
 ) -> AppResult<CustodyAccountRow> {
+    let chain_id = request.chain_id.ok_or_else(|| {
+        AppError::Validation("chain_id is required for custody assignment".to_string())
+    })?;
     if request.source == CUSTODY_SOURCE_POOL {
         return sqlx::query_as::<_, CustodyAccountRow>(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY)
             .bind(tenant_id)
-            .bind(request.chain_id)
+            .bind(chain_id)
             .fetch_optional(transaction.as_mut())
             .await
             .map_err(|error| AppError::Database(error.to_string()))?
@@ -518,7 +554,7 @@ async fn claim_or_create_account_for_assignment(
     let existing =
         sqlx::query_as::<_, CustodyAccountRow>(SELECT_USER_CUSTODY_ACCOUNT_FOR_UPDATE_QUERY)
             .bind(tenant_id)
-            .bind(request.chain_id)
+            .bind(chain_id)
             .bind(&normalized)
             .fetch_optional(transaction.as_mut())
             .await
@@ -537,7 +573,7 @@ async fn claim_or_create_account_for_assignment(
     let inserted =
         sqlx::query_as::<_, CustodyAccountRow>(INSERT_USER_CUSTODY_ACCOUNT_FOR_ASSIGNMENT_QUERY)
             .bind(tenant_id)
-            .bind(request.chain_id)
+            .bind(chain_id)
             .bind(address)
             .bind(&normalized)
             .fetch_optional(transaction.as_mut())
@@ -551,7 +587,7 @@ async fn claim_or_create_account_for_assignment(
     let existing =
         sqlx::query_as::<_, CustodyAccountRow>(SELECT_USER_CUSTODY_ACCOUNT_FOR_UPDATE_QUERY)
             .bind(tenant_id)
-            .bind(request.chain_id)
+            .bind(chain_id)
             .bind(&normalized)
             .fetch_one(transaction.as_mut())
             .await
@@ -569,8 +605,11 @@ async fn custody_address_normalized_for_request(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AssignCustodyAccountRequest,
 ) -> AppResult<String> {
+    let chain_id = request.chain_id.ok_or_else(|| {
+        AppError::Validation("chain_id is required for custody assignment".to_string())
+    })?;
     let chain_type = sqlx::query_scalar::<_, String>("SELECT chain_type FROM chains WHERE id = $1")
-        .bind(request.chain_id)
+        .bind(chain_id)
         .fetch_one(transaction.as_mut())
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
@@ -721,9 +760,29 @@ fn custody_account_from_row(
         watched_address_id: row.watched_address_id,
         current_assignment_id,
         current_business_ref,
+        chain_configs: vec![],
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
+}
+
+fn custody_account_from_list_row(row: CustodyAccountListRow) -> CustodyAccount {
+    CustodyAccount {
+        id: row.id,
+        tenant_id: row.tenant_id,
+        chain_id: row.chain_id,
+        chain_name: row.chain_name,
+        address: row.address,
+        label: row.label,
+        source: row.source,
+        status: row.status,
+        watched_address_id: row.watched_address_id,
+        current_assignment_id: row.current_assignment_id,
+        current_business_ref: row.current_business_ref,
+        chain_configs: vec![],
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
 }
 
 #[cfg(test)]
@@ -743,6 +802,17 @@ mod tests {
         assert!(migration.contains("FOREIGN KEY (custody_account_id, tenant_id)"));
         assert!(migration.contains("idx_custody_assignments_one_active"));
         assert!(migration.contains("WHERE status = 'active'"));
+
+        let chain_config_migration =
+            include_str!("../migrations/0021_custody_account_chain_configs.sql");
+        assert!(chain_config_migration
+            .contains("CREATE TABLE IF NOT EXISTS custody_account_chain_configs"));
+        assert!(chain_config_migration
+            .contains("CREATE TABLE IF NOT EXISTS custody_account_chain_config_assets"));
+        assert!(chain_config_migration.contains("UNIQUE (tenant_id, custody_account_id, chain_id)"));
+        assert!(chain_config_migration.contains("idx_custody_accounts_tenant_address_normalized"));
+        assert!(chain_config_migration.contains("INSERT INTO custody_account_chain_configs"));
+        assert!(chain_config_migration.contains("INSERT INTO custody_account_chain_config_assets"));
     }
 
     #[test]
