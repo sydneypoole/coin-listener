@@ -93,6 +93,155 @@ pub struct WatchedAddressResponse {
     pub asset_ids: Vec<Uuid>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CustodyAccount {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub chain_id: Uuid,
+    pub chain_name: String,
+    pub address: String,
+    pub label: Option<String>,
+    pub source: String,
+    pub status: String,
+    pub watched_address_id: Option<Uuid>,
+    pub current_assignment_id: Option<Uuid>,
+    pub current_business_ref: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CustodyAccountAssignment {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub custody_account_id: Uuid,
+    pub chain_id: Uuid,
+    pub chain_name: String,
+    pub address: String,
+    pub applicant_type: String,
+    pub business_ref: String,
+    pub purpose: Option<String>,
+    pub status: String,
+    pub watched_address_id: Option<Uuid>,
+    pub assigned_at: DateTime<Utc>,
+    pub released_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateCustodyAccountRequest {
+    pub chain_id: Uuid,
+    pub address: String,
+    pub label: Option<String>,
+    pub source: String,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssignCustodyAccountRequest {
+    pub chain_id: Uuid,
+    pub source: String,
+    pub address: Option<String>,
+    pub applicant_type: String,
+    pub business_ref: String,
+    pub purpose: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustodyAccountQuery {
+    pub chain_id: Option<Uuid>,
+    pub source: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CustodyAssignmentQuery {
+    pub chain_id: Option<Uuid>,
+    pub status: Option<String>,
+    pub business_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssignCustodyAccountResponse {
+    pub account: CustodyAccount,
+    pub assignment: CustodyAccountAssignment,
+}
+
+#[cfg(test)]
+mod custody_model_tests {
+    #[test]
+    fn custody_models_serialize_expected_status_and_source_fields() {
+        use crate::models::{
+            AssignCustodyAccountRequest, CreateCustodyAccountRequest, CustodyAccount,
+            CustodyAccountAssignment,
+        };
+        use chrono::{TimeZone, Utc};
+        use uuid::Uuid;
+
+        let now = Utc.with_ymd_and_hms(2026, 5, 24, 12, 0, 0).unwrap();
+        let account = CustodyAccount {
+            id: Uuid::from_u128(1),
+            tenant_id: Uuid::from_u128(2),
+            chain_id: Uuid::from_u128(3),
+            chain_name: "Ethereum".to_string(),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            label: Some("池地址 1".to_string()),
+            source: "pool".to_string(),
+            status: "available".to_string(),
+            watched_address_id: Some(Uuid::from_u128(4)),
+            current_assignment_id: Some(Uuid::from_u128(5)),
+            current_business_ref: Some("order_10001".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        let account_json = serde_json::to_value(account).unwrap();
+        assert_eq!(account_json["source"], "pool");
+        assert_eq!(account_json["status"], "available");
+        assert_eq!(account_json["current_business_ref"], "order_10001");
+
+        let assignment = CustodyAccountAssignment {
+            id: Uuid::from_u128(6),
+            tenant_id: Uuid::from_u128(2),
+            custody_account_id: Uuid::from_u128(1),
+            chain_id: Uuid::from_u128(3),
+            chain_name: "Ethereum".to_string(),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            applicant_type: "api".to_string(),
+            business_ref: "order_10001".to_string(),
+            purpose: Some("deposit_address".to_string()),
+            status: "active".to_string(),
+            watched_address_id: Some(Uuid::from_u128(4)),
+            assigned_at: now,
+            released_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let assignment_json = serde_json::to_value(assignment).unwrap();
+        assert_eq!(assignment_json["applicant_type"], "api");
+        assert_eq!(assignment_json["business_ref"], "order_10001");
+
+        let create_request = CreateCustodyAccountRequest {
+            chain_id: Uuid::from_u128(3),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            label: Some("池地址 1".to_string()),
+            source: "pool".to_string(),
+            status: Some("available".to_string()),
+        };
+        assert_eq!(create_request.source, "pool");
+
+        let assign_request = AssignCustodyAccountRequest {
+            chain_id: Uuid::from_u128(3),
+            source: "pool".to_string(),
+            address: None,
+            applicant_type: "api".to_string(),
+            business_ref: "order_10001".to_string(),
+            purpose: Some("deposit_address".to_string()),
+        };
+        assert_eq!(assign_request.applicant_type, "api");
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginRequest {
     pub email: String,

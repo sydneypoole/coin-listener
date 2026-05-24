@@ -542,6 +542,49 @@ describe('frontend UI regressions', () => {
     }
   });
 
+  test('custody account mode is wired into frontend contracts and navigation', () => {
+    const types = readSource('api/types.ts');
+    const client = readSource('api/client.ts');
+    const app = readSource('App.tsx');
+    const page = readSource('pages/CustodyAccountsPage.tsx');
+    const combined = `${types}\n${client}\n${app}\n${page}`;
+
+    for (const expected of [
+      'export type CustodyAccount',
+      'export type CustodyAccountAssignment',
+      'export type CreateCustodyAccountRequest',
+      'export type AssignCustodyAccountRequest',
+      'export type AssignCustodyAccountResponse',
+      'listCustodyAccounts',
+      'createCustodyAccount',
+      'assignCustodyAccount',
+      'listCustodyAssignments',
+      'releaseCustodyAssignment',
+      '/api/custody/accounts',
+      '/api/custody/accounts/assign',
+      '/api/custody/assignments',
+      '/api/custody/assignments/${id}/release',
+      "'custody-accounts'",
+      'CustodyAccountsPage',
+      '托管账户',
+      'tableId="custody-accounts"',
+      'tableId="custody-assignments"',
+      '新增托管地址',
+      '申请托管地址',
+      '自动添加监听',
+      '不能重复申请',
+      'validateAssignCustodyAccountForm',
+      '用户自带地址需填写地址',
+      '系统地址池地址',
+      '状态固定为 available',
+      '释放',
+      "queryClient.invalidateQueries({ queryKey: ['custody-accounts'] })",
+      "queryClient.invalidateQueries({ queryKey: ['custody-assignments'] })",
+    ]) {
+      expectContains(combined, expected);
+    }
+  });
+
   test('scan audit page is wired into navigation with Chinese statuses and retry rules', () => {
     const app = readSource('App.tsx');
     const page = readSource('pages/ScanAuditPage.tsx');

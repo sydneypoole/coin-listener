@@ -148,6 +148,79 @@ export type CreateWatchedAddressRequest = Omit<WatchedAddress, 'id' | 'tenant_id
   tenant_id?: string;
 };
 
+export type CustodyAccountSource = 'pool' | 'user' | string;
+export type CustodyAccountStatus = 'available' | 'assigned' | 'disabled' | string;
+export type CustodyAssignmentStatus = 'active' | 'released' | 'cancelled' | string;
+export type CustodyApplicantType = 'api' | 'internal' | string;
+
+export type CustodyAccount = {
+  id: string;
+  tenant_id: string;
+  chain_id: string;
+  chain_name: string;
+  address: string;
+  label?: string | null;
+  source: CustodyAccountSource;
+  status: CustodyAccountStatus;
+  watched_address_id?: string | null;
+  current_assignment_id?: string | null;
+  current_business_ref?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CustodyAccountAssignment = {
+  id: string;
+  tenant_id: string;
+  custody_account_id: string;
+  chain_id: string;
+  chain_name: string;
+  address: string;
+  applicant_type: CustodyApplicantType;
+  business_ref: string;
+  purpose?: string | null;
+  status: CustodyAssignmentStatus;
+  watched_address_id?: string | null;
+  assigned_at: string;
+  released_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreateCustodyAccountRequest = {
+  chain_id: string;
+  address: string;
+  label?: string | null;
+  source: CustodyAccountSource;
+  status?: CustodyAccountStatus;
+};
+
+export type AssignCustodyAccountRequest = {
+  chain_id: string;
+  source: CustodyAccountSource;
+  address?: string | null;
+  applicant_type: CustodyApplicantType;
+  business_ref: string;
+  purpose?: string | null;
+};
+
+export type CustodyAccountQuery = {
+  chain_id?: string;
+  source?: CustodyAccountSource;
+  status?: CustodyAccountStatus;
+};
+
+export type CustodyAssignmentQuery = {
+  chain_id?: string;
+  status?: CustodyAssignmentStatus;
+  business_ref?: string;
+};
+
+export type AssignCustodyAccountResponse = {
+  account: CustodyAccount;
+  assignment: CustodyAccountAssignment;
+};
+
 export type TelegramBot = {
   id: string;
   tenant_id: string;

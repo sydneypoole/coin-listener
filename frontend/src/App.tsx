@@ -13,6 +13,7 @@ import { clearSession, getSessionGeneration, loadStoredSession, saveSession, set
 import { AddressesPage } from './pages/AddressesPage';
 import { AssetsPage } from './pages/AssetsPage';
 import { ChainsPage } from './pages/ChainsPage';
+import { CustodyAccountsPage } from './pages/CustodyAccountsPage';
 import { EventsPage } from './pages/EventsPage';
 import { InAppNotificationsPage } from './pages/InAppNotificationsPage';
 import { LoginPage } from './pages/LoginPage';
@@ -36,6 +37,7 @@ type PageKey =
   | 'assets'
   | 'providers'
   | 'addresses'
+  | 'custody-accounts'
   | 'events'
   | 'notification-rules'
   | 'notification-channels'
@@ -138,6 +140,7 @@ export function App() {
     { itemKey: 'assets', text: '资产配置', icon: <IconSetting /> },
     { itemKey: 'providers', text: 'Provider', icon: <IconServer /> },
     { itemKey: 'addresses', text: '监听地址', icon: <IconUser /> },
+    { itemKey: 'custody-accounts', text: '托管账户', icon: <IconUser /> },
     { itemKey: 'events', text: '事件中心', icon: <IconBell /> },
     { itemKey: 'notification-rules', text: '通知规则', icon: <IconBell /> },
     { itemKey: 'notification-channels', text: '通知渠道', icon: <IconBell /> },
@@ -182,6 +185,7 @@ function renderPage(
   if (page === 'assets') return <AssetsPage />;
   if (page === 'providers') return <ProvidersPage />;
   if (page === 'addresses') return <AddressesPage />;
+  if (page === 'custody-accounts') return <CustodyAccountsPage />;
   if (page === 'events') return <EventsPage />;
   if (page === 'notification-rules') return <NotificationRulesPage />;
   if (page === 'notification-channels') return <NotificationChannelsPage />;

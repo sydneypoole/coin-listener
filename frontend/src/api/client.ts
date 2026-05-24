@@ -2,7 +2,10 @@ import { getAuthRequestContext, handleUnauthorized } from '../auth/session';
 import type {
   AddressEvent,
   Asset,
+  AssignCustodyAccountRequest,
+  AssignCustodyAccountResponse,
   Chain,
+  CreateCustodyAccountRequest,
   CreateNotificationChannelRequest,
   CreateNotificationRuleRequest,
   CreateProviderRequest,
@@ -10,6 +13,10 @@ import type {
   CreateTelegramBotRequest,
   CreateWatchedAddressImportRequest,
   CreateWatchedAddressRequest,
+  CustodyAccount,
+  CustodyAccountAssignment,
+  CustodyAccountQuery,
+  CustodyAssignmentQuery,
   EventQuery,
   EvmTransactionRescanRequest,
   EvmTransactionRescanResponse,
@@ -154,6 +161,34 @@ export function updateWatchedAddress(id: string, payload: CreateWatchedAddressRe
 export function deleteWatchedAddress(id: string): Promise<void> {
   return request<void>(`/api/addresses/${id}`, {
     method: 'DELETE',
+  });
+}
+
+export function listCustodyAccounts(filters: CustodyAccountQuery = {}): Promise<CustodyAccount[]> {
+  return request<CustodyAccount[]>(`/api/custody/accounts${buildQuery(filters)}`);
+}
+
+export function createCustodyAccount(payload: CreateCustodyAccountRequest): Promise<CustodyAccount> {
+  return request<CustodyAccount>('/api/custody/accounts', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function assignCustodyAccount(payload: AssignCustodyAccountRequest): Promise<AssignCustodyAccountResponse> {
+  return request<AssignCustodyAccountResponse>('/api/custody/accounts/assign', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listCustodyAssignments(filters: CustodyAssignmentQuery = {}): Promise<CustodyAccountAssignment[]> {
+  return request<CustodyAccountAssignment[]>(`/api/custody/assignments${buildQuery(filters)}`);
+}
+
+export function releaseCustodyAssignment(id: string): Promise<void> {
+  return request<void>(`/api/custody/assignments/${id}/release`, {
+    method: 'POST',
   });
 }
 

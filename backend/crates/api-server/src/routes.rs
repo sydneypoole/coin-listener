@@ -18,9 +18,10 @@ use coin_listener_chain_providers::{
 };
 use coin_listener_core::{
     models::{
-        AddressEventDraft, Asset, CreateNotificationChannelRequest, CreateNotificationRuleRequest,
-        CreateProviderRequest, CreateTelegramBindingRequest, CreateTelegramBotRequest,
-        CreateWatchedAddressImportRequest, CreateWatchedAddressRequest, EventQuery,
+        AddressEventDraft, Asset, AssignCustodyAccountRequest, CreateCustodyAccountRequest,
+        CreateNotificationChannelRequest, CreateNotificationRuleRequest, CreateProviderRequest,
+        CreateTelegramBindingRequest, CreateTelegramBotRequest, CreateWatchedAddressImportRequest,
+        CreateWatchedAddressRequest, CustodyAccountQuery, CustodyAssignmentQuery, EventQuery,
         EvmTransactionRescanRequest, EvmTransactionRescanResponse, EvmTransactionRescanSummary,
         EvmTransactionRescanTransferSummary, InAppNotificationQuery, LoginRequest, LoginResponse,
         NotificationChannelTestResponse, NotificationDeliveryListResponse,
@@ -33,7 +34,7 @@ use coin_listener_core::{
     AppError, AppResult,
 };
 use coin_listener_storage::{
-    notifications,
+    custody_accounts, notifications,
     notify_queue::{connect_notify_queue, NotifyQueue},
     repositories,
     scan_queue::{connect_scan_queue, ScanQueue},
@@ -135,6 +136,16 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route("/api/scan-runs", get(list_scan_runs))
         .route("/api/scan-runs/:id", get(get_scan_run))
         .route("/api/scan-runs/:id/retry", post(retry_scan_run))
+        .route(
+            "/api/custody/accounts",
+            get(list_custody_accounts).post(create_custody_account),
+        )
+        .route("/api/custody/accounts/assign", post(assign_custody_account))
+        .route("/api/custody/assignments", get(list_custody_assignments))
+        .route(
+            "/api/custody/assignments/:id/release",
+            post(release_custody_assignment),
+        )
         .route("/api/evm/transactions/rescan", post(rescan_evm_transaction))
         .route(
             "/api/telegram-settings",
@@ -1342,6 +1353,55 @@ async fn retry_scan_run(
     Ok(Json(RetryScanRunResponse { task }).into_response())
 }
 
+async fn list_custody_accounts(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Query(query): Query<CustodyAccountQuery>,
+) -> Result<Response, ApiError> {
+    let accounts =
+        custody_accounts::list_custody_accounts(&state.postgres, auth.tenant_id, query).await?;
+    Ok(Json(accounts).into_response())
+}
+
+async fn create_custody_account(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<CreateCustodyAccountRequest>,
+) -> Result<Response, ApiError> {
+    let account =
+        custody_accounts::create_custody_account(&state.postgres, auth.tenant_id, request).await?;
+    Ok((StatusCode::CREATED, Json(account)).into_response())
+}
+
+async fn assign_custody_account(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(request): Json<AssignCustodyAccountRequest>,
+) -> Result<Response, ApiError> {
+    let response =
+        custody_accounts::assign_custody_account(&state.postgres, auth.tenant_id, request).await?;
+    Ok(Json(response).into_response())
+}
+
+async fn list_custody_assignments(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Query(query): Query<CustodyAssignmentQuery>,
+) -> Result<Response, ApiError> {
+    let assignments =
+        custody_accounts::list_custody_assignments(&state.postgres, auth.tenant_id, query).await?;
+    Ok(Json(assignments).into_response())
+}
+
+async fn release_custody_assignment(
+    State(state): State<Arc<ApiState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    custody_accounts::release_custody_assignment(&state.postgres, auth.tenant_id, id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 async fn list_notification_outbox(
     State(state): State<Arc<ApiState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2335,6 +2395,33 @@ mod tests {
 
             assert_eq!(response.status(), status, "{uri}");
         }
+    }
+
+    #[test]
+    fn router_exposes_custody_routes() {
+        let source = production_source();
+
+        assert!(source.contains("/api/custody/accounts"));
+        assert!(source.contains("/api/custody/accounts/assign"));
+        assert!(source.contains("/api/custody/assignments"));
+        assert!(source.contains("/api/custody/assignments/:id/release"));
+    }
+
+    #[test]
+    fn custody_handlers_use_authenticated_tenant_scope() {
+        let source = production_source();
+
+        assert!(source.contains("async fn list_custody_accounts("));
+        assert!(source.contains("Extension(auth): Extension<AuthContext>"));
+        assert!(source
+            .contains("custody_accounts::list_custody_accounts(&state.postgres, auth.tenant_id"));
+        assert!(source
+            .contains("custody_accounts::create_custody_account(&state.postgres, auth.tenant_id"));
+        assert!(source
+            .contains("custody_accounts::assign_custody_account(&state.postgres, auth.tenant_id"));
+        assert!(source.contains(
+            "custody_accounts::release_custody_assignment(&state.postgres, auth.tenant_id"
+        ));
     }
 
     #[test]

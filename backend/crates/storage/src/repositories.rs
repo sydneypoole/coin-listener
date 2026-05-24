@@ -1569,7 +1569,7 @@ async fn get_native_asset(pool: &PgPool, chain_id: Uuid) -> AppResult<Asset> {
     .ok_or_else(|| AppError::NotFound("native asset".to_string()))
 }
 
-async fn get_chain(pool: &PgPool, id: Uuid) -> AppResult<Chain> {
+pub(crate) async fn get_chain(pool: &PgPool, id: Uuid) -> AppResult<Chain> {
     sqlx::query_as::<_, Chain>(
         "SELECT id, key, name, chain_type, native_asset_symbol, status, default_confirmations FROM chains WHERE id = $1",
     )
@@ -1618,7 +1618,7 @@ fn validate_watched_address(request: &CreateWatchedAddressRequest) -> AppResult<
     Ok(())
 }
 
-fn validate_address_for_chain(chain: &Chain, address: &str) -> AppResult<()> {
+pub(crate) fn validate_address_for_chain(chain: &Chain, address: &str) -> AppResult<()> {
     let address = address.trim();
     if address.is_empty() {
         return Err(AppError::Validation("address is required".to_string()));

@@ -1,4 +1,5 @@
 pub mod address_imports;
+pub mod custody_accounts;
 pub mod notifications;
 pub mod notify_queue;
 pub mod postgres;
