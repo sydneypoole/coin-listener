@@ -90,7 +90,25 @@ JOIN custody_accounts account ON account.id = assignment.custody_account_id
     AND account.tenant_id = assignment.tenant_id
 JOIN chains chain ON chain.id = account.chain_id
 WHERE assignment.tenant_id = $1
-  AND ($2::uuid IS NULL OR account.chain_id = $2)
+  AND (
+      $2::uuid IS NULL
+      OR EXISTS (
+          SELECT 1
+          FROM custody_account_chain_configs filter_config
+          WHERE filter_config.tenant_id = assignment.tenant_id
+            AND filter_config.custody_account_id = assignment.custody_account_id
+            AND filter_config.chain_id = $2
+      )
+      OR (
+          NOT EXISTS (
+              SELECT 1
+              FROM custody_account_chain_configs fallback_config
+              WHERE fallback_config.tenant_id = assignment.tenant_id
+                AND fallback_config.custody_account_id = assignment.custody_account_id
+          )
+          AND account.chain_id = $2
+      )
+  )
   AND ($3::text IS NULL OR assignment.status = $3)
   AND ($4::text IS NULL OR assignment.business_ref = $4)
 ORDER BY assignment.assigned_at DESC
@@ -149,6 +167,41 @@ WHERE tenant_id = $1
   AND status = 'available'
 ORDER BY created_at ASC
 FOR UPDATE SKIP LOCKED
+LIMIT 1
+"#;
+
+pub const SELECT_USER_CUSTODY_ACCOUNT_BY_ADDRESS_FOR_UPDATE_QUERY: &str = r#"
+SELECT ca.id, ca.tenant_id, ca.chain_id, ca.address, ca.label, ca.source, ca.status,
+       ca.watched_address_id, ca.created_at, ca.updated_at
+FROM custody_accounts ca
+JOIN chains legacy_chain ON legacy_chain.id = ca.chain_id
+JOIN LATERAL (
+    SELECT EXISTS (
+               SELECT 1
+               FROM custody_account_chain_configs config
+               WHERE config.tenant_id = ca.tenant_id
+                 AND config.custody_account_id = ca.id
+           ) AS has_configs,
+           EXISTS (
+               SELECT 1
+               FROM custody_account_chain_configs config
+               JOIN chains config_chain ON config_chain.id = config.chain_id
+               WHERE config.tenant_id = ca.tenant_id
+                 AND config.custody_account_id = ca.id
+                 AND lower(config_chain.chain_type) = 'evm'
+           ) AS has_evm_config
+) config_state ON TRUE
+WHERE ca.tenant_id = $1
+  AND ca.source = 'user'
+  AND (
+      (config_state.has_configs AND config_state.has_evm_config AND lower(ca.address_normalized) = lower(btrim($2)))
+      OR (config_state.has_configs AND NOT config_state.has_evm_config AND ca.address_normalized = btrim($2))
+      OR (NOT config_state.has_configs AND lower(legacy_chain.chain_type) = 'evm' AND lower(ca.address_normalized) = lower(btrim($2)))
+      OR (NOT config_state.has_configs AND lower(legacy_chain.chain_type) <> 'evm' AND ca.address_normalized = btrim($2))
+  )
+ORDER BY CASE WHEN ca.address_normalized = btrim($2) THEN 0 ELSE 1 END,
+         ca.created_at ASC
+FOR UPDATE OF ca
 LIMIT 1
 "#;
 
@@ -807,28 +860,25 @@ async fn claim_or_create_account_for_assignment(
     let address = request.address.as_deref().ok_or_else(|| {
         AppError::Validation("address is required for user custody account".to_string())
     })?;
-    let normalized = custody_address_normalized_for_request(transaction, request).await?;
-    let existing =
-        sqlx::query_as::<_, CustodyAccountRow>(SELECT_USER_CUSTODY_ACCOUNT_FOR_UPDATE_QUERY)
-            .bind(tenant_id)
-            .bind(&normalized)
-            .fetch_optional(transaction.as_mut())
-            .await
-            .map_err(|error| AppError::Database(error.to_string()))?;
+    let existing = sqlx::query_as::<_, CustodyAccountRow>(
+        SELECT_USER_CUSTODY_ACCOUNT_BY_ADDRESS_FOR_UPDATE_QUERY,
+    )
+    .bind(tenant_id)
+    .bind(address)
+    .fetch_optional(transaction.as_mut())
+    .await
+    .map_err(|error| AppError::Database(error.to_string()))?;
 
     if let Some(existing) = existing {
         validate_assignable_custody_account(transaction, tenant_id, &existing).await?;
-        if existing.source != CUSTODY_SOURCE_USER {
-            return Err(AppError::Validation(
-                "custody account source does not match user request".to_string(),
-            ));
-        }
         return Ok(existing);
     }
 
     let configs = request.chain_configs.as_deref().ok_or_else(|| {
         AppError::Validation("chain_configs are required for new user custody account".to_string())
     })?;
+    let normalized =
+        normalized_user_assignment_address(transaction, address, Some(configs)).await?;
     let legacy_chain_id = configs[0].chain_id;
     let inserted =
         sqlx::query_as::<_, CustodyAccountRow>(INSERT_USER_CUSTODY_ACCOUNT_FOR_ASSIGNMENT_QUERY)
@@ -860,16 +910,6 @@ async fn claim_or_create_account_for_assignment(
         ));
     }
     Ok(existing)
-}
-
-async fn custody_address_normalized_for_request(
-    transaction: &mut Transaction<'_, Postgres>,
-    request: &AssignCustodyAccountRequest,
-) -> AppResult<String> {
-    let address = request.address.as_deref().ok_or_else(|| {
-        AppError::Validation("address is required for user custody account".to_string())
-    })?;
-    normalized_user_assignment_address(transaction, address, request.chain_configs.as_deref()).await
 }
 
 async fn normalized_user_assignment_address(
@@ -1310,12 +1350,41 @@ mod tests {
             .split("async fn claim_or_create_account_for_assignment")
             .nth(1)
             .expect("claim_or_create_account_for_assignment should exist")
-            .split("async fn custody_address_normalized_for_request")
+            .split("async fn normalized_user_assignment_address")
             .next()
-            .expect("custody_address_normalized_for_request should follow assignment selection");
+            .expect("normalization helper should follow assignment selection");
 
         assert!(assignment_body.contains("chain_configs are required for new user custody account"));
         assert!(assignment_body.contains("validate_and_insert_custody_chain_configs"));
+    }
+
+    #[test]
+    fn existing_user_assignment_lookup_uses_saved_configs_before_request_configs() {
+        assert!(SELECT_USER_CUSTODY_ACCOUNT_BY_ADDRESS_FOR_UPDATE_QUERY.contains("JOIN LATERAL"));
+        assert!(SELECT_USER_CUSTODY_ACCOUNT_BY_ADDRESS_FOR_UPDATE_QUERY.contains("has_evm_config"));
+        assert!(
+            SELECT_USER_CUSTODY_ACCOUNT_BY_ADDRESS_FOR_UPDATE_QUERY.contains("ca.source = 'user'")
+        );
+        assert!(SELECT_USER_CUSTODY_ACCOUNT_BY_ADDRESS_FOR_UPDATE_QUERY.contains("btrim($2)"));
+
+        let source = include_str!("custody_accounts.rs");
+        let assignment_body = source
+            .split("async fn claim_or_create_account_for_assignment")
+            .nth(1)
+            .expect("claim_or_create_account_for_assignment should exist")
+            .split("async fn normalized_user_assignment_address")
+            .next()
+            .expect("normalization helper should follow assignment selection");
+        let lookup_index = assignment_body
+            .find("SELECT_USER_CUSTODY_ACCOUNT_BY_ADDRESS_FOR_UPDATE_QUERY")
+            .expect("existing user lookup should use saved config query");
+        let new_config_index = assignment_body
+            .find("chain_configs are required for new user custody account")
+            .expect("new user configs should still be required");
+
+        assert!(lookup_index < new_config_index);
+        assert!(!assignment_body
+            .contains("custody_address_normalized_for_request(transaction, request)"));
     }
 
     #[test]
@@ -1362,6 +1431,16 @@ mod tests {
         assert!(INSERT_CUSTODY_ASSIGNMENT_QUERY.contains("ON CONFLICT DO NOTHING"));
         assert!(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("source = 'pool'"));
         assert!(!CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("chain_id = $2"));
+    }
+
+    #[test]
+    fn custody_assignment_chain_filter_uses_configured_chains_with_legacy_fallback() {
+        assert!(
+            LIST_CUSTODY_ASSIGNMENTS_QUERY.contains("custody_account_chain_configs filter_config")
+        );
+        assert!(LIST_CUSTODY_ASSIGNMENTS_QUERY.contains("filter_config.chain_id = $2"));
+        assert!(LIST_CUSTODY_ASSIGNMENTS_QUERY.contains("fallback_config"));
+        assert!(LIST_CUSTODY_ASSIGNMENTS_QUERY.contains("AND account.chain_id = $2"));
     }
 
     #[test]
