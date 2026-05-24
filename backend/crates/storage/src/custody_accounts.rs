@@ -692,12 +692,8 @@ pub async fn assign_custody_account(
         &configs,
     )
     .await?;
-    let legacy_watched_address_id = watched_addresses
-        .first()
-        .map(|watched| watched.watched_address_id)
-        .ok_or_else(|| {
-            AppError::Validation("custody account has no watched addresses".to_string())
-        })?;
+    let legacy_watched_address_id =
+        legacy_watched_address_id_for_account(&account, &watched_addresses)?;
 
     let assignment_row =
         sqlx::query_as::<_, InsertedAssignmentRow>(INSERT_CUSTODY_ASSIGNMENT_QUERY)
@@ -891,6 +887,19 @@ async fn normalized_user_assignment_address(
         ));
     }
     Ok(normalize_custody_address(address))
+}
+
+fn legacy_watched_address_id_for_account(
+    account: &CustodyAccountRow,
+    watched_addresses: &[CustodyAssignmentWatchedAddress],
+) -> AppResult<Uuid> {
+    watched_addresses
+        .iter()
+        .find(|watched| watched.chain_id == account.chain_id)
+        .map(|watched| watched.watched_address_id)
+        .ok_or_else(|| {
+            AppError::Validation("custody account has no legacy chain watched address".to_string())
+        })
 }
 
 async fn validate_assignable_custody_account(
@@ -1310,6 +1319,42 @@ mod tests {
     }
 
     #[test]
+    fn legacy_watched_address_uses_account_chain_not_config_order() {
+        let now = chrono::Utc::now();
+        let account = CustodyAccountRow {
+            id: Uuid::from_u128(30),
+            tenant_id: Uuid::from_u128(31),
+            chain_id: Uuid::from_u128(32),
+            address: "0x0000000000000000000000000000000000000001".to_string(),
+            label: None,
+            source: CUSTODY_SOURCE_POOL.to_string(),
+            status: CUSTODY_ACCOUNT_STATUS_AVAILABLE.to_string(),
+            watched_address_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let watched_addresses = vec![
+            CustodyAssignmentWatchedAddress {
+                chain_id: Uuid::from_u128(33),
+                chain_name: "Bitcoin".to_string(),
+                watched_address_id: Uuid::from_u128(34),
+                asset_ids: vec![Uuid::from_u128(35)],
+            },
+            CustodyAssignmentWatchedAddress {
+                chain_id: Uuid::from_u128(32),
+                chain_name: "Tron".to_string(),
+                watched_address_id: Uuid::from_u128(36),
+                asset_ids: vec![Uuid::from_u128(37)],
+            },
+        ];
+
+        assert_eq!(
+            legacy_watched_address_id_for_account(&account, &watched_addresses).unwrap(),
+            Uuid::from_u128(36)
+        );
+    }
+
+    #[test]
     fn custody_assignment_queries_apply_all_configured_assets() {
         assert!(LIST_CUSTODY_ACCOUNT_CONFIGS_QUERY.contains("asset_ids"));
         assert!(ENSURE_WATCHED_ADDRESS_ASSET_QUERY.contains("ON CONFLICT DO NOTHING"));
@@ -1332,6 +1377,7 @@ mod tests {
 
         assert!(assign_body.contains("configs_for_account_in_transaction"));
         assert!(assign_body.contains("ensure_watched_addresses_for_custody_account"));
+        assert!(assign_body.contains("legacy_watched_address_id_for_account"));
         assert!(assign_body.contains("watched_addresses"));
         assert!(!assign_body.contains("ensure_watched_address_for_custody_account("));
     }
