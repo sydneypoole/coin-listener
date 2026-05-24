@@ -45,7 +45,25 @@ JOIN chains c ON c.id = ca.chain_id
 LEFT JOIN custody_account_assignments active_assignment ON active_assignment.custody_account_id = ca.id
     AND active_assignment.status = 'active'
 WHERE ca.tenant_id = $1
-  AND ($2::uuid IS NULL OR ca.chain_id = $2)
+  AND (
+      $2::uuid IS NULL
+      OR EXISTS (
+          SELECT 1
+          FROM custody_account_chain_configs filter_config
+          WHERE filter_config.tenant_id = ca.tenant_id
+            AND filter_config.custody_account_id = ca.id
+            AND filter_config.chain_id = $2
+      )
+      OR (
+          NOT EXISTS (
+              SELECT 1
+              FROM custody_account_chain_configs fallback_config
+              WHERE fallback_config.tenant_id = ca.tenant_id
+                AND fallback_config.custody_account_id = ca.id
+          )
+          AND ca.chain_id = $2
+      )
+  )
   AND ($3::text IS NULL OR ca.source = $3)
   AND ($4::text IS NULL OR ca.status = $4)
 ORDER BY ca.created_at DESC
@@ -127,6 +145,7 @@ pub const CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY: &str = r#"
 SELECT id, tenant_id, chain_id, address, label, source, status, watched_address_id, created_at, updated_at
 FROM custody_accounts
 WHERE tenant_id = $1
+  AND chain_id = $2
   AND source = 'pool'
   AND status = 'available'
 ORDER BY created_at ASC
@@ -573,7 +592,8 @@ pub async fn create_custody_account(
         .map_err(|error| AppError::Database(error.to_string()))?;
     let chain_types = chain_types_for_configs(&mut transaction, &request.chain_configs).await?;
     for config in &request.chain_configs {
-        let chain = repositories::get_chain(pool, config.chain_id).await?;
+        let chain =
+            repositories::get_chain_in_transaction(&mut transaction, config.chain_id).await?;
         repositories::validate_address_for_chain(&chain, &address)?;
     }
     let chain_type_values = chain_types.values().cloned().collect::<Vec<_>>();
@@ -778,6 +798,7 @@ async fn claim_or_create_account_for_assignment(
     if request.source == CUSTODY_SOURCE_POOL {
         return sqlx::query_as::<_, CustodyAccountRow>(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY)
             .bind(tenant_id)
+            .bind(chain_id)
             .fetch_optional(transaction.as_mut())
             .await
             .map_err(|error| AppError::Database(error.to_string()))?
@@ -1113,8 +1134,27 @@ mod tests {
         assert!(INSERT_USER_CUSTODY_ACCOUNT_FOR_ASSIGNMENT_QUERY
             .contains("ON CONFLICT (tenant_id, address_normalized) DO NOTHING"));
         assert!(SELECT_USER_CUSTODY_ACCOUNT_FOR_UPDATE_QUERY.contains("address_normalized = $2"));
+        assert!(LIST_CUSTODY_ACCOUNTS_QUERY.contains("custody_account_chain_configs filter_config"));
+        assert!(LIST_CUSTODY_ACCOUNTS_QUERY.contains("filter_config.chain_id = $2"));
+        assert!(LIST_CUSTODY_ACCOUNTS_QUERY.contains("fallback_config"));
+        assert!(LIST_CUSTODY_ACCOUNTS_QUERY.contains("AND ca.chain_id = $2"));
         assert!(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("source = 'pool'"));
-        assert!(!CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("chain_id = $2"));
+        assert!(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("chain_id = $2"));
+    }
+
+    #[test]
+    fn create_custody_account_validates_chains_without_pool_reentry() {
+        let source = include_str!("custody_accounts.rs");
+        let create_body = source
+            .split("pub async fn create_custody_account")
+            .nth(1)
+            .expect("create_custody_account should exist")
+            .split("pub async fn assign_custody_account")
+            .next()
+            .expect("assign_custody_account should follow create_custody_account");
+
+        assert!(create_body.contains("repositories::get_chain_in_transaction"));
+        assert!(!create_body.contains("repositories::get_chain(pool"));
     }
 
     #[test]

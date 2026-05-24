@@ -1580,6 +1580,20 @@ pub(crate) async fn get_chain(pool: &PgPool, id: Uuid) -> AppResult<Chain> {
     .ok_or_else(|| AppError::NotFound("chain".to_string()))
 }
 
+pub(crate) async fn get_chain_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> AppResult<Chain> {
+    sqlx::query_as::<_, Chain>(
+        "SELECT id, key, name, chain_type, native_asset_symbol, status, default_confirmations FROM chains WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(transaction.as_mut())
+    .await
+    .map_err(|error| AppError::Database(error.to_string()))?
+    .ok_or_else(|| AppError::NotFound("chain".to_string()))
+}
+
 fn validate_provider(request: &CreateProviderRequest) -> AppResult<()> {
     if request.name.trim().is_empty() {
         return Err(AppError::Validation(
