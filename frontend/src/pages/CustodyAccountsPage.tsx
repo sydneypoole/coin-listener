@@ -119,6 +119,7 @@ export function CustodyAccountsPage() {
   const [assignmentFilters, setAssignmentFilters] = useState<CustodyAssignmentQuery>({ status: 'active' });
   const [createVisible, setCreateVisible] = useState(false);
   const [assignVisible, setAssignVisible] = useState(false);
+  const [assignSource, setAssignSource] = useState('pool');
   const [custodyChainRows, setCustodyChainRows] = useState<ChainRow[]>([emptyCustodyChainRow()]);
   const [assignChainRows, setAssignChainRows] = useState<ChainRow[]>([emptyCustodyChainRow()]);
   const queryClient = useQueryClient();
@@ -234,12 +235,14 @@ export function CustodyAccountsPage() {
   }
 
   function openAssignModal() {
+    setAssignSource('pool');
     setAssignChainRows([emptyCustodyChainRow()]);
     setAssignVisible(true);
   }
 
   function closeAssignModal() {
     setAssignVisible(false);
+    setAssignSource('pool');
     setAssignChainRows([emptyCustodyChainRow()]);
   }
 
@@ -493,13 +496,17 @@ export function CustodyAccountsPage() {
           labelWidth={120}
           initValues={{ source: 'pool', applicant_type: 'api' }}
         >
-          <Form.Select field="source" label="来源" rules={[{ required: true, message: '请选择来源' }]}>
+          <Form.Select field="source" label="来源" rules={[{ required: true, message: '请选择来源' }]} onChange={value => setAssignSource(typeof value === 'string' ? value : 'pool')}>
             <Form.Select.Option value="pool">系统地址池</Form.Select.Option>
             <Form.Select.Option value="user">用户自带</Form.Select.Option>
           </Form.Select>
           <Form.Input field="address" label="用户地址" placeholder="source=user 时填写" />
-          <Banner type="info" title="用户自带地址链配置" description="用户自带地址首次创建时会保存这些链和币种；如果地址已存在，则使用已有配置，提交的配置不会覆盖旧配置。" />
-          {renderChainRows('监听链配置', assignChainRows, updateAssignChainRow, addAssignChainRow, removeAssignChainRow)}
+          {assignSource === 'user' ? (
+            <>
+              <Banner type="info" title="用户自带地址链配置" description="用户自带地址首次创建时会保存这些链和币种；如果地址已存在，则使用已有配置，提交的配置不会覆盖旧配置。" />
+              {renderChainRows('监听链配置', assignChainRows, updateAssignChainRow, addAssignChainRow, removeAssignChainRow)}
+            </>
+          ) : null}
           <Form.Select field="applicant_type" label="申请方" rules={[{ required: true, message: '请选择申请方' }]}>
             <Form.Select.Option value="api">外部 API</Form.Select.Option>
             <Form.Select.Option value="internal">平台内部</Form.Select.Option>
