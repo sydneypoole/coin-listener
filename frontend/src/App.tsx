@@ -48,10 +48,10 @@ type PageKey =
 type HealthQuery = ReturnType<typeof useQuery<HealthResponse>>;
 
 const dashboardSteps = [
-  { title: '监听地址', label: 'Watch', description: '按链与资产集合维护扫描目标' },
-  { title: 'Provider Mesh', label: 'RPC', description: '多 Provider 优先级、限流与熔断' },
-  { title: '事件中心', label: 'Event', description: '归集转账、余额变更与合约交互' },
-  { title: '通知出站', label: 'Notify', description: 'Outbox 重试、投递与站内通知闭环' },
+  { title: 'Watch Targets', label: 'Watch', description: '按链与资产集合维护扫描目标' },
+  { title: 'RPC Mesh', label: 'RPC', description: '多 Provider 优先级、限流与熔断' },
+  { title: 'Event Ledger', label: 'Event', description: '归集转账、余额变更与合约交互' },
+  { title: 'Notify Outbox', label: 'Notify', description: 'Outbox 重试、投递与站内通知闭环' },
 ];
 
 export function App() {
@@ -204,7 +204,7 @@ function DashboardOverview({ healthQuery, realtimeUnreadCount }: { healthQuery: 
   return (
     <PageScaffold
       title="链上运维总览"
-      description="从 Provider、扫描队列、事件入库到通知出站的控制面入口。"
+      description="从监听目标、RPC Mesh、事件账本到通知出站的链上运维控制面。"
       actions={(
         <Button loading={healthQuery.isFetching} onClick={() => healthQuery.refetch()}>
           刷新 API 健康
@@ -213,12 +213,12 @@ function DashboardOverview({ healthQuery, realtimeUnreadCount }: { healthQuery: 
     >
       <MetricGrid>
         <MetricCard title="API Gateway" value={healthLabel} hint={healthQuery.data?.service ?? 'health endpoint'} tone={healthTone(healthQuery)} />
-        <MetricCard title="控制面" value="多链" hint="链、资产、Provider 统一配置" />
-        <MetricCard title="实时通知" value={realtimeUnreadCount} hint="本会话新增站内通知" tone={realtimeUnreadCount > 0 ? 'warning' : 'neutral'} />
-        <MetricCard title="刷新策略" value="手动" hint="健康检查保持原查询与重试行为" />
+        <MetricCard title="Control Plane" value="multi-chain" hint="链、资产、Provider 统一配置" />
+        <MetricCard title="Realtime Inbox" value={realtimeUnreadCount} hint="本会话新增站内通知" tone={realtimeUnreadCount > 0 ? 'warning' : 'neutral'} />
+        <MetricCard title="Refresh Mode" value="manual" hint="健康检查保持原查询与重试行为" />
       </MetricGrid>
 
-      <DataSurface title="控制面健康" actions={<Tag color={healthTagColor(healthQuery)}>{healthLabel}</Tag>}>
+      <DataSurface title="API Gateway health" actions={<Tag color={healthTagColor(healthQuery)}>{healthLabel}</Tag>}>
         <div className="dashboard-health-panel">
           <div>
             <Text type="tertiary">API Health</Text>
@@ -233,7 +233,7 @@ function DashboardOverview({ healthQuery, realtimeUnreadCount }: { healthQuery: 
         </div>
       </DataSurface>
 
-      <DataSurface title="链上业务链路" actions={<Text type="tertiary">Watch → RPC → Event → Notify</Text>}>
+      <DataSurface title="Chain flow map" actions={<Text type="tertiary">Watch → RPC → Event → Notify</Text>}>
         <div className="dashboard-chain-map">
           {dashboardSteps.map((step, index) => (
             <div className="dashboard-chain-step" key={step.title}>
@@ -246,7 +246,7 @@ function DashboardOverview({ healthQuery, realtimeUnreadCount }: { healthQuery: 
         </div>
       </DataSurface>
 
-      <DataSurface title="运维入口">
+      <DataSurface title="Ops shortcuts">
         <Space wrap>
           <Tag color="cyan">系统状态：队列、Provider、服务心跳</Tag>
           <Tag color="blue">事件中心：链上活动检索</Tag>

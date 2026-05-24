@@ -136,7 +136,11 @@ export function TelegramBotsPage() {
   }
 
   return (
-    <PageScaffold title="TG机器人" actions={<Button type="primary" onClick={openCreateModal}>新增机器人</Button>}>
+    <PageScaffold
+      title="TG机器人"
+      description="配置 Telegram Bot Token、全局/单机器人代理，并验证机器人连通性。"
+      actions={<Button type="primary" onClick={openCreateModal}>新增机器人</Button>}
+    >
       {settingsQuery.isError ? (
         <Banner
           type="danger"

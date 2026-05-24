@@ -9,7 +9,7 @@ type LoginPageProps = {
   onLogin: (session: LoginResponse) => void;
 };
 
-const loginHighlights = ['多链监听', 'Provider 熔断', 'Outbox 运维'];
+const loginHighlights = ['Tenant scoped', 'RPC failover', 'Outbox replay'];
 
 export function LoginPage({ onLogin }: LoginPageProps) {
   const [loading, setLoading] = useState(false);
@@ -36,24 +36,24 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             <span className="brand-mark">CL</span>
             <Text strong>Coin Listener</Text>
           </div>
-          <Title heading={1} className="login-hero-title">链上监控控制台</Title>
+          <Title heading={1} className="login-hero-title">Chain operations without blind spots</Title>
           <Text className="login-hero-copy">
-            面向区块链运维的资产监听、事件追踪与通知投递工作台。
+            面向区块链运维的监听控制台：地址、Provider、事件账本与通知出站保持在同一个可信工作面。
           </Text>
           <Space wrap className="login-highlight-row">
             {loginHighlights.map(item => <Tag key={item} color="cyan">{item}</Tag>)}
           </Space>
           <div className="login-signal-card">
-            <span>RPC Mesh</span>
-            <strong>active</strong>
-            <Text type="tertiary">Queue, event, notification pipeline ready</Text>
+            <span>Control plane</span>
+            <strong>ready</strong>
+            <Text type="tertiary">Watch targets, event ledger, notify outbox</Text>
           </div>
         </section>
 
         <Card className="login-card">
-          <Text type="tertiary">Console Entry</Text>
+          <Text type="tertiary">Secure console entry</Text>
           <Title heading={3} style={{ marginTop: 6 }}>登录工作台</Title>
-          <Text type="tertiary">使用管理员账号进入多链运维面板</Text>
+          <Text type="tertiary">使用管理员账号进入多链运维控制面</Text>
           <Form onSubmit={handleSubmit} className="login-form" labelPosition="top">
             <Form.Input field="email" label="邮箱" initValue="admin@example.com" rules={[{ required: true, message: '请输入邮箱' }]} />
             <Form.Input field="password" label="密码" mode="password" rules={[{ required: true, message: '请输入密码' }]} />

@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Form, Modal, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { Banner, Button, Card, Form, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
 import { getScanRun, listChains, listScanRuns, listWatchedAddresses, retryScanRun } from '../api/client';
 import type { ScanRunDetail, ScanRunListItem, ScanRunQuery, ScanRunStatus } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
 import { FilterPanel } from '../components/FilterPanel';
+import { FormModal } from '../components/FormModal';
 import { PageScaffold } from '../components/PageScaffold';
 
 const { Text } = Typography;
@@ -232,7 +233,7 @@ function ScanRunDetailModal({
   onClose: () => void;
 }) {
   return (
-    <Modal title="扫描记录详情" visible={visible} onCancel={onClose} footer={null} width={1120}>
+    <FormModal title="扫描记录详情" visible={visible} onCancel={onClose} size="wide">
       {loading ? <Text>正在加载详情...</Text> : null}
       {detail ? (
         <Space vertical align="start" spacing={16} style={{ width: '100%' }}>
@@ -262,7 +263,7 @@ function ScanRunDetailModal({
           </div>
         </Space>
       ) : null}
-    </Modal>
+    </FormModal>
   );
 }
 

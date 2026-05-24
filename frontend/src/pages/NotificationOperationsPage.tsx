@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Card, Form, Modal, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
+import { Banner, Button, Card, Form, Space, Tag, Toast, Typography } from '@douyinfe/semi-ui';
 import { getNotificationOutbox, getSystemStatus, listNotificationOutbox, retryNotificationOutbox } from '../api/client';
 import type { NotificationDeliveryListItem, NotificationOutboxDetail, NotificationOutboxListItem, NotificationOutboxQuery } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
 import { FilterPanel } from '../components/FilterPanel';
+import { FormModal } from '../components/FormModal';
 import { MetricCard, MetricGrid } from '../components/MetricGrid';
 import { PageScaffold } from '../components/PageScaffold';
 
@@ -231,7 +232,7 @@ function OutboxDetailModal({
   onClose: () => void;
 }) {
   return (
-    <Modal title="通知任务详情" visible={visible} onCancel={onClose} footer={null} width={1120}>
+    <FormModal title="通知任务详情" visible={visible} onCancel={onClose} size="wide">
       {loading ? <Text>正在加载详情...</Text> : null}
       {detail ? (
         <Space vertical align="start" spacing={16} style={{ width: '100%' }}>
@@ -284,7 +285,7 @@ function OutboxDetailModal({
           </DataSurface>
         </Space>
       ) : null}
-    </Modal>
+    </FormModal>
   );
 }
 

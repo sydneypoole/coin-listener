@@ -233,6 +233,58 @@ describe('frontend UI regressions', () => {
     }
   });
 
+  test('console redesign guardrails keep tokens shell and motion accessible', () => {
+    const styles = readSource('styles.css');
+    const shell = readSource('components/AppShell.tsx');
+    const table = readSource('components/DataTable.tsx');
+    const formModal = readSource('components/FormModal.tsx');
+
+    for (const expected of [
+      '--app-console-blue',
+      '--app-console-cyan',
+      '--app-surface-base',
+      '--app-surface-raised',
+      '--app-surface-glass',
+      '--app-focus-ring',
+      ':focus-visible',
+      '::selection',
+      '@media (prefers-reduced-motion: reduce)',
+    ]) {
+      expectContains(styles, expected);
+    }
+
+    for (const expected of [
+      'shell-identity',
+      'shell-meta',
+      '<Sider className="app-sider">',
+      '<Header className="app-header">',
+      '<Content className="app-content">',
+      '<ThemeToggle',
+    ]) {
+      expectContains(shell, expected);
+    }
+
+    for (const expected of [
+      'coin-listener:data-table-widths:',
+      'onResizeStop',
+      'resizable=',
+      'fixed: isActionColumn ? (\'right\' as const)',
+    ]) {
+      expectContains(table, expected);
+    }
+
+    for (const expected of [
+      'medium: 720',
+      'large: 920',
+      'wide: 1120',
+      'calc(100vw - 32px)',
+      'calc(100vh - 220px)',
+      'form-modal',
+    ]) {
+      expectContains(formModal, expected);
+    }
+  });
+
   test('data table wrapper persists resized widths and fixes action columns', () => {
     const table = readSource('components/DataTable.tsx');
 

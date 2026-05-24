@@ -111,7 +111,7 @@ export function DataTable<RecordType extends RowData>({
   const scrollX = scroll?.x ?? Math.max(totalWidth(preparedColumns), 720);
 
   return (
-    <div className="data-table-surface">
+    <div className="data-table-surface" data-table-id={tableId}>
       <Table<RecordType>
         {...props}
         className={['data-table', className].filter(Boolean).join(' ')}

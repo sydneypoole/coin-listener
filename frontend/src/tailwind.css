@@ -10,6 +10,10 @@
   --color-semi-color-text-0: var(--semi-color-text-0);
   --color-semi-color-text-1: var(--semi-color-text-1);
   --color-semi-color-text-2: var(--semi-color-text-2);
+  --color-app-console-blue: var(--app-console-blue);
+  --color-app-console-cyan: var(--app-console-cyan);
+  --color-app-surface-base: var(--app-surface-base);
+  --color-app-surface-raised: var(--app-surface-raised);
   --radius-semi-border-radius-small: var(--semi-border-radius-small);
   --radius-semi-border-radius-medium: var(--semi-border-radius-medium);
   --radius-semi-border-radius-large: var(--semi-border-radius-large);
@@ -25,6 +29,10 @@ body {
   --color-semi-color-text-0: var(--semi-color-text-0);
   --color-semi-color-text-1: var(--semi-color-text-1);
   --color-semi-color-text-2: var(--semi-color-text-2);
+  --color-app-console-blue: var(--app-console-blue);
+  --color-app-console-cyan: var(--app-console-cyan);
+  --color-app-surface-base: var(--app-surface-base);
+  --color-app-surface-raised: var(--app-surface-raised);
   --radius-semi-border-radius-small: var(--semi-border-radius-small);
   --radius-semi-border-radius-medium: var(--semi-border-radius-medium);
   --radius-semi-border-radius-large: var(--semi-border-radius-large);

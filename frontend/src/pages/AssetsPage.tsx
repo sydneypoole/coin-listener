@@ -12,7 +12,7 @@ export function AssetsPage() {
   const chainMap = new Map((chainsQuery.data ?? []).map(chain => [chain.id, chain.name]));
 
   return (
-    <PageScaffold title="资产配置">
+    <PageScaffold title="资产配置" description="查看各链原生资产与代币合约，供监听地址和托管地址选择。">
       <DataSurface title="资产列表">
         <DataTable<Asset>
           tableId="assets"

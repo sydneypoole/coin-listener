@@ -14,9 +14,10 @@ export function PageScaffold({ title, description, actions, children }: PageScaf
   return (
     <section className="page-scaffold">
       <div className="page-heading">
-        <div>
+        <div className="page-title-block">
+          <Text className="page-eyebrow">Control Plane</Text>
           <Title heading={3} style={{ margin: 0 }}>{title}</Title>
-          {description ? <Text type="tertiary">{description}</Text> : null}
+          {description ? <Text type="tertiary" className="page-description">{description}</Text> : null}
         </div>
         {actions ? <div className="page-actions">{actions}</div> : null}
       </div>

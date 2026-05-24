@@ -9,7 +9,11 @@ type DataSurfaceProps = {
 
 export function DataSurface({ title, actions, children }: DataSurfaceProps) {
   return (
-    <Card title={title} headerExtraContent={actions} className="data-surface">
+    <Card
+      title={<span className="surface-title">{title}</span>}
+      headerExtraContent={actions ? <div className="surface-actions">{actions}</div> : null}
+      className="data-surface"
+    >
       <div className="data-surface-body">{children}</div>
     </Card>
   );

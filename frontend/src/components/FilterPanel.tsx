@@ -8,7 +8,7 @@ type FilterPanelProps = {
 
 export function FilterPanel({ title, children }: FilterPanelProps) {
   return (
-    <Card title={title} className="filter-panel">
+    <Card title={<span className="surface-title">{title}</span>} className="filter-panel">
       <div className="filter-panel-body">{children}</div>
     </Card>
   );

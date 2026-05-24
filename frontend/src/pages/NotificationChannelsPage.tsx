@@ -174,7 +174,11 @@ export function NotificationChannelsPage() {
   }
 
   return (
-    <PageScaffold title="通知渠道" actions={<Button type="primary" onClick={openCreateModal}>新增渠道</Button>}>
+    <PageScaffold
+      title="通知渠道"
+      description="维护站内、Telegram、Webhook 与邮件投递端点，并验证渠道可达性。"
+      actions={<Button type="primary" onClick={openCreateModal}>新增渠道</Button>}
+    >
       {channelsQuery.isError ? (
         <Banner
           type="danger"

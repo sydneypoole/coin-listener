@@ -312,12 +312,16 @@ export function AddressesPage() {
   }
 
   return (
-    <PageScaffold title="监听地址" actions={(
-      <Space>
-        <Button onClick={openBatchModal}>批量添加</Button>
-        <Button onClick={openCreateModal}>新增地址</Button>
-      </Space>
-    )}>
+    <PageScaffold
+      title="监听地址"
+      description="按链和资产维护扫描目标，支持单地址多链配置与后台批量导入任务。"
+      actions={(
+        <Space>
+          <Button onClick={openBatchModal}>批量添加</Button>
+          <Button onClick={openCreateModal}>新增地址</Button>
+        </Space>
+      )}
+    >
       <DataSurface title="监听地址列表">
         <DataTable<WatchedAddress>
           tableId="addresses"

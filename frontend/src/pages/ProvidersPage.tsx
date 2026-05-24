@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Form, Modal, Space, Tag, Toast } from '@douyinfe/semi-ui';
+import { Button, Form, Space, Tag, Toast } from '@douyinfe/semi-ui';
 import { createProvider, listChains, listProviders, testProvider, updateProvider } from '../api/client';
 import type { CreateProviderRequest, Provider } from '../api/types';
 import { DataSurface } from '../components/DataSurface';
 import { DataTable } from '../components/DataTable';
+import { FormModal } from '../components/FormModal';
 import { PageScaffold } from '../components/PageScaffold';
 
 export function ProvidersPage() {
@@ -95,7 +96,11 @@ export function ProvidersPage() {
   }
 
   return (
-    <PageScaffold title="Provider 配置" actions={<Button onClick={openCreateModal}>新增 Provider</Button>}>
+    <PageScaffold
+      title="Provider 配置"
+      description="维护多链 RPC/REST Provider、优先级、限流与连通性验证。"
+      actions={<Button onClick={openCreateModal}>新增 Provider</Button>}
+    >
       <DataSurface title="Provider 列表">
         <DataTable<Provider>
           tableId="providers"
@@ -138,7 +143,7 @@ export function ProvidersPage() {
           ]}
         />
       </DataSurface>
-      <Modal title={editingProvider ? '编辑 Provider' : '新增 Provider'} visible={visible} onCancel={closeModal} footer={null}>
+      <FormModal title={editingProvider ? '编辑 Provider' : '新增 Provider'} visible={visible} onCancel={closeModal} size="large">
         <p className="form-help-text">支持 EVM RPC、TRON REST、BTC/UTXO REST Provider 连通性测试；WebSocket 暂不测试。</p>
         <Form initValues={initialValues()} onSubmit={handleSubmit} labelPosition="left" labelWidth={110}>
           <Form.Select field="chain_id" label="链" rules={[{ required: true, message: '请选择链' }]}>
@@ -159,12 +164,12 @@ export function ProvidersPage() {
             <Form.Select.Option value="active">active</Form.Select.Option>
             <Form.Select.Option value="disabled">disabled</Form.Select.Option>
           </Form.Select>
-          <Space>
+          <Space className="form-modal-actions">
             <Button htmlType="submit" type="primary" loading={mutation.isPending}>保存</Button>
             <Button onClick={closeModal}>取消</Button>
           </Space>
         </Form>
-      </Modal>
+      </FormModal>
     </PageScaffold>
   );
 }

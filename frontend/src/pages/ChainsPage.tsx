@@ -10,7 +10,7 @@ export function ChainsPage() {
   const query = useQuery({ queryKey: ['chains'], queryFn: listChains });
 
   return (
-    <PageScaffold title="链配置">
+    <PageScaffold title="链配置" description="查看当前可监听链、链类型、原生资产与确认数策略。">
       <DataSurface title="链列表">
         <DataTable<Chain>
           tableId="chains"

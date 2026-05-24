@@ -36,7 +36,7 @@ export function InAppNotificationsPage({ onUnreadSettled }: InAppNotificationsPa
   });
 
   return (
-    <PageScaffold title="站内通知">
+    <PageScaffold title="站内通知" description="查看实时通知回执，并将已处理的站内消息标记为已读。">
       {notificationsQuery.isError ? (
         <Banner
           type="danger"

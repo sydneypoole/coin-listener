@@ -154,7 +154,7 @@ export function EventsPage() {
   }
 
   return (
-    <PageScaffold title="事件中心">
+    <PageScaffold title="事件中心" description="按链、地址、资产和事件类型检索链上活动账本。">
       {eventsQuery.isError ? (
         <Banner
           type="danger"

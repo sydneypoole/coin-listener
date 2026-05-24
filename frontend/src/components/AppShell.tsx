@@ -35,7 +35,14 @@ export function AppShell<PageKey extends string>({
       <Sider className="app-sider">
         <div className="brand">
           <span className="brand-mark">CL</span>
-          <span>Coin Listener</span>
+          <span className="shell-identity">
+            <span>Coin Listener</span>
+            <Text className="brand-subtitle">Chain Ops Console</Text>
+          </span>
+        </div>
+        <div className="shell-meta">
+          <Text className="shell-meta-label">workspace</Text>
+          <Text className="shell-meta-value">{tenantLabel}</Text>
         </div>
         <Nav
           className="chain-nav"
@@ -46,12 +53,15 @@ export function AppShell<PageKey extends string>({
       </Sider>
       <Layout className="min-w-0">
         <Header className="app-header">
-          <div>
+          <div className="shell-header-copy">
             <Title heading={4} style={{ margin: 0 }}>链上监控控制台</Title>
-            <Text type="tertiary">多链资产、事件与通知运维工作台</Text>
+            <Text type="tertiary">Watch · RPC Mesh · Event Ledger · Notify Outbox</Text>
           </div>
-          <Space>
-            <Text type="tertiary">{userLabel} / {tenantLabel}</Text>
+          <Space className="shell-actions" wrap>
+            <div className="shell-session-pill">
+              <Text className="shell-meta-label">operator</Text>
+              <Text className="shell-session-value">{userLabel}</Text>
+            </div>
             <ThemeToggle value={themeMode} onChange={onThemeModeChange} />
             <Button className="shell-logout-button" theme="borderless" type="tertiary" onClick={onLogout}>退出登录</Button>
           </Space>

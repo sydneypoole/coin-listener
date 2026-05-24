@@ -198,7 +198,7 @@ export function NotificationRulesPage() {
   }
 
   return (
-    <PageScaffold title="通知规则">
+    <PageScaffold title="通知规则" description="用链、地址、资产、方向和金额条件定义通知路由，并快速绑定 Telegram 渠道。">
       {rulesQuery.isError ? (
         <Banner
           type="danger"
