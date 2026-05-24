@@ -145,7 +145,6 @@ pub const CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY: &str = r#"
 SELECT id, tenant_id, chain_id, address, label, source, status, watched_address_id, created_at, updated_at
 FROM custody_accounts
 WHERE tenant_id = $1
-  AND chain_id = $2
   AND source = 'pool'
   AND status = 'available'
 ORDER BY created_at ASC
@@ -663,21 +662,13 @@ pub async fn assign_custody_account(
     validate_custody_applicant_type(&request.applicant_type)?;
     let business_ref = request.business_ref.trim().to_string();
     validate_business_ref(&business_ref)?;
-    let chain_id = request.chain_id.ok_or_else(|| {
-        AppError::Validation("chain_id is required for custody assignment".to_string())
-    })?;
-    let chain = repositories::get_chain(pool, chain_id).await?;
     let address = request
         .address
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    if let Some(address) = address.as_deref() {
-        repositories::validate_address_for_chain(&chain, address)?;
-    }
     let request = AssignCustodyAccountRequest {
-        chain_id: Some(chain_id),
         business_ref,
         address,
         ..request
@@ -691,14 +682,22 @@ pub async fn assign_custody_account(
     let account =
         claim_or_create_account_for_assignment(&mut transaction, tenant_id, &request).await?;
     let account_id = account.id;
-    let watched_address_id = ensure_watched_address_for_custody_account(
+    let configs =
+        configs_for_account_in_transaction(&mut transaction, tenant_id, account.id).await?;
+    let watched_addresses = ensure_watched_addresses_for_custody_account(
         &mut transaction,
         tenant_id,
-        account.chain_id,
         &account.address,
         &request.business_ref,
+        &configs,
     )
     .await?;
+    let legacy_watched_address_id = watched_addresses
+        .first()
+        .map(|watched| watched.watched_address_id)
+        .ok_or_else(|| {
+            AppError::Validation("custody account has no watched addresses".to_string())
+        })?;
 
     let assignment_row =
         sqlx::query_as::<_, InsertedAssignmentRow>(INSERT_CUSTODY_ASSIGNMENT_QUERY)
@@ -707,7 +706,7 @@ pub async fn assign_custody_account(
             .bind(&request.applicant_type)
             .bind(&request.business_ref)
             .bind(&request.purpose)
-            .bind(watched_address_id)
+            .bind(legacy_watched_address_id)
             .fetch_optional(transaction.as_mut())
             .await
             .map_err(|error| AppError::Database(error.to_string()))?
@@ -720,7 +719,7 @@ pub async fn assign_custody_account(
 
     sqlx::query(MARK_CUSTODY_ACCOUNT_ASSIGNED_QUERY)
         .bind(account.id)
-        .bind(watched_address_id)
+        .bind(legacy_watched_address_id)
         .bind(tenant_id)
         .execute(transaction.as_mut())
         .await
@@ -735,7 +734,7 @@ pub async fn assign_custody_account(
         pool,
         tenant_id,
         CustodyAccountQuery {
-            chain_id: Some(chain_id),
+            chain_id: None,
             source: None,
             status: None,
         },
@@ -749,7 +748,7 @@ pub async fn assign_custody_account(
         pool,
         tenant_id,
         CustodyAssignmentQuery {
-            chain_id: Some(chain_id),
+            chain_id: None,
             status: Some(CUSTODY_ASSIGNMENT_STATUS_ACTIVE.to_string()),
             business_ref: Some(request.business_ref),
         },
@@ -762,12 +761,7 @@ pub async fn assign_custody_account(
     Ok(AssignCustodyAccountResponse {
         account,
         assignment,
-        watched_addresses: vec![CustodyAssignmentWatchedAddress {
-            chain_id,
-            chain_name: chain.name,
-            watched_address_id,
-            asset_ids: vec![],
-        }],
+        watched_addresses,
     })
 }
 
@@ -805,13 +799,9 @@ async fn claim_or_create_account_for_assignment(
     tenant_id: Uuid,
     request: &AssignCustodyAccountRequest,
 ) -> AppResult<CustodyAccountRow> {
-    let chain_id = request.chain_id.ok_or_else(|| {
-        AppError::Validation("chain_id is required for custody assignment".to_string())
-    })?;
     if request.source == CUSTODY_SOURCE_POOL {
         return sqlx::query_as::<_, CustodyAccountRow>(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY)
             .bind(tenant_id)
-            .bind(chain_id)
             .fetch_optional(transaction.as_mut())
             .await
             .map_err(|error| AppError::Database(error.to_string()))?
@@ -832,7 +822,6 @@ async fn claim_or_create_account_for_assignment(
 
     if let Some(existing) = existing {
         validate_assignable_custody_account(transaction, tenant_id, &existing).await?;
-        validate_legacy_assignment_chain(&existing, chain_id)?;
         if existing.source != CUSTODY_SOURCE_USER {
             return Err(AppError::Validation(
                 "custody account source does not match user request".to_string(),
@@ -841,10 +830,14 @@ async fn claim_or_create_account_for_assignment(
         return Ok(existing);
     }
 
+    let configs = request.chain_configs.as_deref().ok_or_else(|| {
+        AppError::Validation("chain_configs are required for new user custody account".to_string())
+    })?;
+    let legacy_chain_id = configs[0].chain_id;
     let inserted =
         sqlx::query_as::<_, CustodyAccountRow>(INSERT_USER_CUSTODY_ACCOUNT_FOR_ASSIGNMENT_QUERY)
             .bind(tenant_id)
-            .bind(chain_id)
+            .bind(legacy_chain_id)
             .bind(address)
             .bind(&normalized)
             .fetch_optional(transaction.as_mut())
@@ -852,6 +845,8 @@ async fn claim_or_create_account_for_assignment(
             .map_err(|error| AppError::Database(error.to_string()))?;
 
     if let Some(inserted) = inserted {
+        validate_and_insert_custody_chain_configs(transaction, tenant_id, inserted.id, configs)
+            .await?;
         return Ok(inserted);
     }
 
@@ -863,7 +858,6 @@ async fn claim_or_create_account_for_assignment(
             .await
             .map_err(|error| AppError::Database(error.to_string()))?;
     validate_assignable_custody_account(transaction, tenant_id, &existing).await?;
-    validate_legacy_assignment_chain(&existing, chain_id)?;
     if existing.source != CUSTODY_SOURCE_USER {
         return Err(AppError::Validation(
             "custody account source does not match user request".to_string(),
@@ -876,27 +870,27 @@ async fn custody_address_normalized_for_request(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AssignCustodyAccountRequest,
 ) -> AppResult<String> {
-    let chain_id = request.chain_id.ok_or_else(|| {
-        AppError::Validation("chain_id is required for custody assignment".to_string())
-    })?;
-    let chain_type = sqlx::query_scalar::<_, String>("SELECT chain_type FROM chains WHERE id = $1")
-        .bind(chain_id)
-        .fetch_one(transaction.as_mut())
-        .await
-        .map_err(|error| AppError::Database(error.to_string()))?;
     let address = request.address.as_deref().ok_or_else(|| {
         AppError::Validation("address is required for user custody account".to_string())
     })?;
-    Ok(normalize_custody_address_for_chain(&chain_type, address))
+    normalized_user_assignment_address(transaction, address, request.chain_configs.as_deref()).await
 }
 
-fn validate_legacy_assignment_chain(account: &CustodyAccountRow, chain_id: Uuid) -> AppResult<()> {
-    if account.chain_id != chain_id {
-        return Err(AppError::Validation(
-            "custody account chain does not match assignment chain".to_string(),
+async fn normalized_user_assignment_address(
+    transaction: &mut Transaction<'_, Postgres>,
+    address: &str,
+    configs: Option<&[CustodyAccountChainConfigRequest]>,
+) -> AppResult<String> {
+    if let Some(configs) = configs {
+        validate_custody_chain_config_shape(configs)?;
+        let chain_types = chain_types_for_configs(transaction, configs).await?;
+        let chain_type_values = chain_types.values().cloned().collect::<Vec<_>>();
+        return Ok(normalize_custody_account_address(
+            address,
+            &chain_type_values,
         ));
     }
-    Ok(())
+    Ok(normalize_custody_address(address))
 }
 
 async fn validate_assignable_custody_account(
@@ -928,13 +922,92 @@ async fn validate_assignable_custody_account(
     Ok(())
 }
 
-async fn ensure_watched_address_for_custody_account(
+async fn configs_for_account_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    account_id: Uuid,
+) -> AppResult<Vec<CustodyAccountChainConfig>> {
+    let account_ids = vec![account_id];
+    let rows =
+        sqlx::query_as::<_, CustodyAccountChainConfigRow>(LIST_CUSTODY_ACCOUNT_CONFIGS_QUERY)
+            .bind(tenant_id)
+            .bind(&account_ids)
+            .fetch_all(transaction.as_mut())
+            .await
+            .map_err(|error| AppError::Database(error.to_string()))?;
+
+    let configs = rows
+        .into_iter()
+        .map(|row| CustodyAccountChainConfig {
+            id: row.id,
+            chain_id: row.chain_id,
+            chain_name: row.chain_name,
+            asset_ids: row.asset_ids,
+            asset_symbols: row.asset_symbols,
+        })
+        .collect::<Vec<_>>();
+
+    if configs.is_empty() {
+        return Err(AppError::Validation(
+            "custody account has no chain configs".to_string(),
+        ));
+    }
+
+    Ok(configs)
+}
+
+async fn ensure_watched_addresses_for_custody_account(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    address: &str,
+    business_ref: &str,
+    configs: &[CustodyAccountChainConfig],
+) -> AppResult<Vec<CustodyAssignmentWatchedAddress>> {
+    let mut watched_addresses = Vec::new();
+
+    for config in configs {
+        repositories::validate_assets_for_chain(
+            transaction.as_mut(),
+            config.chain_id,
+            &config.asset_ids,
+        )
+        .await?;
+        let chain = repositories::get_chain_in_transaction(transaction, config.chain_id).await?;
+        repositories::validate_address_for_chain(&chain, address)?;
+        let watched_address_id = ensure_watched_address_for_chain_config(
+            transaction,
+            tenant_id,
+            config.chain_id,
+            address,
+            business_ref,
+            &config.asset_ids,
+        )
+        .await?;
+        watched_addresses.push(CustodyAssignmentWatchedAddress {
+            chain_id: config.chain_id,
+            chain_name: config.chain_name.clone(),
+            watched_address_id,
+            asset_ids: config.asset_ids.clone(),
+        });
+    }
+
+    Ok(watched_addresses)
+}
+
+async fn ensure_watched_address_for_chain_config(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
     chain_id: Uuid,
     address: &str,
     business_ref: &str,
+    asset_ids: &[Uuid],
 ) -> AppResult<Uuid> {
+    if asset_ids.is_empty() {
+        return Err(AppError::Validation(
+            "custody chain config requires at least one asset".to_string(),
+        ));
+    }
+
     let (normalized, chain_type) =
         custody_address_normalized_for_chain_id(transaction, chain_id, address).await?;
     let existing = sqlx::query_as::<_, WatchedAddress>(ENSURE_WATCHED_ADDRESS_SELECT_QUERY)
@@ -945,39 +1018,46 @@ async fn ensure_watched_address_for_custody_account(
         .fetch_optional(transaction.as_mut())
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
-    let asset_id = native_asset_id_for_chain(transaction, chain_id).await?;
 
-    if let Some(existing) = existing {
+    let watched_address_id = if let Some(existing) = existing {
         if existing.status == "active" {
-            ensure_watched_address_asset(transaction, existing.id, asset_id).await?;
-            return Ok(existing.id);
+            existing.id
+        } else {
+            sqlx::query_as::<_, WatchedAddress>(ENSURE_WATCHED_ADDRESS_UPDATE_QUERY)
+                .bind(existing.id)
+                .bind(tenant_id)
+                .fetch_one(transaction.as_mut())
+                .await
+                .map_err(|error| AppError::Database(error.to_string()))?
+                .id
         }
-        let active = sqlx::query_as::<_, WatchedAddress>(ENSURE_WATCHED_ADDRESS_UPDATE_QUERY)
-            .bind(existing.id)
-            .bind(tenant_id)
-            .fetch_one(transaction.as_mut())
-            .await
-            .map_err(|error| AppError::Database(error.to_string()))?;
-        ensure_watched_address_asset(transaction, active.id, asset_id).await?;
-        return Ok(active.id);
+    } else {
+        let request = CreateWatchedAddressRequest {
+            tenant_id: Some(tenant_id),
+            chain_id,
+            address: address.to_string(),
+            label: Some(format!("托管地址 / {business_ref}")),
+            priority: "normal".to_string(),
+            scan_interval_seconds: 60,
+            transfer_filter_enabled: true,
+            balance_change_filter_enabled: true,
+            status: "active".to_string(),
+            asset_ids: asset_ids.to_vec(),
+        };
+        repositories::create_watched_address_in_transaction(
+            transaction,
+            request,
+            asset_ids.to_vec(),
+        )
+        .await?
+        .id
+    };
+
+    for asset_id in asset_ids {
+        ensure_watched_address_asset(transaction, watched_address_id, *asset_id).await?;
     }
 
-    let request = CreateWatchedAddressRequest {
-        tenant_id: Some(tenant_id),
-        chain_id,
-        address: address.to_string(),
-        label: Some(format!("托管地址 / {business_ref}")),
-        priority: "normal".to_string(),
-        scan_interval_seconds: 60,
-        transfer_filter_enabled: true,
-        balance_change_filter_enabled: true,
-        status: "active".to_string(),
-        asset_ids: vec![asset_id],
-    };
-    let watched =
-        repositories::create_watched_address_in_transaction(transaction, request, vec![asset_id])
-            .await?;
-    Ok(watched.id)
+    Ok(watched_address_id)
 }
 
 async fn custody_address_normalized_for_chain_id(
@@ -1006,20 +1086,6 @@ async fn ensure_watched_address_asset(
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
     Ok(())
-}
-
-async fn native_asset_id_for_chain(
-    transaction: &mut Transaction<'_, Postgres>,
-    chain_id: Uuid,
-) -> AppResult<Uuid> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM assets WHERE chain_id = $1 AND asset_type = 'native' AND status = 'active' LIMIT 1",
-    )
-    .bind(chain_id)
-    .fetch_optional(transaction.as_mut())
-    .await
-    .map_err(|error| AppError::Database(error.to_string()))?
-    .ok_or_else(|| AppError::NotFound("native asset".to_string()))
 }
 
 fn custody_account_from_row(
@@ -1163,7 +1229,6 @@ mod tests {
         assert!(LIST_CUSTODY_ACCOUNTS_QUERY.contains("fallback_config"));
         assert!(LIST_CUSTODY_ACCOUNTS_QUERY.contains("AND ca.chain_id = $2"));
         assert!(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("source = 'pool'"));
-        assert!(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("chain_id = $2"));
     }
 
     #[test]
@@ -1214,27 +1279,23 @@ mod tests {
     }
 
     #[test]
-    fn existing_user_assignment_rejects_legacy_chain_mismatch_until_multi_chain_assignment() {
-        let now = chrono::Utc::now();
-        let account = CustodyAccountRow {
-            id: Uuid::from_u128(10),
-            tenant_id: Uuid::from_u128(11),
-            chain_id: Uuid::from_u128(12),
-            address: "0x0000000000000000000000000000000000000001".to_string(),
-            label: None,
-            source: CUSTODY_SOURCE_USER.to_string(),
-            status: CUSTODY_ACCOUNT_STATUS_ASSIGNED.to_string(),
-            watched_address_id: None,
-            created_at: now,
-            updated_at: now,
-        };
+    fn user_assignment_uses_config_normalization_for_new_accounts() {
+        let source = include_str!("custody_accounts.rs");
+        let normalized_body = source
+            .split("async fn normalized_user_assignment_address")
+            .nth(1)
+            .expect("normalized_user_assignment_address should exist")
+            .split("async fn validate_assignable_custody_account")
+            .next()
+            .expect("validate_assignable_custody_account should follow normalization");
 
-        assert!(validate_legacy_assignment_chain(&account, Uuid::from_u128(12)).is_ok());
-        assert!(validate_legacy_assignment_chain(&account, Uuid::from_u128(13)).is_err());
+        assert!(normalized_body.contains("chain_types_for_configs"));
+        assert!(normalized_body.contains("normalize_custody_account_address"));
+        assert!(normalized_body.contains("normalize_custody_address"));
     }
 
     #[test]
-    fn existing_user_assignment_wires_legacy_chain_guard() {
+    fn new_user_assignment_requires_configs_and_persists_them() {
         let source = include_str!("custody_accounts.rs");
         let assignment_body = source
             .split("async fn claim_or_create_account_for_assignment")
@@ -1244,11 +1305,55 @@ mod tests {
             .next()
             .expect("custody_address_normalized_for_request should follow assignment selection");
 
+        assert!(assignment_body.contains("chain_configs are required for new user custody account"));
+        assert!(assignment_body.contains("validate_and_insert_custody_chain_configs"));
+    }
+
+    #[test]
+    fn custody_assignment_queries_apply_all_configured_assets() {
+        assert!(LIST_CUSTODY_ACCOUNT_CONFIGS_QUERY.contains("asset_ids"));
+        assert!(ENSURE_WATCHED_ADDRESS_ASSET_QUERY.contains("ON CONFLICT DO NOTHING"));
+        assert!(MARK_CUSTODY_ACCOUNT_ASSIGNED_QUERY.contains("watched_address_id = $2"));
+        assert!(INSERT_CUSTODY_ASSIGNMENT_QUERY.contains("ON CONFLICT DO NOTHING"));
+        assert!(CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("source = 'pool'"));
+        assert!(!CLAIM_AVAILABLE_POOL_ACCOUNT_QUERY.contains("chain_id = $2"));
+    }
+
+    #[test]
+    fn custody_assignment_uses_saved_configs_for_watched_addresses() {
+        let source = include_str!("custody_accounts.rs");
+        let assign_body = source
+            .split("pub async fn assign_custody_account")
+            .nth(1)
+            .expect("assign_custody_account should exist")
+            .split("pub async fn release_custody_assignment")
+            .next()
+            .expect("release_custody_assignment should follow assign");
+
+        assert!(assign_body.contains("configs_for_account_in_transaction"));
+        assert!(assign_body.contains("ensure_watched_addresses_for_custody_account"));
+        assert!(assign_body.contains("watched_addresses"));
+        assert!(!assign_body.contains("ensure_watched_address_for_custody_account("));
+    }
+
+    #[test]
+    fn custody_account_normalization_prefers_evm_when_any_config_is_evm() {
+        let evm_and_base = vec!["evm".to_string(), "evm".to_string()];
         assert_eq!(
-            assignment_body
-                .matches("validate_legacy_assignment_chain(&existing, chain_id)?")
-                .count(),
-            2
+            normalize_custody_account_address(
+                "  0xABCDEF0000000000000000000000000000000001  ",
+                &evm_and_base,
+            ),
+            "0xabcdef0000000000000000000000000000000001"
+        );
+
+        let tron_only = vec!["tron".to_string()];
+        assert_eq!(
+            normalize_custody_account_address(
+                "  TABcDEF0000000000000000000000000000  ",
+                &tron_only
+            ),
+            "TABcDEF0000000000000000000000000000"
         );
     }
 
