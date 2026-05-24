@@ -9,7 +9,8 @@ type LoginPageProps = {
   onLogin: (session: LoginResponse) => void;
 };
 
-const loginHighlights = ['Tenant scoped', 'RPC failover', 'Outbox replay'];
+const loginHighlights = ['Tenant scoped', 'Provider aware', 'Auditable outbox'];
+const loginProofs = ['多链监听目标集中管理', 'Provider 与事件账本统一审计', '通知出站和站内回执闭环追踪'];
 
 export function LoginPage({ onLogin }: LoginPageProps) {
   const [loading, setLoading] = useState(false);
@@ -29,25 +30,22 @@ export function LoginPage({ onLogin }: LoginPageProps) {
 
   return (
     <div className="login-page">
-      <div className="login-orbit" />
       <div className="login-shell">
         <section className="login-hero-panel">
           <div className="login-brand-row">
             <span className="brand-mark">CL</span>
             <Text strong>Coin Listener</Text>
           </div>
-          <Title heading={1} className="login-hero-title">Chain operations without blind spots</Title>
+          <Title heading={1} className="login-hero-title">Commercial control for on-chain operations</Title>
           <Text className="login-hero-copy">
             面向区块链运维的监听控制台：地址、Provider、事件账本与通知出站保持在同一个可信工作面。
           </Text>
           <Space wrap className="login-highlight-row">
-            {loginHighlights.map(item => <Tag key={item} color="cyan">{item}</Tag>)}
+            {loginHighlights.map(item => <Tag key={item}>{item}</Tag>)}
           </Space>
-          <div className="login-signal-card">
-            <span>Control plane</span>
-            <strong>ready</strong>
-            <Text type="tertiary">Watch targets, event ledger, notify outbox</Text>
-          </div>
+          <ul className="login-proof-list">
+            {loginProofs.map(item => <li key={item}>{item}</li>)}
+          </ul>
         </section>
 
         <Card className="login-card">

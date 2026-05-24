@@ -9,63 +9,92 @@ body,
 
 :root {
   color-scheme: light;
-  --app-console-blue: oklch(56% 0.18 251deg);
-  --app-console-cyan: oklch(72% 0.14 214deg);
-  --app-console-green: oklch(64% 0.16 151deg);
-  --app-console-amber: oklch(72% 0.16 79deg);
-  --app-console-red: oklch(61% 0.2 28deg);
-  --app-ink-900: oklch(22% 0.04 252deg);
-  --app-ink-700: oklch(38% 0.035 252deg);
-  --app-ink-500: oklch(55% 0.03 252deg);
-  --app-mist-50: oklch(98% 0.008 240deg);
-  --app-mist-100: oklch(96% 0.012 240deg);
-  --app-mist-200: oklch(91% 0.018 240deg);
-  --app-surface-base: color-mix(in srgb, var(--semi-color-bg-0) 94%, var(--app-mist-100));
-  --app-surface-raised: color-mix(in srgb, var(--semi-color-bg-1) 92%, white 8%);
-  --app-surface-glass: color-mix(in srgb, var(--semi-color-bg-1) 88%, transparent);
-  --app-surface-border: color-mix(in srgb, var(--semi-color-border) 78%, var(--app-console-blue) 22%);
-  --app-focus-ring: 0 0 0 3px color-mix(in srgb, var(--app-console-cyan) 32%, transparent);
-  --app-hover-bg: color-mix(in srgb, var(--app-console-blue) 7%, var(--semi-color-bg-1));
-  --app-active-bg: color-mix(in srgb, var(--app-console-cyan) 14%, var(--semi-color-bg-1));
-  --app-shell-sidebar-bg: linear-gradient(180deg, #07111f 0%, #0a1728 48%, #0d1a2d 100%);
-  --app-shell-sidebar-border: color-mix(in srgb, var(--app-console-cyan) 24%, transparent);
-  --app-sidebar-text-primary: oklch(94% 0.035 222deg);
-  --app-sidebar-text-secondary: color-mix(in srgb, var(--app-sidebar-text-primary) 74%, transparent);
-  --app-sidebar-selected-bg: color-mix(in srgb, var(--app-console-cyan) 16%, transparent);
-  --app-sidebar-selected-text: oklch(96% 0.045 214deg);
+  --app-color-background: #FAFAFA;
+  --app-color-foreground: #0F172A;
+  --app-color-muted: #F1F5F9;
+  --app-color-muted-foreground: #64748B;
+  --app-color-accent: #0052FF;
+  --app-color-accent-secondary: #4D7CFF;
+  --app-color-accent-foreground: #FFFFFF;
+  --app-color-border: #E2E8F0;
+  --app-color-card: #FFFFFF;
+  --app-color-ring: #0052FF;
+  --app-font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+  --app-font-display: Calistoga, Georgia, "Times New Roman", "PingFang SC", "Microsoft YaHei", serif;
+  --app-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --app-console-blue: var(--app-color-accent);
+  --app-console-cyan: var(--app-color-accent-secondary);
+  --app-console-green: #16A34A;
+  --app-console-amber: #D97706;
+  --app-console-red: #DC2626;
+  --app-ink-900: var(--app-color-foreground);
+  --app-ink-700: #334155;
+  --app-ink-500: var(--app-color-muted-foreground);
+  --app-mist-50: var(--app-color-background);
+  --app-mist-100: var(--app-color-muted);
+  --app-mist-200: var(--app-color-border);
+  --app-surface-base: var(--app-color-background);
+  --app-surface-raised: var(--app-color-card);
+  --app-surface-glass: rgba(255, 255, 255, 0.94);
+  --app-surface-border: var(--app-color-border);
+  --app-focus-ring: 0 0 0 3px color-mix(in srgb, var(--app-color-ring) 18%, transparent);
+  --app-hover-bg: color-mix(in srgb, var(--app-color-accent) 6%, var(--app-color-card));
+  --app-active-bg: color-mix(in srgb, var(--app-color-accent) 10%, var(--app-color-card));
+  --app-shell-sidebar-bg: var(--app-color-card);
+  --app-shell-sidebar-border: var(--app-color-border);
+  --app-sidebar-text-primary: var(--app-color-foreground);
+  --app-sidebar-text-secondary: var(--app-color-muted-foreground);
+  --app-sidebar-selected-bg: color-mix(in srgb, var(--app-color-accent) 9%, var(--app-color-card));
+  --app-sidebar-selected-text: var(--app-color-accent);
   --app-content-bg: var(--app-surface-base);
-  --app-content-bg-accent-a: color-mix(in srgb, var(--app-console-cyan) 12%, transparent);
-  --app-content-bg-accent-b: color-mix(in srgb, var(--app-console-blue) 11%, transparent);
+  --app-content-bg-accent-a: transparent;
+  --app-content-bg-accent-b: transparent;
   --app-card-bg: var(--app-surface-glass);
   --app-card-bg-strong: var(--app-surface-raised);
-  --app-text-primary: var(--semi-color-text-0);
-  --app-text-secondary: color-mix(in srgb, var(--semi-color-text-1) 92%, var(--app-ink-700));
-  --app-text-tertiary: color-mix(in srgb, var(--semi-color-text-2) 86%, var(--app-ink-500));
-  --app-text-inverse: var(--app-sidebar-text-primary);
+  --app-text-primary: var(--app-color-foreground);
+  --app-text-secondary: var(--app-ink-700);
+  --app-text-tertiary: var(--app-color-muted-foreground);
+  --app-text-inverse: var(--app-color-accent-foreground);
   --app-border-subtle: var(--app-surface-border);
-  --app-shadow-soft: 0 18px 54px rgba(15, 23, 42, 0.08);
-  --app-shadow-panel: 0 14px 42px rgba(15, 23, 42, 0.1);
-  --app-login-panel-bg: rgba(7, 17, 31, 0.76);
-  --app-login-text-primary: oklch(94% 0.035 222deg);
-  --app-login-text-secondary: color-mix(in srgb, var(--app-login-text-primary) 74%, transparent);
+  --app-shadow-soft: 0 14px 36px rgba(15, 23, 42, 0.06);
+  --app-shadow-panel: 0 22px 60px rgba(15, 23, 42, 0.1);
+  --app-login-panel-bg: var(--app-color-card);
+  --app-login-text-primary: var(--app-color-foreground);
+  --app-login-text-secondary: var(--app-color-muted-foreground);
 }
 
 body[theme-mode='dark'] {
   color-scheme: dark;
-  --app-surface-base: color-mix(in srgb, #07111f 82%, var(--semi-color-bg-0));
-  --app-surface-raised: color-mix(in srgb, #0c1a2f 72%, var(--semi-color-bg-1));
-  --app-surface-glass: color-mix(in srgb, #0f2038 72%, transparent);
-  --app-surface-border: color-mix(in srgb, var(--app-console-cyan) 26%, rgba(148, 163, 184, 0.16));
+  --app-color-background: #0B1120;
+  --app-color-foreground: #F8FAFC;
+  --app-color-muted: #162033;
+  --app-color-muted-foreground: #94A3B8;
+  --app-color-border: rgba(148, 163, 184, 0.22);
+  --app-color-card: #111827;
+  --app-surface-base: #0B1120;
+  --app-surface-raised: #111827;
+  --app-surface-glass: rgba(17, 24, 39, 0.94);
+  --app-surface-border: rgba(148, 163, 184, 0.2);
+  --app-hover-bg: color-mix(in srgb, var(--app-color-accent-secondary) 12%, transparent);
+  --app-active-bg: color-mix(in srgb, var(--app-color-accent) 18%, transparent);
+  --app-shell-sidebar-bg: #0F172A;
+  --app-shell-sidebar-border: rgba(148, 163, 184, 0.18);
+  --app-sidebar-text-primary: #F8FAFC;
+  --app-sidebar-text-secondary: #CBD5E1;
+  --app-sidebar-selected-bg: color-mix(in srgb, var(--app-color-accent) 18%, transparent);
+  --app-sidebar-selected-text: #FFFFFF;
   --app-content-bg: var(--app-surface-base);
-  --app-content-bg-accent-a: color-mix(in srgb, var(--app-console-cyan) 16%, transparent);
-  --app-content-bg-accent-b: color-mix(in srgb, var(--app-console-blue) 18%, transparent);
   --app-card-bg: var(--app-surface-glass);
   --app-card-bg-strong: var(--app-surface-raised);
-  --app-text-secondary: color-mix(in srgb, var(--semi-color-text-1) 94%, white 6%);
-  --app-text-tertiary: color-mix(in srgb, var(--semi-color-text-2) 88%, white 12%);
-  --app-shadow-soft: 0 22px 70px rgba(0, 0, 0, 0.28);
-  --app-shadow-panel: 0 18px 56px rgba(0, 0, 0, 0.34);
-  --app-login-panel-bg: rgba(7, 17, 31, 0.8);
+  --app-text-primary: var(--app-color-foreground);
+  --app-text-secondary: #CBD5E1;
+  --app-text-tertiary: var(--app-color-muted-foreground);
+  --app-border-subtle: var(--app-surface-border);
+  --app-shadow-soft: 0 18px 50px rgba(0, 0, 0, 0.28);
+  --app-shadow-panel: 0 24px 70px rgba(0, 0, 0, 0.38);
+  --app-login-panel-bg: var(--app-card-bg-strong);
+  --app-login-text-primary: var(--app-text-primary);
+  --app-login-text-secondary: var(--app-text-tertiary);
 }
 
 * {
@@ -74,36 +103,43 @@ body[theme-mode='dark'] {
 
 body {
   color: var(--app-text-primary);
-  background:
-    radial-gradient(circle at 14% -4%, var(--app-content-bg-accent-a), transparent 34%),
-    radial-gradient(circle at 86% 2%, var(--app-content-bg-accent-b), transparent 32%),
-    var(--app-content-bg);
+  background: var(--app-content-bg);
+  font-family: var(--app-font-sans);
   text-rendering: geometricPrecision;
 }
 
 body::selection,
 ::selection {
   color: var(--app-text-inverse);
-  background: color-mix(in srgb, var(--app-console-blue) 72%, var(--app-console-cyan));
+  background: var(--app-color-accent);
 }
 
 :focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--app-console-blue) 72%, var(--app-console-cyan));
+  outline: 2px solid var(--app-color-ring);
   outline-offset: 2px;
   box-shadow: var(--app-focus-ring);
+}
+
+.semi-typography,
+.semi-button,
+.semi-input,
+.semi-select,
+.semi-table,
+.semi-form {
+  font-family: inherit;
 }
 
 .app-shell {
   height: 100vh;
   min-width: 0;
-  background: transparent;
+  background: var(--app-content-bg);
 }
 
 .app-sider {
   min-height: 100vh;
   background: var(--app-shell-sidebar-bg);
   border-right: 1px solid var(--app-shell-sidebar-border);
-  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.03);
+  box-shadow: 8px 0 28px rgba(15, 23, 42, 0.04);
 }
 
 .brand {
@@ -113,23 +149,23 @@ body::selection,
   padding: 0 18px;
   color: var(--app-sidebar-text-primary);
   font-weight: 800;
-  letter-spacing: 0.01em;
+  letter-spacing: -0.01em;
 }
 
 .brand-mark {
   width: 30px;
   height: 30px;
   margin-right: 10px;
-  border: 1px solid color-mix(in srgb, var(--app-console-cyan) 68%, transparent);
-  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--app-color-accent) 26%, transparent);
+  border-radius: 10px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #04111f;
-  background: linear-gradient(135deg, var(--app-console-cyan), var(--app-console-blue));
-  box-shadow: 0 0 24px color-mix(in srgb, var(--app-console-cyan) 34%, transparent);
+  color: var(--app-color-accent-foreground);
+  background: linear-gradient(135deg, #0052FF, #4D7CFF);
   font-size: 12px;
   font-weight: 900;
+  letter-spacing: -0.02em;
 }
 
 .shell-identity,
@@ -152,9 +188,13 @@ body::selection,
 .shell-meta {
   margin: 0 14px 14px;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--app-console-cyan) 16%, transparent);
+  border: 1px solid var(--app-shell-sidebar-border);
   border-radius: 16px;
-  background: color-mix(in srgb, #06111f 70%, transparent);
+  background: color-mix(in srgb, var(--app-color-muted) 70%, transparent);
+}
+
+body[theme-mode='dark'] .shell-meta {
+  background: rgba(15, 23, 42, 0.74);
 }
 
 .shell-meta-value.semi-typography {
@@ -174,37 +214,63 @@ body::selection,
   padding: 0;
 }
 
+.chain-nav .semi-navigation-item,
+.chain-nav .semi-navigation-item-icon,
+.chain-nav .semi-navigation-item-text,
+.chain-nav .semi-navigation-item svg {
+  color: var(--app-sidebar-text-secondary);
+}
+
 .chain-nav .semi-navigation-item {
   position: relative;
   margin: 2px 0;
-  color: var(--app-sidebar-text-secondary);
+  border: 1px solid transparent;
   border-radius: 12px;
+  font-weight: 600;
+}
+
+.chain-nav .semi-navigation-item svg {
+  fill: currentColor;
+  stroke: currentColor;
 }
 
 .chain-nav .semi-navigation-item::before {
   content: '';
   position: absolute;
   left: 2px;
-  top: 8px;
-  bottom: 8px;
+  top: 9px;
+  bottom: 9px;
   width: 3px;
   border-radius: 999px;
   background: transparent;
 }
 
-.chain-nav .semi-navigation-item:hover {
+.chain-nav .semi-navigation-item:hover,
+.chain-nav .semi-navigation-item:hover .semi-navigation-item-icon,
+.chain-nav .semi-navigation-item:hover .semi-navigation-item-text,
+.chain-nav .semi-navigation-item:hover svg {
   color: var(--app-sidebar-text-primary);
-  background: color-mix(in srgb, var(--app-console-blue) 10%, transparent);
+}
+
+.chain-nav .semi-navigation-item:hover {
+  background: color-mix(in srgb, var(--app-color-accent) 6%, transparent);
+  border-color: color-mix(in srgb, var(--app-color-accent) 12%, transparent);
+}
+
+.chain-nav .semi-navigation-item-selected,
+.chain-nav .semi-navigation-item-selected .semi-navigation-item-icon,
+.chain-nav .semi-navigation-item-selected .semi-navigation-item-text,
+.chain-nav .semi-navigation-item-selected svg {
+  color: var(--app-sidebar-selected-text);
 }
 
 .chain-nav .semi-navigation-item-selected {
-  color: var(--app-sidebar-selected-text);
   background: var(--app-sidebar-selected-bg);
+  border-color: color-mix(in srgb, var(--app-color-accent) 18%, transparent);
 }
 
 .chain-nav .semi-navigation-item-selected::before {
-  background: linear-gradient(180deg, var(--app-console-cyan), var(--app-console-blue));
-  box-shadow: 0 0 16px color-mix(in srgb, var(--app-console-cyan) 48%, transparent);
+  background: linear-gradient(180deg, #0052FF, #4D7CFF);
 }
 
 .app-header {
@@ -215,9 +281,9 @@ body::selection,
   gap: 16px;
   padding: 0 24px;
   color: var(--app-text-primary);
-  background: color-mix(in srgb, var(--app-content-bg) 84%, transparent);
+  background: color-mix(in srgb, var(--app-card-bg-strong) 92%, transparent);
   border-bottom: 1px solid var(--app-border-subtle);
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(14px);
 }
 
 .shell-header-copy {
@@ -262,8 +328,8 @@ body::selection,
 }
 
 .shell-logout-button:hover {
-  color: var(--app-text-primary);
-  border-color: color-mix(in srgb, var(--app-console-blue) 46%, var(--app-border-subtle));
+  color: var(--app-color-accent);
+  border-color: color-mix(in srgb, var(--app-color-accent) 32%, var(--app-border-subtle));
 }
 
 .app-content {
@@ -276,22 +342,8 @@ body::selection,
   background: var(--app-content-bg);
 }
 
-.app-content::before {
-  content: '';
-  position: fixed;
-  inset: 68px 0 0 0;
-  pointer-events: none;
-  opacity: 0.38;
-  background-image:
-    linear-gradient(color-mix(in srgb, var(--app-console-blue) 9%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--app-console-blue) 8%, transparent) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: linear-gradient(180deg, #000 0%, transparent 72%);
-}
-
 .content-stack {
   position: relative;
-  z-index: 1;
   width: 100%;
 }
 
@@ -307,7 +359,7 @@ body::selection,
 
 .table-cell-mono,
 .detail-json {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-family: var(--app-font-mono);
   font-variant-numeric: tabular-nums;
 }
 
@@ -359,67 +411,16 @@ body::selection,
 }
 
 .login-page {
-  position: relative;
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 32px;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 18% 12%, rgba(34, 211, 238, 0.2), transparent 28%),
-    radial-gradient(circle at 86% 18%, rgba(59, 130, 246, 0.18), transparent 30%),
-    linear-gradient(135deg, #06111f 0%, #081827 52%, #0d1a2f 100%);
-}
-
-.login-page::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  opacity: 0.24;
-  background-image:
-    linear-gradient(rgba(125, 211, 252, 0.16) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(125, 211, 252, 0.12) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(circle, #000 0%, transparent 76%);
-}
-
-.login-orbit {
-  position: absolute;
-  width: 560px;
-  height: 560px;
-  border: 1px solid rgba(34, 211, 238, 0.18);
-  border-radius: 50%;
-  box-shadow: inset 0 0 80px rgba(14, 165, 233, 0.12);
-  transform: rotate(-18deg);
-}
-
-.login-orbit::before,
-.login-orbit::after {
-  content: '';
-  position: absolute;
-  border-radius: 999px;
-  background: var(--app-console-cyan);
-  box-shadow: 0 0 28px rgba(34, 211, 238, 0.72);
-}
-
-.login-orbit::before {
-  width: 10px;
-  height: 10px;
-  top: 74px;
-  right: 116px;
-}
-
-.login-orbit::after {
-  width: 7px;
-  height: 7px;
-  left: 92px;
-  bottom: 132px;
+  background: var(--app-color-background);
 }
 
 .login-shell {
-  position: relative;
-  z-index: 1;
   width: min(1080px, 100%);
   display: grid;
   grid-template-columns: minmax(0, 1.08fr) 420px;
@@ -429,11 +430,10 @@ body::selection,
 
 .login-hero-panel,
 .login-card {
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid var(--app-color-border);
   border-radius: 28px;
   background: var(--app-login-panel-bg);
-  box-shadow: 0 34px 110px rgba(0, 0, 0, 0.34);
-  backdrop-filter: blur(18px);
+  box-shadow: var(--app-shadow-panel);
 }
 
 .login-hero-panel {
@@ -445,7 +445,7 @@ body::selection,
   display: flex;
   align-items: center;
   gap: 10px;
-  color: oklch(91% 0.075 214deg);
+  color: var(--app-login-text-primary);
 }
 
 .login-brand-row .brand-mark {
@@ -456,9 +456,10 @@ body::selection,
   max-width: 560px;
   margin: 48px 0 18px;
   color: var(--app-login-text-primary);
-  font-size: clamp(40px, 6vw, 76px);
-  line-height: 0.92;
-  letter-spacing: -0.05em;
+  font-family: var(--app-font-display);
+  font-size: clamp(40px, 5.6vw, 72px);
+  line-height: 0.96;
+  letter-spacing: -0.045em;
 }
 
 .login-hero-copy.semi-typography {
@@ -473,25 +474,35 @@ body::selection,
   margin-top: 28px;
 }
 
-.login-signal-card {
-  width: min(360px, 100%);
+.login-highlight-row .semi-tag {
+  border-color: color-mix(in srgb, var(--app-color-accent) 18%, var(--app-color-border));
+  color: var(--app-color-accent);
+  background: color-mix(in srgb, var(--app-color-accent) 8%, var(--app-color-card));
+}
+
+.login-proof-list {
+  width: min(380px, 100%);
   margin-top: 52px;
-  padding: 18px;
-  border: 1px solid rgba(34, 211, 238, 0.24);
-  border-radius: 22px;
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.16), rgba(15, 23, 42, 0.74));
+  padding: 0;
+  list-style: none;
+  color: var(--app-login-text-secondary);
 }
 
-.login-signal-card span,
-.login-signal-card strong {
-  display: block;
+.login-proof-list li {
+  display: flex;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--app-color-border);
 }
 
-.login-signal-card strong {
-  margin: 4px 0;
-  color: oklch(86% 0.105 214deg);
-  font-size: 32px;
-  line-height: 1;
+.login-proof-list li::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  margin-top: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--app-color-accent);
 }
 
 .login-card {
@@ -520,13 +531,16 @@ body::selection,
 }
 
 .login-form .semi-input-wrapper {
-  background: rgba(15, 23, 42, 0.74);
-  border-color: rgba(148, 163, 184, 0.28);
+  background: var(--app-color-card);
+  border-color: var(--app-color-border);
+}
+
+body[theme-mode='dark'] .login-form .semi-input-wrapper {
+  background: rgba(15, 23, 42, 0.84);
 }
 
 .page-scaffold {
   position: relative;
-  z-index: 1;
   width: 100%;
   min-width: 0;
 }
@@ -546,7 +560,7 @@ body::selection,
 .page-eyebrow.semi-typography {
   display: inline-flex;
   margin-bottom: 6px;
-  color: var(--app-console-blue);
+  color: var(--app-color-accent);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -575,7 +589,6 @@ body::selection,
   color: var(--app-text-primary);
   background: var(--app-card-bg);
   box-shadow: var(--app-shadow-soft);
-  backdrop-filter: blur(16px);
 }
 
 .filter-panel .semi-card-header,
@@ -598,7 +611,7 @@ body::selection,
   width: 6px;
   height: 18px;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--app-console-cyan), var(--app-console-blue));
+  background: linear-gradient(180deg, #0052FF, #4D7CFF);
 }
 
 .surface-actions {
@@ -646,7 +659,7 @@ body::selection,
   overflow: hidden;
   border: 1px solid var(--app-border-subtle);
   color: var(--app-text-primary);
-  background: linear-gradient(180deg, var(--app-card-bg-strong), var(--app-card-bg));
+  background: var(--app-card-bg-strong);
 }
 
 .metric-card::before {
@@ -656,15 +669,15 @@ body::selection,
   top: 0;
   bottom: 0;
   width: 4px;
-  background: color-mix(in srgb, var(--app-console-blue) 54%, var(--app-border-subtle));
+  background: color-mix(in srgb, var(--app-color-accent) 62%, var(--app-border-subtle));
 }
 
 .metric-card-success::before { background: var(--app-console-green); }
 .metric-card-warning::before { background: var(--app-console-amber); }
 .metric-card-danger::before { background: var(--app-console-red); }
-.metric-card-success { border-color: color-mix(in srgb, var(--app-console-green) 38%, var(--app-border-subtle)); }
-.metric-card-warning { border-color: color-mix(in srgb, var(--app-console-amber) 40%, var(--app-border-subtle)); }
-.metric-card-danger { border-color: color-mix(in srgb, var(--app-console-red) 40%, var(--app-border-subtle)); }
+.metric-card-success { border-color: color-mix(in srgb, var(--app-console-green) 34%, var(--app-border-subtle)); }
+.metric-card-warning { border-color: color-mix(in srgb, var(--app-console-amber) 36%, var(--app-border-subtle)); }
+.metric-card-danger { border-color: color-mix(in srgb, var(--app-console-red) 36%, var(--app-border-subtle)); }
 
 .metric-title.semi-typography {
   color: var(--app-text-tertiary);
@@ -697,7 +710,7 @@ body::selection,
 
 .data-table .semi-table-thead > .semi-table-row > .semi-table-row-head {
   color: var(--app-text-secondary);
-  background: color-mix(in srgb, var(--app-surface-raised) 88%, var(--app-console-blue) 4%);
+  background: color-mix(in srgb, var(--app-surface-raised) 88%, var(--app-color-muted));
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.01em;
@@ -759,14 +772,14 @@ body::selection,
   width: 56px;
   height: 2px;
   border-radius: 999px;
-  background: linear-gradient(90deg, transparent, var(--app-console-cyan));
+  background: linear-gradient(90deg, transparent, var(--app-color-accent-secondary));
 }
 
 .dashboard-step-index {
   position: absolute;
   right: 16px;
   top: 12px;
-  color: color-mix(in srgb, var(--app-text-tertiary) 36%, transparent);
+  color: color-mix(in srgb, var(--app-text-tertiary) 34%, transparent);
   font-size: 32px;
   font-weight: 900;
 }

@@ -37,7 +37,7 @@ export function AppShell<PageKey extends string>({
           <span className="brand-mark">CL</span>
           <span className="shell-identity">
             <span>Coin Listener</span>
-            <Text className="brand-subtitle">Chain Ops Console</Text>
+            <Text className="brand-subtitle">Operations Console</Text>
           </span>
         </div>
         <div className="shell-meta">
@@ -55,7 +55,7 @@ export function AppShell<PageKey extends string>({
         <Header className="app-header">
           <div className="shell-header-copy">
             <Title heading={4} style={{ margin: 0 }}>链上监控控制台</Title>
-            <Text type="tertiary">Watch · RPC Mesh · Event Ledger · Notify Outbox</Text>
+            <Text type="tertiary">Watch targets · Provider mesh · Event ledger · Delivery control</Text>
           </div>
           <Space className="shell-actions" wrap>
             <div className="shell-session-pill">

@@ -233,24 +233,45 @@ describe('frontend UI regressions', () => {
     }
   });
 
-  test('console redesign guardrails keep tokens shell and motion accessible', () => {
+  test('minimalist modern redesign guardrails keep tokens shell navigation and motion accessible', () => {
     const styles = readSource('styles.css');
     const shell = readSource('components/AppShell.tsx');
     const table = readSource('components/DataTable.tsx');
     const formModal = readSource('components/FormModal.tsx');
 
     for (const expected of [
+      '--app-color-background: #FAFAFA',
+      '--app-color-foreground: #0F172A',
+      '--app-color-muted: #F1F5F9',
+      '--app-color-muted-foreground: #64748B',
+      '--app-color-accent: #0052FF',
+      '--app-color-accent-secondary: #4D7CFF',
+      '--app-color-border: #E2E8F0',
+      '--app-font-sans',
+      '--app-font-display',
+      '--app-font-mono',
       '--app-console-blue',
       '--app-console-cyan',
       '--app-surface-base',
       '--app-surface-raised',
       '--app-surface-glass',
       '--app-focus-ring',
+      '.semi-navigation-item-icon',
+      '.semi-navigation-item-text',
+      '.semi-navigation-item svg',
       ':focus-visible',
       '::selection',
       '@media (prefers-reduced-motion: reduce)',
     ]) {
       expectContains(styles, expected);
+    }
+
+    for (const unexpected of [
+      '.login-orbit',
+      'scanline',
+      'box-shadow: 0 0 24px',
+    ]) {
+      expectNotContains(styles, unexpected);
     }
 
     for (const expected of [

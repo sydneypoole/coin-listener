@@ -49,9 +49,9 @@ type HealthQuery = ReturnType<typeof useQuery<HealthResponse>>;
 
 const dashboardSteps = [
   { title: 'Watch Targets', label: 'Watch', description: '按链与资产集合维护扫描目标' },
-  { title: 'RPC Mesh', label: 'RPC', description: '多 Provider 优先级、限流与熔断' },
+  { title: 'Provider Mesh', label: 'RPC', description: '多 Provider 优先级、限流与熔断' },
   { title: 'Event Ledger', label: 'Event', description: '归集转账、余额变更与合约交互' },
-  { title: 'Notify Outbox', label: 'Notify', description: 'Outbox 重试、投递与站内通知闭环' },
+  { title: 'Delivery Control', label: 'Notify', description: 'Outbox 重试、投递与站内通知闭环' },
 ];
 
 export function App() {
@@ -233,7 +233,7 @@ function DashboardOverview({ healthQuery, realtimeUnreadCount }: { healthQuery: 
         </div>
       </DataSurface>
 
-      <DataSurface title="Chain flow map" actions={<Text type="tertiary">Watch → RPC → Event → Notify</Text>}>
+      <DataSurface title="Operational flow" actions={<Text type="tertiary">Watch → Provider → Event → Delivery</Text>}>
         <div className="dashboard-chain-map">
           {dashboardSteps.map((step, index) => (
             <div className="dashboard-chain-step" key={step.title}>
@@ -248,7 +248,7 @@ function DashboardOverview({ healthQuery, realtimeUnreadCount }: { healthQuery: 
 
       <DataSurface title="Ops shortcuts">
         <Space wrap>
-          <Tag color="cyan">系统状态：队列、Provider、服务心跳</Tag>
+          <Tag color="blue">系统状态：队列、Provider、服务心跳</Tag>
           <Tag color="blue">事件中心：链上活动检索</Tag>
           <Tag color="orange">通知运维：Outbox 重试与详情</Tag>
           <Tag color="green">站内通知：实时消费反馈</Tag>
