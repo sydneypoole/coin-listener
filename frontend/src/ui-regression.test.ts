@@ -5,12 +5,21 @@ import { dirname, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = resolve(here);
+const repoRoot = resolve(src, '..', '..');
 
 function readSource(relativePath: string) {
   try {
     return readFileSync(resolve(src, relativePath), 'utf8');
   } catch (error) {
     throw new Error(`Missing source file: ${relativePath}`, { cause: error });
+  }
+}
+
+function readRepoSource(relativePath: string) {
+  try {
+    return readFileSync(resolve(repoRoot, relativePath), 'utf8');
+  } catch (error) {
+    throw new Error(`Missing repository file: ${relativePath}`, { cause: error });
   }
 }
 
@@ -38,6 +47,20 @@ function expectNotMatches(source: string, pattern: RegExp, label: string) {
   }
 }
 
+function expectContainsLine(source: string, expectedLine: string) {
+  const lines = source.split(/\r?\n/).map(line => line.trim());
+  if (!lines.includes(expectedLine)) {
+    throw new Error(`Expected source to contain line: ${expectedLine}`);
+  }
+}
+
+function expectNotContainsLine(source: string, unexpectedLine: string) {
+  const lines = source.split(/\r?\n/).map(line => line.trim());
+  if (lines.includes(unexpectedLine)) {
+    throw new Error(`Expected source not to contain line: ${unexpectedLine}`);
+  }
+}
+
 function expectOrdered(source: string, first: string, second: string) {
   const firstIndex = source.indexOf(first);
   const secondIndex = source.indexOf(second);
@@ -56,6 +79,49 @@ function expectOrdered(source: string, first: string, second: string) {
 }
 
 describe('frontend UI regressions', () => {
+  test('repository hygiene and compose defaults stay safe', () => {
+    const dockerignore = readRepoSource('.dockerignore');
+    const gitignore = readRepoSource('.gitignore');
+    const compose = readRepoSource('docker-compose.yml');
+    const ghcrCompose = readRepoSource('docker-compose.ghcr.yml');
+
+    for (const expected of [
+      '.git',
+      '.claude/',
+      '.worktrees/',
+      '.codegraph/',
+      '.cargo-home/',
+      '.npm-cache/',
+      'backend/target/',
+      'frontend/node_modules/',
+      'frontend/dist/',
+      '.env',
+    ]) {
+      expectContainsLine(dockerignore, expected);
+    }
+
+    expectContainsLine(gitignore, '.codegraph/');
+    expectNotContainsLine(compose, '- "5432:5432"');
+    expectNotContainsLine(compose, '- "6379:6379"');
+    expectNotContainsLine(ghcrCompose, '- "5432:5432"');
+    expectNotContainsLine(ghcrCompose, '- "6379:6379"');
+    expectContains(ghcrCompose, 'AUTH_TOKEN_SECRET: ${AUTH_TOKEN_SECRET:?AUTH_TOKEN_SECRET is required}');
+    expectNotContains(ghcrCompose, 'change-me-to-a-long-random-secret');
+  });
+
+  test('frontend safety controls prevent accessible-name link and destructive-action regressions', () => {
+    const themeToggle = readSource('components/ThemeToggle.tsx');
+    const telegramBindingPanel = readSource('components/TelegramBindingPanel.tsx');
+    const notificationRulesPage = readSource('pages/NotificationRulesPage.tsx');
+
+    expectContains(themeToggle, 'aria-label="主题模式"');
+    expectContains(telegramBindingPanel, "rel: 'noopener noreferrer'");
+    expectContains(notificationRulesPage, 'Popconfirm');
+    expectContains(notificationRulesPage, '确认删除该通知规则？');
+    expectContains(notificationRulesPage, 'onConfirm={() => deleteMutation.mutate(rule.id)}');
+    expectNotContains(notificationRulesPage, 'onClick={() => deleteMutation.mutate(rule.id)}');
+  });
+
   test('provider management exposes multi-provider connectivity test controls', () => {
     const page = readSource('pages/ProvidersPage.tsx');
     const client = readSource('api/client.ts');

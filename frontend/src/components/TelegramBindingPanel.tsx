@@ -138,7 +138,7 @@ export function TelegramBindingPanel({ telegramBotId, onBound }: TelegramBinding
               <div className="telegram-binding-step">
                 <Text strong>私聊通知</Text>
                 {binding.deep_link_url ? (
-                  <Text link={{ href: binding.deep_link_url, target: '_blank' }}>打开 Telegram 深链</Text>
+                  <Text link={{ href: binding.deep_link_url, target: '_blank', rel: 'noopener noreferrer' }}>打开 Telegram 深链</Text>
                 ) : null}
                 <Text type="tertiary">向机器人发送命令：</Text>
                 <code>/start {binding.bind_token}</code>

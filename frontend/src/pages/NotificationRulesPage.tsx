@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Banner, Button, Form, Space, Tag, Toast } from '@douyinfe/semi-ui';
+import { Banner, Button, Form, Popconfirm, Space, Tag, Toast } from '@douyinfe/semi-ui';
 import {
   createNotificationChannel,
   createNotificationRule,
@@ -242,7 +242,9 @@ export function NotificationRulesPage() {
               render: (_, rule) => (
                 <Space>
                   <Button size="small" onClick={() => openEditModal(rule)}>编辑</Button>
-                  <Button size="small" type="danger" loading={deleteMutation.isPending} onClick={() => deleteMutation.mutate(rule.id)}>删除</Button>
+                  <Popconfirm title="确认删除该通知规则？" onConfirm={() => deleteMutation.mutate(rule.id)}>
+                    <Button size="small" type="danger" loading={deleteMutation.isPending}>删除</Button>
+                  </Popconfirm>
                 </Space>
               ),
             },

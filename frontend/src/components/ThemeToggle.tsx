@@ -17,6 +17,7 @@ export function ThemeToggle({ value, onChange }: ThemeToggleProps) {
     <Select
       value={value}
       optionList={options}
+      aria-label="主题模式"
       size="small"
       style={{ width: 112 }}
       onChange={nextValue => onChange(nextValue as ThemeMode)}
