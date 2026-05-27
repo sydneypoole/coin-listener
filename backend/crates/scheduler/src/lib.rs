@@ -3,7 +3,7 @@ use coin_listener_core::{
     models::{ScanAddressCandidate, ScanAddressTask},
     AppResult,
 };
-use coin_listener_storage::{repositories, scan_queue::ScanQueue};
+use coin_listener_storage::{repositories, scan_jobs, scan_queue::ScanQueue};
 use redis::aio::MultiplexedConnection;
 use sqlx::PgPool;
 use std::{
@@ -44,6 +44,7 @@ pub async fn run_scheduler(
     queue: ScanQueue,
     batch_size: i64,
     tick_seconds: u64,
+    job_max_attempts: i32,
     shutdown: Arc<AtomicBool>,
 ) -> AppResult<()> {
     let mut ticker = time::interval(Duration::from_secs(tick_seconds));
@@ -55,7 +56,7 @@ pub async fn run_scheduler(
                     break;
                 }
 
-                match enqueue_due_addresses(&pool, &mut redis, &queue, batch_size, Utc::now()).await {
+                match enqueue_due_addresses(&pool, &mut redis, &queue, batch_size, job_max_attempts, Utc::now()).await {
                     Ok(enqueued) => info!(service = "scheduler", enqueued, "scheduler tick completed"),
                     Err(error) => {
                         error!(service = "scheduler", error = %error, "scheduler tick failed");
@@ -75,6 +76,7 @@ pub async fn enqueue_due_addresses(
     redis: &mut MultiplexedConnection,
     queue: &ScanQueue,
     batch_size: i64,
+    job_max_attempts: i32,
     now: DateTime<Utc>,
 ) -> AppResult<usize> {
     let mut enqueued = 0usize;
@@ -94,8 +96,13 @@ pub async fn enqueue_due_addresses(
             break;
         };
 
-        let task = build_scan_task(&candidate, now);
-        queue.enqueue(redis, &task).await?;
+        let inserted_job = scan_jobs::insert_scheduled_scan_job_in_transaction(
+            &mut transaction,
+            &candidate,
+            job_max_attempts,
+            now,
+        )
+        .await?;
         repositories::mark_claimed_scan_enqueued(
             &mut transaction,
             candidate.id,
@@ -106,7 +113,13 @@ pub async fn enqueue_due_addresses(
             .commit()
             .await
             .map_err(|error| coin_listener_core::AppError::Database(error.to_string()))?;
-        enqueued += 1;
+
+        if inserted_job.is_some() {
+            if let Err(error) = queue.signal(redis).await {
+                tracing::warn!(error = %error, "failed to signal scan worker after durable job insert");
+            }
+            enqueued += 1;
+        }
     }
 
     Ok(enqueued)
@@ -154,5 +167,21 @@ mod tests {
         assert!(source.contains("pub async fn run_scheduler("));
         assert!(source.contains("while !scheduler_shutdown_requested(&shutdown)"));
         assert!(source.contains("enqueue_due_addresses("));
+    }
+
+    #[test]
+    fn scheduler_creates_durable_scan_jobs_before_wakeup_signal() {
+        let source = include_str!("lib.rs");
+        let job_insert = source
+            .find("scan_jobs::insert_scheduled_scan_job_in_transaction")
+            .expect("scheduler inserts durable scan job");
+        let commit = source
+            .find("transaction\n            .commit()")
+            .expect("scheduler commits transaction");
+        let signal = source.find("queue.signal(redis)").expect("scheduler signals Redis wakeup");
+
+        assert!(job_insert < commit);
+        assert!(commit < signal);
+        assert!(source.contains("failed to signal scan worker after durable job insert"));
     }
 }

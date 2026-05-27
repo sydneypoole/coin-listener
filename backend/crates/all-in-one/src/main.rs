@@ -49,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         redis: Some(redis_client.clone()),
         scan_queue_key: config.scan.queue_key.clone(),
         notify_queue_key: config.notify.queue_key.clone(),
+        scan_job_max_attempts: config.scan.job_max_attempts,
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
         realtime: realtime_hub,
@@ -93,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         scheduler_queue,
         config.scan.scheduler_batch_size,
         config.scan.scheduler_tick_seconds,
+        config.scan.job_max_attempts,
         Arc::clone(&shutdown),
     ));
 
@@ -101,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         worker_redis,
         worker_queue,
         worker_id,
+        config.scan.job_idle_sleep_ms,
         Arc::clone(&shutdown),
     ));
 

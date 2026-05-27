@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
         queue,
         config.scan.scheduler_batch_size,
         config.scan.scheduler_tick_seconds,
+        config.scan.job_max_attempts,
         shutdown,
     )
     .await?;

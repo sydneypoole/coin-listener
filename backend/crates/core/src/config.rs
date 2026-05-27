@@ -42,7 +42,9 @@ pub struct ScanConfig {
     pub scheduler_tick_seconds: u64,
     pub scheduler_batch_size: i64,
     pub queue_key: String,
-    pub lock_ttl_seconds: usize,
+    pub lock_ttl_seconds: u64,
+    pub job_max_attempts: i32,
+    pub job_idle_sleep_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -92,6 +94,14 @@ impl AppConfig {
                 env_parse("SCAN_LOCK_TTL_SECONDS", 120_usize)?,
             ))
             .merge((
+                "scan.job_max_attempts",
+                env_parse("SCAN_JOB_MAX_ATTEMPTS", 10_i32)?,
+            ))
+            .merge((
+                "scan.job_idle_sleep_ms",
+                env_parse("SCAN_JOB_IDLE_SLEEP_MS", 500_u64)?,
+            ))
+            .merge((
                 "notify.queue_key",
                 env_string("NOTIFY_QUEUE_KEY", "notify:event:queue"),
             ))
@@ -122,11 +132,31 @@ impl AppConfig {
             ))
             .extract()
             .map_err(|error| AppError::Config(error.to_string()))
+            .and_then(validate_config)
     }
 
     pub fn server_addr(&self) -> String {
         format!("{}:{}", self.server.host, self.server.port)
     }
+}
+
+fn validate_config(config: AppConfig) -> AppResult<AppConfig> {
+    if config.scan.job_max_attempts <= 0 {
+        return Err(AppError::Config(
+            "SCAN_JOB_MAX_ATTEMPTS must be positive".to_string(),
+        ));
+    }
+    if config.scan.lock_ttl_seconds == 0 {
+        return Err(AppError::Config(
+            "SCAN_LOCK_TTL_SECONDS must be positive".to_string(),
+        ));
+    }
+    if i64::try_from(config.scan.lock_ttl_seconds).is_err() {
+        return Err(AppError::Config(
+            "SCAN_LOCK_TTL_SECONDS must fit in i64".to_string(),
+        ));
+    }
+    Ok(config)
 }
 
 fn env_string(name: &str, default: &str) -> String {
@@ -208,6 +238,75 @@ mod tests {
         }
     }
 
+    fn test_app_config() -> AppConfig {
+        AppConfig {
+            server: super::ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+                enable_dev_routes: false,
+            },
+            postgres: super::PostgresConfig {
+                database_url: "postgres://localhost/test".to_string(),
+            },
+            redis: super::RedisConfig {
+                redis_url: "redis://localhost:6379".to_string(),
+            },
+            scan: super::ScanConfig {
+                scheduler_tick_seconds: 30,
+                scheduler_batch_size: 100,
+                queue_key: "scan:address:queue".to_string(),
+                lock_ttl_seconds: 120,
+                job_max_attempts: 10,
+                job_idle_sleep_ms: 500,
+            },
+            notify: NotifyConfig {
+                queue_key: "notify:event:queue".to_string(),
+                outbox_batch_size: 50,
+                outbox_max_attempts: 10,
+                outbox_stale_lock_seconds: 300,
+                outbox_idle_sleep_ms: 500,
+                telegram_webhook_secret: None,
+            },
+            auth: AuthConfig {
+                token_secret: "test-secret-with-enough-entropy".to_string(),
+                token_ttl_seconds: 43_200,
+            },
+        }
+    }
+
+    #[test]
+    fn scan_job_max_attempts_must_be_positive() {
+        let mut config = test_app_config();
+        config.scan.job_max_attempts = 0;
+
+        let error = super::validate_config(config).expect_err("zero max attempts is invalid");
+        assert!(error
+            .to_string()
+            .contains("SCAN_JOB_MAX_ATTEMPTS must be positive"));
+    }
+
+    #[test]
+    fn scan_lock_ttl_seconds_must_be_positive() {
+        let mut config = test_app_config();
+        config.scan.lock_ttl_seconds = 0;
+
+        let error = super::validate_config(config).expect_err("zero scan lock TTL is invalid");
+        assert!(error
+            .to_string()
+            .contains("SCAN_LOCK_TTL_SECONDS must be positive"));
+    }
+
+    #[test]
+    fn scan_lock_ttl_seconds_must_fit_sql_interval_binding() {
+        let mut config = test_app_config();
+        config.scan.lock_ttl_seconds = (i64::MAX as u64) + 1;
+
+        let error = super::validate_config(config).expect_err("oversized scan lock TTL is invalid");
+        assert!(error
+            .to_string()
+            .contains("SCAN_LOCK_TTL_SECONDS must fit in i64"));
+    }
+
     #[test]
     fn app_config_parses_numeric_environment_values() {
         std::env::set_var("AUTH_TOKEN_TTL_SECONDS", "43200");
@@ -216,6 +315,8 @@ mod tests {
         std::env::set_var("SCHEDULER_TICK_SECONDS", "30");
         std::env::set_var("SCHEDULER_BATCH_SIZE", "100");
         std::env::set_var("SCAN_LOCK_TTL_SECONDS", "120");
+        std::env::set_var("SCAN_JOB_MAX_ATTEMPTS", "10");
+        std::env::set_var("SCAN_JOB_IDLE_SLEEP_MS", "500");
         std::env::set_var("NOTIFICATION_OUTBOX_BATCH_SIZE", "50");
         std::env::set_var("NOTIFICATION_OUTBOX_MAX_ATTEMPTS", "10");
         std::env::set_var("NOTIFICATION_OUTBOX_STALE_LOCK_SECONDS", "300");
@@ -229,6 +330,8 @@ mod tests {
         assert_eq!(config.scan.scheduler_tick_seconds, 30);
         assert_eq!(config.scan.scheduler_batch_size, 100);
         assert_eq!(config.scan.lock_ttl_seconds, 120);
+        assert_eq!(config.scan.job_max_attempts, 10);
+        assert_eq!(config.scan.job_idle_sleep_ms, 500);
         assert_eq!(config.notify.outbox_batch_size, 50);
         assert_eq!(config.notify.outbox_max_attempts, 10);
         assert_eq!(config.notify.outbox_stale_lock_seconds, 300);

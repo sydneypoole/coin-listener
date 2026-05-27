@@ -6,6 +6,7 @@ pub mod postgres;
 pub mod provider_health;
 pub mod redis;
 pub mod repositories;
+pub mod scan_jobs;
 pub mod scan_queue;
 pub mod scan_runs;
 pub mod service_heartbeats;

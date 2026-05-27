@@ -37,6 +37,7 @@ use coin_listener_storage::{
     custody_accounts, notifications,
     notify_queue::{connect_notify_queue, NotifyQueue},
     repositories,
+    scan_jobs,
     scan_queue::{connect_scan_queue, ScanQueue},
     scan_runs, system_status, telegram_settings,
 };
@@ -51,6 +52,7 @@ pub struct ApiState {
     pub redis: Option<redis::Client>,
     pub scan_queue_key: String,
     pub notify_queue_key: String,
+    pub scan_job_max_attempts: i32,
     pub enable_dev_routes: bool,
     pub auth: TokenSettings,
     pub realtime: RealtimeHub,
@@ -260,7 +262,7 @@ async fn system_status_handler(
     State(state): State<Arc<ApiState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Response, ApiError> {
-    let queues = queue_status(&state).await;
+    let queues = queue_status(&state, auth.tenant_id).await;
     let scans = system_status::system_scan_status(&state.postgres, auth.tenant_id).await?;
     let events = system_status::system_event_status(&state.postgres).await?;
     let notifications = system_status::system_notification_status(&state.postgres).await?;
@@ -282,25 +284,18 @@ async fn system_status_handler(
     .into_response())
 }
 
-async fn queue_status(state: &ApiState) -> QueueStatus {
+async fn queue_status(state: &ApiState, tenant_id: Uuid) -> QueueStatus {
     let mut queue_errors = Vec::new();
-    let mut scan_queue_depth = None;
+    let scan_queue_depth = match scan_jobs::scan_job_status_counts(&state.postgres, tenant_id, Utc::now()).await {
+        Ok(counts) => Some(counts.pending + counts.retryable + counts.stale_processing),
+        Err(error) => {
+            queue_errors.push(format!("scan job status unavailable: {error}"));
+            None
+        }
+    };
     let mut notify_queue_depth = None;
 
     if let Some(redis_client) = &state.redis {
-        match connect_scan_queue(redis_client).await {
-            Ok(mut connection) => {
-                let queue = ScanQueue::new(state.scan_queue_key.clone(), 1);
-                match queue.depth(&mut connection).await {
-                    Ok(depth) => scan_queue_depth = Some(depth),
-                    Err(error) => {
-                        queue_errors.push(format!("scan queue depth unavailable: {error}"))
-                    }
-                }
-            }
-            Err(error) => queue_errors.push(format!("scan queue redis unavailable: {error}")),
-        }
-
         match connect_notify_queue(redis_client).await {
             Ok(mut connection) => {
                 let queue = NotifyQueue::new(state.notify_queue_key.clone());
@@ -1301,54 +1296,38 @@ async fn retry_scan_run(
 ) -> Result<Response, ApiError> {
     let now = Utc::now();
     let stale_claim_before = now - Duration::minutes(SCAN_RETRY_CLAIM_STALE_MINUTES);
-    let task = scan_runs::retry_scan_run_task(
+    let job = scan_runs::retry_scan_run_job(
         &state.postgres,
         auth.tenant_id,
         id,
         now,
         stale_claim_before,
+        state.scan_job_max_attempts,
     )
     .await?;
-    let enqueue_result = async {
-        let redis_client = state
-            .redis
-            .as_ref()
-            .ok_or_else(|| AppError::Redis("redis unavailable".to_string()))?;
-        let mut connection = connect_scan_queue(redis_client).await?;
-        let queue = ScanQueue::new(state.scan_queue_key.clone(), 1);
-        queue.enqueue(&mut connection, &task).await
-    }
-    .await;
+    let task = scan_jobs::scan_job_to_task(&job, now);
 
-    if let Err(error) = enqueue_result {
-        let error_message = error.to_string();
-        if let Err(cleanup_error) = scan_runs::clear_retry_scan_run_claim(
-            &state.postgres,
-            auth.tenant_id,
-            id,
-            task.task_id,
-            &error_message,
-        )
-        .await
-        {
-            tracing::warn!(
+    if let Some(redis_client) = &state.redis {
+        match connect_scan_queue(redis_client).await {
+            Ok(mut connection) => {
+                let queue = ScanQueue::new(state.scan_queue_key.clone(), 1);
+                if let Err(error) = queue.signal(&mut connection).await {
+                    tracing::warn!(
+                        scan_run_id = %id,
+                        scan_job_id = %job.id,
+                        error = %error,
+                        "failed to signal scan worker after retry job insert"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
                 scan_run_id = %id,
-                task_id = %task.task_id,
-                error = %cleanup_error,
-                "failed to clear scan retry claim after enqueue failure"
-            );
+                scan_job_id = %job.id,
+                error = %error,
+                "failed to connect scan queue after retry job insert"
+            ),
         }
-        return Err(error.into());
     }
-
-    scan_runs::mark_retry_scan_run_enqueued(
-        &state.postgres,
-        auth.tenant_id,
-        id,
-        task.task_id,
-        Utc::now(),
-    )
-    .await?;
 
     Ok(Json(RetryScanRunResponse { task }).into_response())
 }
@@ -1525,6 +1504,7 @@ mod tests {
             redis: None,
             scan_queue_key: "scan:address:queue".to_string(),
             notify_queue_key: "notify:event:queue".to_string(),
+            scan_job_max_attempts: 10,
             enable_dev_routes,
             auth: TokenSettings {
                 secret: "test-secret-with-enough-entropy".to_string(),
@@ -1593,8 +1573,22 @@ mod tests {
 
         assert!(source.contains("async fn system_status_handler("));
         assert!(source.contains("Extension(auth): Extension<AuthContext>"));
+        assert!(source.contains("queue_status(&state, auth.tenant_id).await"));
         assert!(source
             .contains("system_status::system_scan_status(&state.postgres, auth.tenant_id).await?"));
+    }
+
+    #[test]
+    fn queue_status_reports_postgres_scan_jobs_including_stale_processing() {
+        let source = production_source();
+
+        let start = source.find("async fn queue_status(").unwrap();
+        let end = source[start..].find("async fn login(").unwrap() + start;
+        let queue_status_source = &source[start..end];
+
+        assert!(queue_status_source.contains("scan_jobs::scan_job_status_counts(&state.postgres, tenant_id"));
+        assert!(queue_status_source.contains("counts.pending + counts.retryable + counts.stale_processing"));
+        assert!(!queue_status_source.contains("connect_scan_queue("));
     }
 
     #[test]
@@ -2557,21 +2551,22 @@ mod tests {
     }
 
     #[test]
-    fn scan_run_handlers_use_tenant_scope_and_scan_queue_retry() {
+    fn scan_run_handlers_use_tenant_scope_and_durable_retry_jobs() {
         let source = production_source();
 
         assert!(source.contains("Extension(auth): Extension<AuthContext>"));
         assert!(source.contains("scan_runs::list_scan_runs(&state.postgres, auth.tenant_id"));
         assert!(source.contains("scan_runs::get_scan_run_detail(&state.postgres, auth.tenant_id"));
-        assert!(source.contains("scan_runs::retry_scan_run_task("));
+        assert!(source.contains("scan_runs::retry_scan_run_job("));
+        assert!(source.contains("state.scan_job_max_attempts"));
+        assert!(source.contains("scan_jobs::scan_job_to_task(&job, now)"));
         assert!(source.contains("stale_claim_before"));
         assert!(source.contains("SCAN_RETRY_CLAIM_STALE_MINUTES"));
         assert!(source.contains("ScanQueue::new(state.scan_queue_key.clone(), 1)"));
-        assert!(source.contains("queue.enqueue(&mut connection, &task).await"));
-        assert!(source.contains("scan_runs::clear_retry_scan_run_claim("));
-        assert!(source.contains("failed to clear scan retry claim after enqueue failure"));
-        assert!(source.contains("return Err(error.into())"));
-        assert!(source.contains("scan_runs::mark_retry_scan_run_enqueued("));
+        assert!(source.contains("queue.signal(&mut connection).await"));
+        assert!(source.contains("failed to signal scan worker after retry job insert"));
+        assert!(!source.contains("scan_runs::clear_retry_scan_run_claim("));
+        assert!(!source.contains("scan_runs::mark_retry_scan_run_enqueued("));
     }
 
     #[tokio::test]

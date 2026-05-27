@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
         redis: Some(redis),
         scan_queue_key: config.scan.queue_key.clone(),
         notify_queue_key: config.notify.queue_key.clone(),
+        scan_job_max_attempts: config.scan.job_max_attempts,
         enable_dev_routes: config.server.enable_dev_routes,
         auth: auth_settings,
         realtime: realtime_hub,

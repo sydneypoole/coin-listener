@@ -1,24 +1,16 @@
 use coin_listener_core::{models::ScanAddressTask, AppError, AppResult};
 use redis::{aio::MultiplexedConnection, Client};
-use uuid::Uuid;
 
-const LOCK_KEY_PREFIX: &str = "scan:address:lock";
-const RELEASE_LOCK_SCRIPT: &str = r#"
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-    return redis.call("DEL", KEYS[1])
-else
-    return 0
-end
-"#;
+const SCAN_WAKE_SIGNAL_PAYLOAD: &str = "wake";
 
 #[derive(Debug, Clone)]
 pub struct ScanQueue {
     queue_key: String,
-    lock_ttl_seconds: usize,
+    lock_ttl_seconds: u64,
 }
 
 impl ScanQueue {
-    pub fn new(queue_key: String, lock_ttl_seconds: usize) -> Self {
+    pub fn new(queue_key: String, lock_ttl_seconds: u64) -> Self {
         Self {
             queue_key,
             lock_ttl_seconds,
@@ -27,6 +19,10 @@ impl ScanQueue {
 
     pub fn queue_key(&self) -> &str {
         &self.queue_key
+    }
+
+    pub fn lock_ttl_seconds(&self) -> u64 {
+        self.lock_ttl_seconds
     }
 
     pub async fn depth(&self, connection: &mut MultiplexedConnection) -> AppResult<i64> {
@@ -38,26 +34,36 @@ impl ScanQueue {
         Ok(depth)
     }
 
-    pub async fn enqueue(
-        &self,
-        connection: &mut MultiplexedConnection,
-        task: &ScanAddressTask,
-    ) -> AppResult<()> {
-        let payload = serialize_scan_task(task)?;
-        let _: usize = redis::cmd("LPUSH")
-            .arg(&self.queue_key)
-            .arg(payload)
-            .query_async(connection)
-            .await
-            .map_err(|error| AppError::Redis(error.to_string()))?;
+    pub async fn signal(&self, connection: &mut MultiplexedConnection) -> AppResult<()> {
+        let _: () = redis::Script::new(
+            r#"
+            local values = redis.call('LRANGE', KEYS[1], 0, -1)
+            local has_wake = false
+            for _, value in ipairs(values) do
+                if value == ARGV[1] then
+                    has_wake = true
+                    break
+                end
+            end
+            if has_wake then
+                return
+            end
+            redis.call('LPUSH', KEYS[1], ARGV[1])
+            "#,
+        )
+        .key(&self.queue_key)
+        .arg(SCAN_WAKE_SIGNAL_PAYLOAD)
+        .invoke_async(connection)
+        .await
+        .map_err(|error| AppError::Redis(error.to_string()))?;
         Ok(())
     }
 
-    pub async fn dequeue(
+    pub async fn wait_for_signal(
         &self,
         connection: &mut MultiplexedConnection,
         timeout_seconds: usize,
-    ) -> AppResult<Option<ScanAddressTask>> {
+    ) -> AppResult<bool> {
         let result: Option<(String, String)> = redis::cmd("BRPOP")
             .arg(&self.queue_key)
             .arg(timeout_seconds)
@@ -65,44 +71,26 @@ impl ScanQueue {
             .await
             .map_err(|error| AppError::Redis(error.to_string()))?;
 
-        result
-            .map(|(_, payload)| deserialize_scan_task(&payload))
-            .transpose()
+        let Some((_, payload)) = result else {
+            return Ok(false);
+        };
+        if payload == SCAN_WAKE_SIGNAL_PAYLOAD {
+            return Ok(true);
+        }
+        if deserialize_scan_task(&payload).is_ok() {
+            return Err(AppError::Redis(
+                "legacy Redis scan task payload found in wakeup queue".to_string(),
+            ));
+        }
+        Ok(true)
     }
 
-    pub async fn acquire_lock(
+    pub async fn enqueue(
         &self,
         connection: &mut MultiplexedConnection,
-        address_id: Uuid,
-        task_id: Uuid,
-    ) -> AppResult<bool> {
-        let result: Option<String> = redis::cmd("SET")
-            .arg(scan_lock_key(address_id))
-            .arg(task_id.to_string())
-            .arg("NX")
-            .arg("EX")
-            .arg(self.lock_ttl_seconds)
-            .query_async(connection)
-            .await
-            .map_err(|error| AppError::Redis(error.to_string()))?;
-
-        Ok(result.is_some())
-    }
-
-    pub async fn release_lock(
-        &self,
-        connection: &mut MultiplexedConnection,
-        address_id: Uuid,
-        task_id: Uuid,
-    ) -> AppResult<bool> {
-        let released: i32 = redis::Script::new(RELEASE_LOCK_SCRIPT)
-            .key(scan_lock_key(address_id))
-            .arg(task_id.to_string())
-            .invoke_async(connection)
-            .await
-            .map_err(|error| AppError::Redis(error.to_string()))?;
-
-        Ok(released > 0)
+        _task: &ScanAddressTask,
+    ) -> AppResult<()> {
+        self.signal(connection).await
     }
 }
 
@@ -113,12 +101,12 @@ pub async fn connect_scan_queue(client: &Client) -> AppResult<MultiplexedConnect
         .map_err(|error| AppError::Redis(error.to_string()))
 }
 
-pub fn scan_lock_key(address_id: Uuid) -> String {
-    format!("{LOCK_KEY_PREFIX}:{address_id}")
-}
-
 pub fn queue_depth_command(queue_key: &str) -> [&str; 2] {
     ["LLEN", queue_key]
+}
+
+pub fn wake_signal_payload() -> &'static str {
+    SCAN_WAKE_SIGNAL_PAYLOAD
 }
 
 pub fn serialize_scan_task(task: &ScanAddressTask) -> AppResult<String> {
@@ -131,13 +119,16 @@ pub fn deserialize_scan_task(payload: &str) -> AppResult<ScanAddressTask> {
 
 #[cfg(test)]
 mod tests {
-    use super::{deserialize_scan_task, queue_depth_command, scan_lock_key, serialize_scan_task};
+    use super::{
+        deserialize_scan_task, queue_depth_command, serialize_scan_task, wake_signal_payload,
+        ScanQueue,
+    };
     use chrono::{TimeZone, Utc};
     use coin_listener_core::models::ScanAddressTask;
     use uuid::Uuid;
 
     #[test]
-    fn scan_task_payload_round_trips() {
+    fn scan_task_payload_round_trips_for_legacy_compatibility() {
         let task = ScanAddressTask {
             task_id: Uuid::from_u128(11),
             address_id: Uuid::from_u128(12),
@@ -161,13 +152,68 @@ mod tests {
     }
 
     #[test]
-    fn scan_lock_key_uses_address_id() {
-        let address_id = Uuid::from_u128(42);
+    fn scan_queue_keeps_key_and_lock_ttl_for_runtime_wiring() {
+        let queue = ScanQueue::new("scan:address:queue".to_string(), 120);
 
-        assert_eq!(
-            scan_lock_key(address_id),
-            "scan:address:lock:00000000-0000-0000-0000-00000000002a"
-        );
+        assert_eq!(queue.queue_key(), "scan:address:queue");
+        assert_eq!(queue.lock_ttl_seconds(), 120);
+    }
+
+    #[test]
+    fn scan_wakeup_payload_is_disposable_signal_not_task_json() {
+        assert_eq!(wake_signal_payload(), "wake");
+        assert!(deserialize_scan_task(wake_signal_payload()).is_err());
+    }
+
+    #[test]
+    fn scan_wakeup_signal_is_coalesced_to_one_token() {
+        let source = include_str!("scan_queue.rs");
+        let signal_index = source.find("pub async fn signal(").unwrap();
+        let wait_index = source.find("pub async fn wait_for_signal").unwrap();
+        let signal_source = &source[signal_index..wait_index];
+
+        assert!(signal_source.contains("redis::Script"));
+        assert!(signal_source.contains("redis.call('LRANGE'"));
+        assert!(signal_source.contains("has_wake"));
+        assert!(signal_source.contains("redis.call('LPUSH'"));
+    }
+
+    #[test]
+    fn scan_wakeup_signal_does_not_trim_legacy_payloads_before_detection() {
+        let source = include_str!("scan_queue.rs");
+        let signal_index = source.find("pub async fn signal(").unwrap();
+        let wait_index = source.find("pub async fn wait_for_signal").unwrap();
+        let signal_source = &source[signal_index..wait_index];
+
+        assert!(signal_source.contains("SCAN_WAKE_SIGNAL_PAYLOAD"));
+        assert!(signal_source.contains("redis.call('LRANGE'"));
+        assert!(signal_source.contains("redis.call('LPUSH'"));
+        assert!(!signal_source.contains("redis.call('LTRIM'"));
+        assert!(signal_source.find("redis.call('LRANGE'").unwrap() < signal_source.find("redis.call('LPUSH'").unwrap());
+    }
+
+    #[test]
+    fn scan_wakeup_signal_remains_bounded_with_legacy_payloads() {
+        let source = include_str!("scan_queue.rs");
+        let signal_index = source.find("pub async fn signal(").unwrap();
+        let wait_index = source.find("pub async fn wait_for_signal").unwrap();
+        let signal_source = &source[signal_index..wait_index];
+
+        assert!(signal_source.contains("redis.call('LRANGE'"));
+        assert!(signal_source.contains("has_wake"));
+        assert!(signal_source.contains("if has_wake then"));
+        assert!(signal_source.find("has_wake").unwrap() < signal_source.rfind("redis.call('LPUSH'").unwrap());
+    }
+
+    #[test]
+    fn legacy_json_scan_payload_is_rejected_instead_of_silently_dropped() {
+        let source = include_str!("scan_queue.rs");
+        let wait_index = source.find("pub async fn wait_for_signal").unwrap();
+        let enqueue_index = source.find("pub async fn enqueue").unwrap();
+        let wait_source = &source[wait_index..enqueue_index];
+
+        assert!(wait_source.contains("deserialize_scan_task(&payload)"));
+        assert!(wait_source.contains("legacy Redis scan task payload"));
     }
 
     #[test]
