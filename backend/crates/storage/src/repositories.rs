@@ -19,11 +19,17 @@ const DEFAULT_TENANT_ID: Uuid = Uuid::from_u128(1);
 pub const WATCHED_ADDRESS_ASSETS_MIGRATION: &str =
     include_str!("../migrations/0013_watched_address_assets.sql");
 const CLAIM_ONE_DUE_SCAN_ADDRESS_QUERY: &str = r#"
-SELECT id, tenant_id, chain_id, scan_interval_seconds
-FROM watched_addresses
-WHERE status = 'active'
-  AND next_scan_at <= $1
-ORDER BY next_scan_at ASC, created_at ASC
+SELECT wa.id, wa.tenant_id, wa.chain_id, wa.scan_interval_seconds
+FROM watched_addresses wa
+WHERE wa.status = 'active'
+  AND wa.next_scan_at <= $1
+  AND NOT EXISTS (
+      SELECT 1
+      FROM scan_jobs sj
+      WHERE sj.address_id = wa.id
+        AND sj.status IN ('pending', 'retryable', 'processing')
+  )
+ORDER BY wa.next_scan_at ASC, wa.created_at ASC
 FOR UPDATE SKIP LOCKED
 LIMIT 1
 "#;

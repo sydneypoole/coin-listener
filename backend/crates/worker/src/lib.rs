@@ -3,7 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use std::time::Duration;
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Utc};
 use coin_listener_chain_providers::{
@@ -29,11 +29,14 @@ use coin_listener_storage::{
         try_acquire_provider_qps,
     },
     repositories,
+    scan_jobs::{
+        self, scan_job_next_attempt_at, scan_job_should_dead_letter, scan_job_to_task,
+    },
     scan_queue::ScanQueue,
     scan_runs,
 };
 use redis::aio::MultiplexedConnection;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{info, warn};
 
 pub const EVM_ERC20_TRANSFER_CURSOR: &str = "evm_erc20_transfer";
@@ -269,7 +272,7 @@ pub fn provider_capacity_error(chain_id: uuid::Uuid) -> AppError {
     ))
 }
 
-pub fn provider_timeout_duration(provider: &Provider) -> AppResult<Duration> {
+pub fn provider_timeout_duration(provider: &Provider) -> AppResult<StdDuration> {
     let timeout_ms = u64::try_from(provider.timeout_ms)
         .map_err(|_| AppError::Validation("timeout_ms must be positive".to_string()))?;
     if timeout_ms == 0 {
@@ -277,7 +280,7 @@ pub fn provider_timeout_duration(provider: &Provider) -> AppResult<Duration> {
             "timeout_ms must be positive".to_string(),
         ));
     }
-    Ok(Duration::from_millis(timeout_ms))
+    Ok(StdDuration::from_millis(timeout_ms))
 }
 
 pub fn ensure_provider_matches_context(
@@ -506,10 +509,9 @@ pub async fn scan_evm_address_with_provider(
 pub async fn scan_evm_address(
     pool: &PgPool,
     redis: &mut MultiplexedConnection,
-    task: &ScanAddressTask,
+    context: &ScanAddressContext,
     now: DateTime<Utc>,
 ) -> AppResult<Vec<AddressEvent>> {
-    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let candidates = active_rpc_provider_candidates(pool, context.chain_id, now).await?;
     if candidates.is_empty() {
         return Err(provider_capacity_error(context.chain_id));
@@ -717,10 +719,9 @@ pub async fn scan_tron_address_with_provider(
 pub async fn scan_tron_address(
     pool: &PgPool,
     redis: &mut MultiplexedConnection,
-    task: &ScanAddressTask,
+    context: &ScanAddressContext,
     now: DateTime<Utc>,
 ) -> AppResult<Vec<AddressEvent>> {
-    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let candidates = active_rpc_provider_candidates(pool, context.chain_id, now).await?;
     if candidates.is_empty() {
         return Err(provider_capacity_error(context.chain_id));
@@ -850,10 +851,9 @@ pub async fn scan_btc_address_with_provider(
 pub async fn scan_btc_address(
     pool: &PgPool,
     redis: &mut MultiplexedConnection,
-    task: &ScanAddressTask,
+    context: &ScanAddressContext,
     now: DateTime<Utc>,
 ) -> AppResult<Vec<AddressEvent>> {
-    let context = repositories::get_scan_address_context(pool, task.address_id).await?;
     let candidates = active_rpc_provider_candidates(pool, context.chain_id, now).await?;
     if candidates.is_empty() {
         return Err(provider_capacity_error(context.chain_id));
@@ -895,31 +895,10 @@ pub async fn scan_btc_address(
 pub async fn process_scan_task(
     pool: &PgPool,
     redis: &mut MultiplexedConnection,
-    scan_queue: &ScanQueue,
     task: ScanAddressTask,
     now: DateTime<Utc>,
 ) -> AppResult<ScanTaskOutcome> {
-    let acquired = scan_queue
-        .acquire_lock(redis, task.address_id, task.task_id)
-        .await?;
-    if !acquired {
-        return Ok(ScanTaskOutcome::Locked);
-    }
-
-    let outcome = process_locked_scan_task(pool, redis, &task, now).await;
-    if let Err(error) = scan_queue
-        .release_lock(redis, task.address_id, task.task_id)
-        .await
-    {
-        warn!(
-            task_id = %task.task_id,
-            address_id = %task.address_id,
-            error = %error,
-            "failed to release scan lock"
-        );
-    }
-
-    outcome
+    process_locked_scan_task(pool, redis, &task, now).await
 }
 
 pub fn scan_task_event_count(outcome: &ScanTaskOutcome) -> i32 {
@@ -950,8 +929,13 @@ async fn create_scan_run_for_task(
         pool,
         task,
         &context,
+        worker_id,
         started_at,
-        serde_json::json!({ "worker_id": worker_id }),
+        serde_json::json!({
+            "worker_id": worker_id,
+            "scan_job_id": task.task_id,
+            "attempt": task.attempt,
+        }),
     )
     .await
 }
@@ -962,10 +946,22 @@ async fn finish_scan_run_for_result(
     result: &AppResult<ScanTaskOutcome>,
     finished_at: DateTime<Utc>,
 ) -> AppResult<()> {
+    finish_scan_run_for_result_with_executor(pool, scan_run_id, result, finished_at).await
+}
+
+async fn finish_scan_run_for_result_with_executor<'e, E>(
+    executor: E,
+    scan_run_id: uuid::Uuid,
+    result: &AppResult<ScanTaskOutcome>,
+    finished_at: DateTime<Utc>,
+) -> AppResult<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     match result {
         Ok(outcome) => {
-            scan_runs::finish_scan_run(
-                pool,
+            scan_runs::finish_scan_run_with_executor(
+                executor,
                 scan_run_id,
                 scan_task_outcome_log_status(outcome),
                 scan_task_event_count(outcome),
@@ -977,8 +973,8 @@ async fn finish_scan_run_for_result(
         }
         Err(error) => {
             let error_message = error.to_string();
-            scan_runs::finish_scan_run(
-                pool,
+            scan_runs::finish_scan_run_with_executor(
+                executor,
                 scan_run_id,
                 scan_runs::SCAN_RUN_STATUS_FAILED,
                 0,
@@ -990,6 +986,203 @@ async fn finish_scan_run_for_result(
         }
     }
     Ok(())
+}
+
+fn lease_renewal_interval_seconds(lease_ttl_seconds: u64) -> u64 {
+    ((lease_ttl_seconds as u64) / 3).max(1)
+}
+
+fn spawn_scan_job_lease_renewal(
+    pool: PgPool,
+    job_id: uuid::Uuid,
+    worker_id: String,
+    lease_ttl_seconds: u64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ownership_lost: tokio::sync::watch::Sender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(StdDuration::from_secs(
+            lease_renewal_interval_seconds(lease_ttl_seconds),
+        ));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+            match scan_jobs::renew_scan_job_lease(
+                &pool,
+                job_id,
+                &worker_id,
+                lease_ttl_seconds,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = ownership_lost.send(true);
+                    break;
+                }
+                Err(error) => {
+                    warn!(job_id = %job_id, error = %error, "failed to renew scan job lease");
+                    let _ = ownership_lost.send(true);
+                    break;
+                }
+            }
+        }
+    })
+}
+
+async fn finish_scan_job_for_result(
+    pool: &PgPool,
+    job_id: uuid::Uuid,
+    worker_id: &str,
+    attempt_count: i32,
+    max_attempts: i32,
+    scan_run_id: Option<uuid::Uuid>,
+    result: &AppResult<ScanTaskOutcome>,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    match result {
+        Ok(_) => scan_jobs::mark_scan_job_succeeded(pool, job_id, worker_id, scan_run_id).await,
+        Err(error) => {
+            let error_message = error.to_string();
+            if scan_job_should_dead_letter(attempt_count, max_attempts) {
+                scan_jobs::mark_scan_job_dead_letter(
+                    pool,
+                    job_id,
+                    worker_id,
+                    &error_message,
+                    scan_run_id,
+                )
+                .await
+            } else {
+                scan_jobs::mark_scan_job_retryable(
+                    pool,
+                    job_id,
+                    worker_id,
+                    scan_job_next_attempt_at(now, attempt_count),
+                    &error_message,
+                    scan_run_id,
+                )
+                .await
+            }
+        }
+    }
+}
+
+async fn finish_scan_job_for_result_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    job_id: uuid::Uuid,
+    worker_id: &str,
+    attempt_count: i32,
+    max_attempts: i32,
+    scan_run_id: uuid::Uuid,
+    result: &AppResult<ScanTaskOutcome>,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    match result {
+        Ok(_) => {
+            scan_jobs::mark_scan_job_succeeded_with_executor(
+                transaction.as_mut(),
+                job_id,
+                worker_id,
+                Some(scan_run_id),
+            )
+            .await
+        }
+        Err(error) => {
+            let error_message = error.to_string();
+            if scan_job_should_dead_letter(attempt_count, max_attempts) {
+                scan_jobs::mark_scan_job_dead_letter_with_executor(
+                    transaction.as_mut(),
+                    job_id,
+                    worker_id,
+                    &error_message,
+                    Some(scan_run_id),
+                )
+                .await
+            } else {
+                scan_jobs::mark_scan_job_retryable_with_executor(
+                    transaction.as_mut(),
+                    job_id,
+                    worker_id,
+                    scan_job_next_attempt_at(now, attempt_count),
+                    &error_message,
+                    Some(scan_run_id),
+                )
+                .await
+            }
+        }
+    }
+}
+
+async fn finish_scan_run_for_result_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    scan_run_id: uuid::Uuid,
+    result: &AppResult<ScanTaskOutcome>,
+    finished_at: DateTime<Utc>,
+) -> AppResult<()> {
+    finish_scan_run_for_result_with_executor(
+        transaction.as_mut(),
+        scan_run_id,
+        result,
+        finished_at,
+    )
+    .await
+}
+
+async fn finish_scan_job_and_run_for_result(
+    pool: &PgPool,
+    job_id: uuid::Uuid,
+    worker_id: &str,
+    attempt_count: i32,
+    max_attempts: i32,
+    scan_run_id: Option<uuid::Uuid>,
+    result: &AppResult<ScanTaskOutcome>,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    let Some(scan_run_id) = scan_run_id else {
+        return finish_scan_job_for_result(
+            pool,
+            job_id,
+            worker_id,
+            attempt_count,
+            max_attempts,
+            None,
+            result,
+            now,
+        )
+        .await;
+    };
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    finish_scan_job_for_result_in_transaction(
+        &mut transaction,
+        job_id,
+        worker_id,
+        attempt_count,
+        max_attempts,
+        scan_run_id,
+        result,
+        now,
+    )
+    .await?;
+    finish_scan_run_for_result_in_transaction(&mut transaction, scan_run_id, result, now).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))
 }
 
 pub async fn process_one_address_import_task(
@@ -1093,21 +1286,21 @@ async fn process_locked_scan_task(
 
     match scan_plan_for_chain(&context.chain_type) {
         ScanPlan::EvmNativeBalance => {
-            let events = scan_evm_address(pool, redis, task, now).await?;
+            let events = scan_evm_address(pool, redis, &context, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned {
                 event_count: events.len(),
             })
         }
         ScanPlan::Tron => {
-            let events = scan_tron_address(pool, redis, task, now).await?;
+            let events = scan_tron_address(pool, redis, &context, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned {
                 event_count: events.len(),
             })
         }
         ScanPlan::Btc => {
-            let events = scan_btc_address(pool, redis, task, now).await?;
+            let events = scan_btc_address(pool, redis, &context, now).await?;
             repositories::finish_address_scan(pool, task.address_id, now, next_scan_at).await?;
             Ok(ScanTaskOutcome::Scanned {
                 event_count: events.len(),
@@ -1131,6 +1324,7 @@ pub async fn run_worker(
     mut redis: MultiplexedConnection,
     scan_queue: ScanQueue,
     worker_id: String,
+    job_idle_sleep_ms: u64,
     shutdown: Arc<AtomicBool>,
 ) -> AppResult<()> {
     while !worker_shutdown_requested(&shutdown) {
@@ -1138,40 +1332,114 @@ pub async fn run_worker(
             warn!(error = %error, "address import task processing failed");
         }
 
-        match scan_queue.dequeue(&mut redis, 5).await {
-            Ok(Some(task)) => {
+        match scan_jobs::claim_due_scan_job(
+            &pool,
+            &worker_id,
+            scan_queue.lock_ttl_seconds(),
+        )
+        .await
+        {
+            Ok(Some(job)) => {
+                let task = scan_job_to_task(&job, Utc::now());
                 let task_id = task.task_id;
                 let address_id = task.address_id;
                 let started_at = Utc::now();
-                let scan_run =
-                    match create_scan_run_for_task(&pool, &task, started_at, &worker_id).await {
-                        Ok(run) => Some(run),
-                        Err(error) => {
-                            warn!(
-                                task_id = %task_id,
-                                address_id = %address_id,
-                                error = %error,
-                                "failed to create scan run audit"
-                            );
-                            None
-                        }
-                    };
-                let scan_run_id = scan_run.as_ref().map(|run| run.id);
-                let result =
-                    process_scan_task(&pool, &mut redis, &scan_queue, task, started_at).await;
-
-                if let Some(scan_run_id) = scan_run_id {
-                    if let Err(error) =
-                        finish_scan_run_for_result(&pool, scan_run_id, &result, Utc::now()).await
-                    {
+                let (renewal_shutdown, renewal_shutdown_rx) = tokio::sync::watch::channel(false);
+                let (renewal_lost_tx, mut renewal_lost_rx) = tokio::sync::watch::channel(false);
+                let renewal_handle = spawn_scan_job_lease_renewal(
+                    pool.clone(),
+                    task_id,
+                    worker_id.clone(),
+                    scan_queue.lock_ttl_seconds(),
+                    renewal_shutdown_rx,
+                    renewal_lost_tx,
+                );
+                let scan_run_result = create_scan_run_for_task(&pool, &task, started_at, &worker_id).await;
+                let mut audit_allows_scan = true;
+                let mut scan_blocker = None;
+                let scan_run = match scan_run_result {
+                    Ok(run) => Some(run),
+                    Err(error) => {
+                        audit_allows_scan = false;
+                        scan_blocker = Some(error);
                         warn!(
                             task_id = %task_id,
                             address_id = %address_id,
-                            scan_run_id = %scan_run_id,
-                            error = %error,
-                            "failed to update scan run audit"
+                            error = %scan_blocker.as_ref().expect("scan blocker just set"),
+                            "failed to create scan run audit"
                         );
+                        None
                     }
+                };
+                let scan_run_id = scan_run.as_ref().map(|run| run.id);
+                let result = if audit_allows_scan && !*renewal_lost_rx.borrow() {
+                    tokio::select! {
+                        result = process_scan_task(&pool, &mut redis, task, started_at) => result,
+                        changed = renewal_lost_rx.changed() => {
+                            if changed.is_ok() && *renewal_lost_rx.borrow() {
+                                Err(AppError::Database("scan job lease ownership lost".to_string()))
+                            } else {
+                                Err(AppError::Database("scan job lease renewal monitor closed".to_string()))
+                            }
+                        }
+                    }
+                } else {
+                    Err(scan_blocker.unwrap_or_else(|| {
+                        AppError::Database("scan job lease ownership lost before scan side effects".to_string())
+                    }))
+                };
+
+                let mut job_finalized = true;
+                let mut job_finalization_error = None;
+                if let Err(error) = finish_scan_job_and_run_for_result(
+                    &pool,
+                    task_id,
+                    &worker_id,
+                    job.attempt_count,
+                    job.max_attempts,
+                    scan_run_id,
+                    &result,
+                    Utc::now(),
+                )
+                .await
+                {
+                    job_finalized = false;
+                    job_finalization_error = Some(error.to_string());
+                    warn!(
+                        task_id = %task_id,
+                        address_id = %address_id,
+                        scan_run_id = ?scan_run_id,
+                        error = %error,
+                        "failed to update scan job state"
+                    );
+                }
+
+                if !job_finalized {
+                    if let Some(scan_run_id) = scan_run_id {
+                        let audit_error = AppError::Database(format!(
+                            "scan job finalization failed: {}",
+                            job_finalization_error
+                                .as_deref()
+                                .unwrap_or("unknown scan job finalization error")
+                        ));
+                        let result_for_audit: AppResult<ScanTaskOutcome> = Err(audit_error);
+                        if let Err(error) =
+                            finish_scan_run_for_result(&pool, scan_run_id, &result_for_audit, Utc::now()).await
+                        {
+                            warn!(
+                                task_id = %task_id,
+                                address_id = %address_id,
+                                scan_run_id = %scan_run_id,
+                                error = %error,
+                                "failed to update scan run audit"
+                            );
+                        }
+                    }
+                }
+
+                let _ = renewal_shutdown.send(true);
+                if let Err(error) = renewal_handle.await {
+                    warn!(task_id = %task_id, error = %error, "scan job lease renewal task failed");
                 }
 
                 match result {
@@ -1193,8 +1461,16 @@ pub async fn run_worker(
                     ),
                 }
             }
-            Ok(None) => {}
-            Err(error) => warn!(error = %error, "discarded invalid or failed scan queue message"),
+            Ok(None) => {
+                if let Err(error) = scan_queue.wait_for_signal(&mut redis, 5).await {
+                    warn!(error = %error, "scan wake signal wait failed");
+                    tokio::time::sleep(StdDuration::from_millis(job_idle_sleep_ms)).await;
+                }
+            }
+            Err(error) => {
+                warn!(error = %error, "failed to claim durable scan job");
+                tokio::time::sleep(StdDuration::from_millis(job_idle_sleep_ms)).await;
+            }
         }
     }
 
@@ -1356,6 +1632,23 @@ mod tests {
             assert!(function.contains("scan_runs::scan_run_context(pool, task).await?"));
             assert!(!function
                 .contains("repositories::get_scan_address_context(pool, task.address_id).await?"));
+        }
+
+        #[test]
+        fn process_locked_scan_task_passes_validated_context_to_scan_entrypoints() {
+            let source = include_str!("lib.rs");
+            let start = source
+                .find("async fn process_locked_scan_task")
+                .expect("process_locked_scan_task exists");
+            let end = source[start..]
+                .find("pub async fn run_worker")
+                .expect("run_worker follows process_locked_scan_task")
+                + start;
+            let function = &source[start..end];
+
+            assert!(function.contains("let events = scan_evm_address(pool, redis, &context, now).await?;"));
+            assert!(function.contains("let events = scan_tron_address(pool, redis, &context, now).await?;"));
+            assert!(function.contains("let events = scan_btc_address(pool, redis, &context, now).await?;"));
         }
     }
 
@@ -1582,7 +1875,7 @@ mod tests {
         use crate::worker_shutdown_requested;
 
         #[test]
-        fn set_shutdown_flag_stops_before_next_dequeue() {
+        fn set_shutdown_flag_stops_before_next_claim() {
             let shutdown = AtomicBool::new(true);
 
             assert!(worker_shutdown_requested(&shutdown));
@@ -2210,16 +2503,189 @@ mod tests {
     }
 
     #[test]
-    fn worker_source_processes_address_import_before_scan_dequeue() {
+    fn worker_source_processes_address_import_before_scan_job_claim() {
         let source = include_str!("lib.rs");
         let run_worker_index = source.find("pub async fn run_worker(").unwrap();
-        let run_worker_source = &source[run_worker_index..];
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
         let import_index = run_worker_source
             .find("process_one_address_import_task(&pool")
             .unwrap();
-        let dequeue_index = run_worker_source.find("scan_queue.dequeue").unwrap();
+        let claim_index = run_worker_source
+            .find("scan_jobs::claim_due_scan_job")
+            .unwrap();
 
-        assert!(import_index < dequeue_index);
+        assert!(import_index < claim_index);
+        assert!(!run_worker_source.contains("scan_queue.dequeue"));
+    }
+
+    #[test]
+    fn scan_job_lease_renewal_shutdown_is_wakeup_based() {
+        let source = include_str!("lib.rs");
+        let start = source.find("fn spawn_scan_job_lease_renewal(").unwrap();
+        let end = source[start..]
+            .find("async fn finish_scan_job_for_result")
+            .unwrap()
+            + start;
+        let renewal_source = &source[start..end];
+
+        assert!(renewal_source.contains("tokio::sync::watch::Receiver<bool>"));
+        assert!(renewal_source.contains("tokio::select!"));
+        assert!(renewal_source.contains("shutdown.changed()"));
+    }
+
+    #[test]
+    fn scan_job_claim_errors_back_off_before_next_loop() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
+        let error_index = run_worker_source
+            .find("failed to claim durable scan job")
+            .unwrap();
+        let after_error = &run_worker_source[error_index..];
+
+        assert!(after_error.contains("tokio::time::sleep(StdDuration::from_millis(job_idle_sleep_ms)).await"));
+    }
+
+    #[test]
+    fn scan_job_lease_renewal_covers_final_job_state_update() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
+        let finish_index = run_worker_source
+            .find("finish_scan_job_and_run_for_result(")
+            .unwrap();
+        let shutdown_index = run_worker_source.find("renewal_shutdown.send(true)").unwrap();
+
+        assert!(finish_index < shutdown_index);
+    }
+
+    #[test]
+    fn scan_job_lease_renewal_starts_before_scan_run_creation() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
+        let renewal_index = run_worker_source
+            .find("spawn_scan_job_lease_renewal(")
+            .unwrap();
+        let scan_run_index = run_worker_source.find("create_scan_run_for_task(").unwrap();
+
+        assert!(renewal_index < scan_run_index);
+    }
+
+    #[test]
+    fn scan_run_creation_uses_db_owner_guard_without_cancelling_insert() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
+        let scan_run_index = run_worker_source.find("let scan_run_result =").unwrap();
+        let scan_run_block = &run_worker_source[scan_run_index..];
+        let scan_run_match_index = scan_run_block.find("let scan_run = match scan_run_result").unwrap();
+        let scan_run_creation = &scan_run_block[..scan_run_match_index];
+
+        assert!(scan_run_creation.contains(
+            "let scan_run_result = create_scan_run_for_task(&pool, &task, started_at, &worker_id).await;"
+        ));
+        assert!(!scan_run_creation.contains("tokio::select!"));
+        assert!(scan_run_block.contains("audit_allows_scan = false"));
+        assert!(scan_run_block.contains("if audit_allows_scan && !*renewal_lost_rx.borrow()"));
+    }
+
+    #[test]
+    fn scan_run_creation_failure_blocks_scan_side_effects() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
+        let scan_run_index = run_worker_source.find("let scan_run = match scan_run_result").unwrap();
+        let scan_run_block = &run_worker_source[scan_run_index..];
+        let process_index = scan_run_block.find("process_scan_task(").unwrap();
+        let before_process = &scan_run_block[..process_index];
+
+        assert!(before_process.contains("scan_blocker = Some(error)"));
+        assert!(before_process.contains("audit_allows_scan = false"));
+        assert!(!before_process.contains("if *renewal_lost_rx.borrow()"));
+    }
+
+    #[test]
+    fn scan_job_and_scan_run_success_finalize_in_one_transaction() {
+        let source = include_str!("lib.rs");
+        let start = source.find("async fn finish_scan_job_and_run_for_result").unwrap();
+        let end = source[start..]
+            .find("pub async fn process_one_address_import_task")
+            .unwrap()
+            + start;
+        let function = &source[start..end];
+        let begin_index = function.find(".begin()").unwrap();
+        let job_index = function.find("finish_scan_job_for_result_in_transaction").unwrap();
+        let run_index = function.find("finish_scan_run_for_result_in_transaction").unwrap();
+        let commit_index = function.find(".commit()").unwrap();
+
+        assert!(begin_index < job_index);
+        assert!(job_index < run_index);
+        assert!(run_index < commit_index);
+    }
+
+    #[test]
+    fn scan_run_audit_fallback_only_runs_when_scan_job_finalization_fails() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
+        let finalization_index = run_worker_source.find("finish_scan_job_and_run_for_result(").unwrap();
+        let after_finalization = &run_worker_source[finalization_index..];
+        let finish_run_index = after_finalization.find("finish_scan_run_for_result(").unwrap();
+        let before_finish_run = &after_finalization[..finish_run_index];
+
+        assert!(before_finish_run.contains("job_finalization_error = Some(error.to_string())"));
+        assert!(before_finish_run.contains("if !job_finalized"));
+        assert!(!before_finish_run.contains("let result_for_audit = if job_finalized"));
+    }
+
+    #[test]
+    fn scan_job_renewal_loss_aborts_scan_side_effects() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
+        let renewal_loss_index = run_worker_source.find("renewal_lost_rx").unwrap();
+        let process_index = run_worker_source.find("process_scan_task(").unwrap();
+
+        assert!(run_worker_source.contains("tokio::select!"));
+        assert!(renewal_loss_index < process_index);
+        assert!(run_worker_source.contains("scan job lease ownership lost"));
+    }
+
+    #[test]
+    fn scan_job_renewal_errors_report_ownership_loss() {
+        let source = include_str!("lib.rs");
+        let start = source.find("fn spawn_scan_job_lease_renewal(").unwrap();
+        let end = source[start..]
+            .find("async fn finish_scan_job_for_result")
+            .unwrap()
+            + start;
+        let renewal_source = &source[start..end];
+
+        assert!(renewal_source.contains("ownership_lost.send(true)"));
+        assert!(renewal_source.contains("failed to renew scan job lease"));
+    }
+
+    #[test]
+    fn scan_job_finalization_checks_ownership_before_success_audit() {
+        let source = include_str!("lib.rs");
+        let run_worker_index = source.find("pub async fn run_worker(").unwrap();
+        let tests_index = source.find("#[cfg(test)]").unwrap();
+        let run_worker_source = &source[run_worker_index..tests_index];
+        let finish_job_index = run_worker_source.find("finish_scan_job_and_run_for_result(").unwrap();
+        let finalizer_source = &source[source.find("async fn finish_scan_job_and_run_for_result").unwrap()..];
+        let finish_run_index = finalizer_source.find("finish_scan_run_for_result_in_transaction").unwrap();
+
+        assert!(run_worker_source[finish_job_index..].contains("job_finalized = false"));
+        assert!(finalizer_source[..finish_run_index].contains("finish_scan_job_for_result_in_transaction"));
     }
 
     #[test]

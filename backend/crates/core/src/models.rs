@@ -740,6 +740,39 @@ pub struct RetryScanRunResponse {
     pub task: ScanAddressTask,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ScanJob {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub address_id: Uuid,
+    pub chain_id: Uuid,
+    pub status: String,
+    pub attempt_count: i32,
+    pub max_attempts: i32,
+    pub next_attempt_at: DateTime<Utc>,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub locked_by: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub last_scan_run_id: Option<Uuid>,
+    pub retry_of_scan_run_id: Option<Uuid>,
+    pub succeeded_at: Option<DateTime<Utc>>,
+    pub dead_lettered_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ScanJobStatusCounts {
+    pub pending: i64,
+    pub retryable: i64,
+    pub processing: i64,
+    pub succeeded: i64,
+    pub dead_letter: i64,
+    pub stale_processing: i64,
+    pub next_attempt_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventStatus {
     pub last_24h_total: i64,

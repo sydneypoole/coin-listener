@@ -54,7 +54,15 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    run_worker(postgres, redis, scan_queue, worker_id, shutdown).await?;
+    run_worker(
+        postgres,
+        redis,
+        scan_queue,
+        worker_id,
+        config.scan.job_idle_sleep_ms,
+        shutdown,
+    )
+    .await?;
 
     info!(service = "worker", "service stopped");
     Ok(())

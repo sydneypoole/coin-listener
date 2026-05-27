@@ -1,12 +1,15 @@
 use chrono::{DateTime, Utc};
 use coin_listener_core::{
     models::{
-        ScanAddressContext, ScanAddressTask, ScanRun, ScanRunDetail, ScanRunListItem, ScanRunQuery,
+        ScanAddressContext, ScanAddressTask, ScanJob, ScanRun, ScanRunDetail, ScanRunListItem,
+        ScanRunQuery,
     },
     AppError, AppResult,
 };
-use sqlx::{FromRow, PgPool};
+use sqlx::{Executor, FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
+
+use crate::scan_jobs;
 
 pub const SCAN_RUN_STATUS_RUNNING: &str = "running";
 pub const SCAN_RUN_STATUS_SUCCESS: &str = "success";
@@ -15,13 +18,42 @@ pub const SCAN_RUN_STATUS_LOCKED: &str = "locked";
 pub const SCAN_RUN_STATUS_UNSUPPORTED: &str = "unsupported";
 
 pub const INSERT_SCAN_RUN_QUERY: &str = r#"
-INSERT INTO scan_runs (
-    tenant_id, task_id, address_id, chain_id, chain_type, status, started_at, metadata
+WITH live_job AS (
+    SELECT sj.id
+    FROM scan_jobs sj
+    WHERE sj.id = $2
+      AND sj.locked_by = $6
+      AND sj.status = 'processing'
+      AND sj.lease_expires_at > NOW()
+    FOR UPDATE
+),
+new_run AS (
+    INSERT INTO scan_runs (
+        tenant_id, task_id, address_id, chain_id, chain_type, status, started_at, metadata
+    )
+    SELECT $1, $2, $3, $4, $5, 'running', $7, $8
+    FROM live_job
+    RETURNING id, tenant_id, task_id, address_id, chain_id, chain_type, status,
+              event_count, started_at, finished_at, duration_ms, error_message,
+              metadata, created_at, updated_at
+),
+linked_job AS (
+    UPDATE scan_jobs sj
+    SET last_scan_run_id = new_run.id,
+        updated_at = NOW()
+    FROM new_run
+    WHERE sj.id = $2
+      AND sj.locked_by = $6
+      AND sj.status = 'processing'
+      AND sj.lease_expires_at > NOW()
+    RETURNING sj.id
 )
-VALUES ($1, $2, $3, $4, $5, 'running', $6, $7)
-RETURNING id, tenant_id, task_id, address_id, chain_id, chain_type, status,
-          event_count, started_at, finished_at, duration_ms, error_message,
-          metadata, created_at, updated_at
+SELECT new_run.id, new_run.tenant_id, new_run.task_id, new_run.address_id,
+       new_run.chain_id, new_run.chain_type, new_run.status, new_run.event_count,
+       new_run.started_at, new_run.finished_at, new_run.duration_ms,
+       new_run.error_message, new_run.metadata, new_run.created_at, new_run.updated_at
+FROM new_run
+JOIN linked_job ON TRUE
 "#;
 
 pub const FINISH_SCAN_RUN_QUERY: &str = r#"
@@ -139,6 +171,18 @@ SET metadata = metadata || jsonb_build_object('retry_enqueued_at', $3::text),
 WHERE id = $1
   AND tenant_id = $2
   AND metadata->>'retry_task_id' = $4
+"#;
+
+pub const MARK_RETRY_SCAN_RUN_ENQUEUED_IN_TRANSACTION_QUERY: &str = r#"
+UPDATE scan_runs
+SET metadata = (metadata - 'retry_enqueue_error') || jsonb_build_object(
+        'retry_task_id', $3::text,
+        'retry_claimed_at', $4::text,
+        'retry_enqueued_at', $4::text
+    ),
+    updated_at = NOW()
+WHERE id = $1
+  AND tenant_id = $2
 "#;
 
 pub const CLEAR_RETRY_SCAN_RUN_CLAIM_QUERY: &str = r#"
@@ -290,6 +334,7 @@ pub async fn create_scan_run(
     pool: &PgPool,
     task: &ScanAddressTask,
     context: &ScanAddressContext,
+    worker_id: &str,
     started_at: DateTime<Utc>,
     metadata: serde_json::Value,
 ) -> AppResult<ScanRun> {
@@ -299,11 +344,13 @@ pub async fn create_scan_run(
         .bind(context.id)
         .bind(context.chain_id)
         .bind(&context.chain_type)
+        .bind(worker_id)
         .bind(started_at)
         .bind(metadata)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await
-        .map_err(|error| AppError::Database(error.to_string()))
+        .map_err(|error| AppError::Database(error.to_string()))?
+        .ok_or_else(|| AppError::NotFound("scan job".to_string()))
 }
 
 pub async fn finish_scan_run(
@@ -315,6 +362,30 @@ pub async fn finish_scan_run(
     error_message: Option<&str>,
     metadata: serde_json::Value,
 ) -> AppResult<ScanRun> {
+    finish_scan_run_with_executor(
+        pool,
+        scan_run_id,
+        status,
+        event_count,
+        finished_at,
+        error_message,
+        metadata,
+    )
+    .await
+}
+
+pub async fn finish_scan_run_with_executor<'e, E>(
+    executor: E,
+    scan_run_id: Uuid,
+    status: &str,
+    event_count: i32,
+    finished_at: DateTime<Utc>,
+    error_message: Option<&str>,
+    metadata: serde_json::Value,
+) -> AppResult<ScanRun>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     validate_scan_run_status(status)?;
     sqlx::query_as::<_, ScanRun>(FINISH_SCAN_RUN_QUERY)
         .bind(scan_run_id)
@@ -323,7 +394,7 @@ pub async fn finish_scan_run(
         .bind(finished_at)
         .bind(error_message)
         .bind(metadata)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
         .ok_or_else(|| AppError::NotFound("scan run".to_string()))
@@ -366,17 +437,46 @@ pub async fn get_scan_run_detail(
         .ok_or_else(|| AppError::NotFound("scan run".to_string()))
 }
 
-pub async fn retry_scan_run_task(
+pub async fn retry_scan_run_job(
     pool: &PgPool,
     tenant_id: Uuid,
     id: Uuid,
     now: DateTime<Utc>,
     stale_claim_before: DateTime<Utc>,
-) -> AppResult<ScanAddressTask> {
+    max_attempts: i32,
+) -> AppResult<ScanJob> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    let job = retry_scan_run_job_in_transaction(
+        &mut transaction,
+        tenant_id,
+        id,
+        now,
+        stale_claim_before,
+        max_attempts,
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+    Ok(job)
+}
+
+async fn retry_scan_run_job_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    id: Uuid,
+    now: DateTime<Utc>,
+    stale_claim_before: DateTime<Utc>,
+    max_attempts: i32,
+) -> AppResult<ScanJob> {
     let row = sqlx::query_as::<_, RetryScanRunRow>(SELECT_RETRY_SCAN_RUN_QUERY)
         .bind(id)
         .bind(tenant_id)
-        .fetch_optional(pool)
+        .fetch_optional(transaction.as_mut())
         .await
         .map_err(|error| AppError::Database(error.to_string()))?
         .ok_or_else(|| AppError::NotFound("scan run".to_string()))?;
@@ -394,7 +494,7 @@ pub async fn retry_scan_run_task(
         .bind(task.task_id.to_string())
         .bind(now.to_rfc3339())
         .bind(stale_claim_before)
-        .fetch_optional(pool)
+        .fetch_optional(transaction.as_mut())
         .await
         .map_err(|error| AppError::Database(error.to_string()))?;
 
@@ -406,7 +506,28 @@ pub async fn retry_scan_run_task(
         ));
     }
 
-    Ok(task)
+    let job = scan_jobs::insert_retry_scan_job_in_transaction(
+        transaction,
+        row.tenant_id,
+        row.address_id,
+        row.chain_id,
+        id,
+        max_attempts,
+        now,
+    )
+    .await?
+    .ok_or_else(|| AppError::Validation("scan job already exists for address".to_string()))?;
+
+    sqlx::query(MARK_RETRY_SCAN_RUN_ENQUEUED_IN_TRANSACTION_QUERY)
+        .bind(id)
+        .bind(tenant_id)
+        .bind(job.id.to_string())
+        .bind(now.to_rfc3339())
+        .execute(transaction.as_mut())
+        .await
+        .map_err(|error| AppError::Database(error.to_string()))?;
+
+    Ok(job)
 }
 
 pub async fn mark_retry_scan_run_enqueued(
@@ -583,6 +704,19 @@ mod tests {
         assert!(SCAN_RUN_CONTEXT_QUERY.contains("wa.tenant_id = $2"));
         assert!(SCAN_RUN_CONTEXT_QUERY.contains("wa.chain_id = $3"));
         assert!(SCAN_RUN_CONTEXT_QUERY.contains("wa.status = 'active'"));
+    }
+
+    #[test]
+    fn scan_run_creation_requires_live_scan_job_owner() {
+        assert!(INSERT_SCAN_RUN_QUERY.contains("UPDATE scan_jobs sj"));
+        assert!(INSERT_SCAN_RUN_QUERY.contains("last_scan_run_id = new_run.id"));
+        assert!(INSERT_SCAN_RUN_QUERY.contains("sj.id = $2"));
+        assert!(INSERT_SCAN_RUN_QUERY.contains("sj.locked_by = $6"));
+        assert!(INSERT_SCAN_RUN_QUERY.contains("sj.status = 'processing'"));
+        assert!(INSERT_SCAN_RUN_QUERY.contains("sj.lease_expires_at > NOW()"));
+        assert!(INSERT_SCAN_RUN_QUERY.contains("INSERT INTO scan_runs"));
+        assert!(INSERT_SCAN_RUN_QUERY.contains("FROM live_job"));
+        assert!(!INSERT_SCAN_RUN_QUERY.contains("lease_expires_at > $7"));
     }
 
     #[test]
